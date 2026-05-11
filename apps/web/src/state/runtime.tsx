@@ -13,6 +13,9 @@ import { eventsUrl, fetchProgram, runProgram, stopProgram } from "@/lib/api"
 
 type RuntimeState = {
   programInfo: ProgramInfo | null
+  source: string
+  setSource: (s: string) => void
+  isDirty: boolean
   isRunning: boolean
   connected: boolean
   lastSnapshot: VarSnapshot | null
@@ -25,6 +28,7 @@ const RuntimeCtx = createContext<RuntimeState | null>(null)
 
 export function RuntimeProvider({ children }: { children: ReactNode }) {
   const [programInfo, setProgramInfo] = useState<ProgramInfo | null>(null)
+  const [source, setSource] = useState("")
   const [isRunning, setIsRunning] = useState(false)
   const [connected, setConnected] = useState(false)
   const [lastSnapshot, setLastSnapshot] = useState<VarSnapshot | null>(null)
@@ -33,7 +37,10 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     fetchProgram()
-      .then(setProgramInfo)
+      .then((p) => {
+        setProgramInfo(p)
+        setSource(p.source)
+      })
       .catch((e) => setError(String(e)))
   }, [])
 
@@ -74,7 +81,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   const run = async () => {
     setError(null)
     try {
-      await runProgram()
+      await runProgram(source)
     } catch (e) {
       setError(String(e))
     }
@@ -88,10 +95,15 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     }
   }
 
+  const isDirty = programInfo !== null && source !== programInfo.source
+
   return (
     <RuntimeCtx.Provider
       value={{
         programInfo,
+        source,
+        setSource,
+        isDirty,
         isRunning,
         connected,
         lastSnapshot,

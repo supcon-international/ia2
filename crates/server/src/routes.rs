@@ -55,8 +55,18 @@ pub async fn program() -> Json<ProgramInfo> {
     })
 }
 
-pub async fn run(State(state): State<AppState>) -> Result<Json<RunResponse>, (StatusCode, String)> {
-    let container = ironplc_bridge::compile(SAMPLE_SOURCE)
+pub async fn run(
+    State(state): State<AppState>,
+    body: String,
+) -> Result<Json<RunResponse>, (StatusCode, String)> {
+    // Empty body → fall back to the bundled sample so `curl -X POST /api/run`
+    // (no body) still works as a quick demo.
+    let source = if body.trim().is_empty() {
+        SAMPLE_SOURCE
+    } else {
+        body.as_str()
+    };
+    let container = ironplc_bridge::compile(source)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     {

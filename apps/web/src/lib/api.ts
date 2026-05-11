@@ -10,8 +10,12 @@ export async function fetchProgram(): Promise<ProgramInfo> {
   return res.json()
 }
 
-export async function runProgram(): Promise<RunResponse> {
-  const res = await fetch(`/api/run`, { method: "POST" })
+export async function runProgram(source: string): Promise<RunResponse> {
+  const res = await fetch(`/api/run`, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain" },
+    body: source,
+  })
   if (!res.ok) {
     const text = await res.text().catch(() => "")
     throw new Error(`POST /api/run → ${res.status} ${text}`)
