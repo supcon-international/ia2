@@ -72,7 +72,9 @@ pub struct ModbusConfig {
     pub host: String,
     pub port: u16,
     pub slave_id: u8,
-    pub poll_interval_ms: u64,
+    /// Polling interval in milliseconds (u32 so it round-trips through JSON
+    /// as a number rather than a TS bigint).
+    pub poll_interval_ms: u32,
     #[serde(default)]
     pub channels: Vec<ModbusChannel>,
 }

@@ -2,6 +2,7 @@ import { useState } from "react"
 import {
   ChevronDown,
   ChevronRight,
+  Cable,
   Cpu,
   FileCode2,
   Network,
@@ -23,8 +24,17 @@ import type { ApplicationKind } from "@/types/generated/ApplicationKind"
 import type { Protocol } from "@/types/generated/Protocol"
 
 export function ProjectTree() {
-  const { project, currentApp, selectApp, deleteApp, deleteDevice } =
-    useRuntime()
+  const {
+    project,
+    view,
+    currentApp,
+    currentDevice,
+    selectApp,
+    selectDevice,
+    openIoMap,
+    deleteApp,
+    deleteDevice,
+  } = useRuntime()
   const [appsOpen, setAppsOpen] = useState(true)
   const [devicesOpen, setDevicesOpen] = useState(true)
 
@@ -61,7 +71,8 @@ export function ProjectTree() {
                 onClick={() => selectApp(a.name)}
                 className={cn(
                   "flex w-full items-center gap-1.5 px-2 py-1 text-left transition-colors hover:bg-accent/40",
-                  currentApp?.name === a.name && "bg-accent/60",
+                  view === "app" && currentApp?.name === a.name &&
+                    "bg-accent/60",
                 )}
                 style={{ paddingLeft: 26 }}
               >
@@ -132,7 +143,12 @@ export function ProjectTree() {
             <ContextMenuTrigger asChild>
               <button
                 type="button"
-                className="flex w-full items-center gap-1.5 px-2 py-1 text-left transition-colors hover:bg-accent/40"
+                onClick={() => selectDevice(d.name)}
+                className={cn(
+                  "flex w-full items-center gap-1.5 px-2 py-1 text-left transition-colors hover:bg-accent/40",
+                  view === "device" && currentDevice?.name === d.name &&
+                    "bg-accent/60",
+                )}
                 style={{ paddingLeft: 26 }}
               >
                 <ProtocolIcon protocol={d.protocol} />
@@ -143,6 +159,10 @@ export function ProjectTree() {
               </button>
             </ContextMenuTrigger>
             <ContextMenuContent>
+              <ContextMenuItem onSelect={() => selectDevice(d.name)}>
+                Open
+              </ContextMenuItem>
+              <ContextMenuSeparator />
               <ContextMenuItem
                 variant="destructive"
                 onSelect={() => {
@@ -164,6 +184,22 @@ export function ProjectTree() {
           (none)
         </div>
       )}
+
+      <button
+        type="button"
+        onClick={() => void openIoMap()}
+        className={cn(
+          "mt-1 flex w-full items-center gap-1.5 border-t border-border px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent/40",
+          view === "iomap" && "bg-accent/60",
+        )}
+        style={{ paddingLeft: 12 }}
+      >
+        <Cable className="size-3.5 shrink-0 text-fuchsia-600 dark:text-fuchsia-400" />
+        <span className="flex-1 truncate font-medium">IO Mapping</span>
+        <span className="font-mono text-[9px] uppercase text-muted-foreground">
+          {project.iomap.mappings.length}
+        </span>
+      </button>
     </div>
   )
 }

@@ -11,6 +11,8 @@ import type { AppEvent } from "@/types/generated/AppEvent"
 import type { Application } from "@/types/generated/Application"
 import type { ApplicationKind } from "@/types/generated/ApplicationKind"
 import type { CheckDiagnostic } from "@/types/generated/CheckDiagnostic"
+import type { Device } from "@/types/generated/Device"
+import type { IoMap } from "@/types/generated/IoMap"
 import type { ProjectListing } from "@/types/generated/ProjectListing"
 import type { ProjectTree } from "@/types/generated/ProjectTree"
 import type { Protocol } from "@/types/generated/Protocol"
@@ -25,13 +27,19 @@ import {
   deleteDevice as apiDeleteDevice,
   eventsUrl,
   fetchApplication,
+  fetchDevice,
+  fetchIomap,
   fetchProject,
   fetchProjects as apiFetchProjects,
   openProject as apiOpenProject,
   runProgram,
   saveApplication,
   stopProgram,
+  updateDevice as apiUpdateDevice,
+  updateIomap as apiUpdateIomap,
 } from "@/lib/api"
+
+export type View = "app" | "device" | "iomap"
 
 type AppState = {
   // Project
@@ -39,12 +47,16 @@ type AppState = {
   projectLoading: boolean
   availableProjects: ProjectListing[]
 
-  // Editor
+  // Center-pane focus
+  view: View | null
   currentApp: Application | null
   source: string
   setSource: (s: string) => void
   isDirty: boolean
   diagnostics: CheckDiagnostic[]
+
+  currentDevice: Device | null
+  iomap: IoMap
 
   // Runtime
   isRunning: boolean
@@ -61,13 +73,19 @@ type AppState = {
   refreshProjects: () => Promise<void>
   refreshProject: () => Promise<void>
 
-  // App/Device actions
+  // Selection actions
   selectApp: (name: string) => Promise<void>
+  selectDevice: (name: string) => Promise<void>
+  openIoMap: () => Promise<void>
+
+  // App/Device mutations
   saveCurrentApp: () => Promise<void>
   createApp: (name: string, kind: ApplicationKind) => Promise<void>
   deleteApp: (name: string) => Promise<void>
   createDevice: (name: string, protocol: Protocol) => Promise<void>
   deleteDevice: (name: string) => Promise<void>
+  saveDevice: (device: Device) => Promise<void>
+  saveIomap: (iomap: IoMap) => Promise<void>
 
   // Runtime actions
   run: () => Promise<void>
@@ -83,9 +101,12 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     [],
   )
 
+  const [view, setView] = useState<View | null>(null)
   const [currentApp, setCurrentApp] = useState<Application | null>(null)
   const [source, setSource] = useState("")
   const [diagnostics, setDiagnostics] = useState<CheckDiagnostic[]>([])
+  const [currentDevice, setCurrentDevice] = useState<Device | null>(null)
+  const [iomap, setIomap] = useState<IoMap>({ mappings: [] })
 
   const [isRunning, setIsRunning] = useState(false)
   const [connected, setConnected] = useState(false)
@@ -139,12 +160,17 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     })()
   }, [])
 
-  // After a tree is loaded the first time, auto-select the first POU.
+  // Auto-select the first POU when a project loads and nothing is open yet.
   useEffect(() => {
-    if (!project || currentApp) return
+    if (!project || view !== null) return
     if (project.applications.length === 0) return
     void selectApp(project.applications[0].name)
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project])
+
+  // Keep the iomap state in sync with the tree.
+  useEffect(() => {
+    if (project) setIomap(project.iomap)
   }, [project])
 
   // ---------------- SSE ----------------
@@ -249,10 +275,61 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       const app = await fetchApplication(name)
       setCurrentApp(app)
       setSource(app.source)
+      setView("app")
     } catch (e) {
       setError(String(e))
     }
   }, [])
+
+  const selectDevice = useCallback(async (name: string) => {
+    setError(null)
+    try {
+      const device = await fetchDevice(name)
+      setCurrentDevice(device)
+      setView("device")
+    } catch (e) {
+      setError(String(e))
+    }
+  }, [])
+
+  const openIoMap = useCallback(async () => {
+    setError(null)
+    try {
+      const m = await fetchIomap()
+      setIomap(m)
+      setView("iomap")
+    } catch (e) {
+      setError(String(e))
+    }
+  }, [])
+
+  const saveDevice = useCallback(
+    async (device: Device) => {
+      setError(null)
+      try {
+        await apiUpdateDevice(device.name, device)
+        setCurrentDevice(device)
+        await refreshProject()
+      } catch (e) {
+        setError(String(e))
+      }
+    },
+    [refreshProject],
+  )
+
+  const saveIomap = useCallback(
+    async (next: IoMap) => {
+      setError(null)
+      try {
+        await apiUpdateIomap(next)
+        setIomap(next)
+        await refreshProject()
+      } catch (e) {
+        setError(String(e))
+      }
+    },
+    [refreshProject],
+  )
 
   const saveCurrentApp = useCallback(async () => {
     if (!currentApp) return
@@ -353,11 +430,14 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         project,
         projectLoading,
         availableProjects,
+        view,
         currentApp,
         source,
         setSource,
         isDirty,
         diagnostics,
+        currentDevice,
+        iomap,
         isRunning,
         connected,
         lastSnapshot,
@@ -368,11 +448,15 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         refreshProjects,
         refreshProject,
         selectApp,
+        selectDevice,
+        openIoMap,
         saveCurrentApp,
         createApp,
         deleteApp,
         createDevice,
         deleteDevice,
+        saveDevice,
+        saveIomap,
         run,
         stop,
       }}
