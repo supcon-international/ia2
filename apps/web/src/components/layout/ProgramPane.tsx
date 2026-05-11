@@ -1,13 +1,15 @@
-import { Play, RotateCcw, Square } from "lucide-react"
+import { Play, RotateCcw, Save, Square } from "lucide-react"
+
 import { STEditor } from "@/components/editor/STEditor"
 import { useRuntime } from "@/state/runtime"
 
 export function ProgramPane() {
   const {
-    programInfo,
+    currentApp,
     source,
     setSource,
     isDirty,
+    saveCurrentApp,
     isRunning,
     run,
     stop,
@@ -15,34 +17,62 @@ export function ProgramPane() {
     error,
   } = useRuntime()
 
+  if (!currentApp) {
+    return (
+      <main className="flex min-h-0 min-w-0 flex-col">
+        <div className="flex h-9 items-center border-b border-border px-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+          Program
+        </div>
+        <div className="grid flex-1 place-items-center p-6 text-center text-sm text-muted-foreground">
+          Select a POU from the project tree, or create one with the&nbsp;
+          <span className="font-mono">+</span> button next to "Applications".
+        </div>
+      </main>
+    )
+  }
+
   return (
     <main className="flex min-h-0 min-w-0 flex-col">
       <div className="flex h-9 items-center justify-between border-b border-border pl-3 pr-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-        <span className="flex items-center gap-2 truncate">
-          <span className="truncate">{programInfo?.name ?? "Program"}</span>
+        <span className="flex items-center gap-2 truncate normal-case tracking-normal text-foreground">
+          <span className="truncate font-mono">{currentApp.name}</span>
+          <span className="font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+            {currentApp.kind === "function_block" ? "fb" : "prg"}
+          </span>
           {isDirty && (
-            <span className="rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-[9px] normal-case tracking-normal text-amber-700 dark:text-amber-400">
+            <span className="rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-amber-700 dark:text-amber-400">
               modified
             </span>
           )}
           {diagnostics.length > 0 && (
-            <span className="rounded bg-red-500/15 px-1.5 py-0.5 font-mono text-[9px] normal-case tracking-normal text-red-700 dark:text-red-400">
+            <span className="rounded bg-red-500/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-red-700 dark:text-red-400">
               {diagnostics.length}{" "}
               {diagnostics.length === 1 ? "issue" : "issues"}
             </span>
           )}
         </span>
         <div className="flex items-center gap-1">
-          {isDirty && programInfo && (
-            <button
-              type="button"
-              onClick={() => setSource(programInfo.source)}
-              title="Revert to original"
-              className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium tracking-normal text-muted-foreground normal-case hover:bg-accent/40"
-            >
-              <RotateCcw className="size-3" />
-              Revert
-            </button>
+          {isDirty && (
+            <>
+              <button
+                type="button"
+                onClick={() => setSource(currentApp.source)}
+                title="Revert"
+                className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium tracking-normal text-muted-foreground normal-case hover:bg-accent/40"
+              >
+                <RotateCcw className="size-3" />
+                Revert
+              </button>
+              <button
+                type="button"
+                onClick={() => void saveCurrentApp()}
+                title="Save (Cmd/Ctrl+S)"
+                className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium tracking-normal text-foreground normal-case hover:bg-accent/40"
+              >
+                <Save className="size-3" />
+                Save
+              </button>
+            </>
           )}
           {isRunning ? (
             <button

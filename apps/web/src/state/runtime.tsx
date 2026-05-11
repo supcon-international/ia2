@@ -1,5 +1,6 @@
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useRef,
@@ -7,51 +8,146 @@ import {
   type ReactNode,
 } from "react"
 import type { AppEvent } from "@/types/generated/AppEvent"
+import type { Application } from "@/types/generated/Application"
+import type { ApplicationKind } from "@/types/generated/ApplicationKind"
 import type { CheckDiagnostic } from "@/types/generated/CheckDiagnostic"
-import type { ProgramInfo } from "@/types/generated/ProgramInfo"
+import type { ProjectListing } from "@/types/generated/ProjectListing"
+import type { ProjectTree } from "@/types/generated/ProjectTree"
+import type { Protocol } from "@/types/generated/Protocol"
 import type { VarSnapshot } from "@/types/generated/VarSnapshot"
 import {
   checkProgram,
+  closeProject as apiCloseProject,
+  createApplication as apiCreateApplication,
+  createDevice as apiCreateDevice,
+  createProject as apiCreateProject,
+  deleteApplication as apiDeleteApplication,
+  deleteDevice as apiDeleteDevice,
   eventsUrl,
-  fetchProgram,
+  fetchApplication,
+  fetchProject,
+  fetchProjects as apiFetchProjects,
+  openProject as apiOpenProject,
   runProgram,
+  saveApplication,
   stopProgram,
 } from "@/lib/api"
 
-type RuntimeState = {
-  programInfo: ProgramInfo | null
+type AppState = {
+  // Project
+  project: ProjectTree | null
+  projectLoading: boolean
+  availableProjects: ProjectListing[]
+
+  // Editor
+  currentApp: Application | null
   source: string
   setSource: (s: string) => void
   isDirty: boolean
+  diagnostics: CheckDiagnostic[]
+
+  // Runtime
   isRunning: boolean
   connected: boolean
   lastSnapshot: VarSnapshot | null
-  diagnostics: CheckDiagnostic[]
+
+  // Errors
   error: string | null
+
+  // Project actions
+  createProject: (name: string) => Promise<void>
+  openProject: (path: string) => Promise<void>
+  closeProject: () => Promise<void>
+  refreshProjects: () => Promise<void>
+  refreshProject: () => Promise<void>
+
+  // App/Device actions
+  selectApp: (name: string) => Promise<void>
+  saveCurrentApp: () => Promise<void>
+  createApp: (name: string, kind: ApplicationKind) => Promise<void>
+  deleteApp: (name: string) => Promise<void>
+  createDevice: (name: string, protocol: Protocol) => Promise<void>
+  deleteDevice: (name: string) => Promise<void>
+
+  // Runtime actions
   run: () => Promise<void>
   stop: () => Promise<void>
 }
 
-const RuntimeCtx = createContext<RuntimeState | null>(null)
+const Ctx = createContext<AppState | null>(null)
 
 export function RuntimeProvider({ children }: { children: ReactNode }) {
-  const [programInfo, setProgramInfo] = useState<ProgramInfo | null>(null)
+  const [project, setProject] = useState<ProjectTree | null>(null)
+  const [projectLoading, setProjectLoading] = useState(true)
+  const [availableProjects, setAvailableProjects] = useState<ProjectListing[]>(
+    [],
+  )
+
+  const [currentApp, setCurrentApp] = useState<Application | null>(null)
   const [source, setSource] = useState("")
+  const [diagnostics, setDiagnostics] = useState<CheckDiagnostic[]>([])
+
   const [isRunning, setIsRunning] = useState(false)
   const [connected, setConnected] = useState(false)
   const [lastSnapshot, setLastSnapshot] = useState<VarSnapshot | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [diagnostics, setDiagnostics] = useState<CheckDiagnostic[]>([])
+
   const esRef = useRef<EventSource | null>(null)
 
-  useEffect(() => {
-    fetchProgram()
-      .then((p) => {
-        setProgramInfo(p)
-        setSource(p.source)
-      })
-      .catch((e) => setError(String(e)))
+  // ---------------- Bootstrap ----------------
+
+  const refreshProject = useCallback(async () => {
+    try {
+      const tree = await fetchProject()
+      setProject(tree)
+      // Drop currentApp if the project lost it (e.g. deleted).
+      if (
+        tree &&
+        currentApp &&
+        !tree.applications.some((a) => a.name === currentApp.name)
+      ) {
+        setCurrentApp(null)
+        setSource("")
+      }
+    } catch (e) {
+      setError(String(e))
+    }
+  }, [currentApp])
+
+  const refreshProjects = useCallback(async () => {
+    try {
+      setAvailableProjects(await apiFetchProjects())
+    } catch (e) {
+      setError(String(e))
+    }
   }, [])
+
+  // Initial fetch.
+  useEffect(() => {
+    ;(async () => {
+      try {
+        const tree = await fetchProject()
+        setProject(tree)
+        if (!tree) {
+          setAvailableProjects(await apiFetchProjects())
+        }
+      } catch (e) {
+        setError(String(e))
+      } finally {
+        setProjectLoading(false)
+      }
+    })()
+  }, [])
+
+  // After a tree is loaded the first time, auto-select the first POU.
+  useEffect(() => {
+    if (!project || currentApp) return
+    if (project.applications.length === 0) return
+    void selectApp(project.applications[0].name)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project])
+
+  // ---------------- SSE ----------------
 
   useEffect(() => {
     const es = new EventSource(eventsUrl())
@@ -78,7 +174,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
             break
         }
       } catch {
-        /* ignore malformed payloads */
+        /* ignore */
       }
     }
     return () => {
@@ -87,7 +183,8 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  // Debounced syntax/semantic check whenever the source changes.
+  // ---------------- Diagnostics (debounced) ----------------
+
   useEffect(() => {
     if (!source) {
       setDiagnostics([])
@@ -96,55 +193,197 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     const handle = setTimeout(() => {
       checkProgram(source)
         .then(setDiagnostics)
-        .catch(() => {
-          /* ignore — the editor still works without diagnostics */
-        })
+        .catch(() => {})
     }, 300)
     return () => clearTimeout(handle)
   }, [source])
 
-  const run = async () => {
+  // ---------------- Project actions ----------------
+
+  const createProject = useCallback(async (name: string) => {
     setError(null)
     try {
-      await runProgram(source)
+      await apiCreateProject(name)
+      const tree = await fetchProject()
+      setProject(tree)
+      setCurrentApp(null)
+      setSource("")
     } catch (e) {
       setError(String(e))
     }
-  }
+  }, [])
 
-  const stop = async () => {
+  const openProject = useCallback(async (path: string) => {
+    setError(null)
+    try {
+      await apiOpenProject(path)
+      const tree = await fetchProject()
+      setProject(tree)
+      setCurrentApp(null)
+      setSource("")
+    } catch (e) {
+      setError(String(e))
+    }
+  }, [])
+
+  const closeProject = useCallback(async () => {
+    setError(null)
+    try {
+      await apiCloseProject()
+      setProject(null)
+      setCurrentApp(null)
+      setSource("")
+      setIsRunning(false)
+      setLastSnapshot(null)
+      setAvailableProjects(await apiFetchProjects())
+    } catch (e) {
+      setError(String(e))
+    }
+  }, [])
+
+  // ---------------- App / Device actions ----------------
+
+  const selectApp = useCallback(async (name: string) => {
+    setError(null)
+    try {
+      const app = await fetchApplication(name)
+      setCurrentApp(app)
+      setSource(app.source)
+    } catch (e) {
+      setError(String(e))
+    }
+  }, [])
+
+  const saveCurrentApp = useCallback(async () => {
+    if (!currentApp) return
+    try {
+      await saveApplication(currentApp.name, source)
+      setCurrentApp({ ...currentApp, source })
+    } catch (e) {
+      setError(String(e))
+    }
+  }, [currentApp, source])
+
+  const createApp = useCallback(
+    async (name: string, kind: ApplicationKind) => {
+      setError(null)
+      try {
+        const app = await apiCreateApplication(name, kind)
+        await refreshProject()
+        setCurrentApp(app)
+        setSource(app.source)
+      } catch (e) {
+        setError(String(e))
+      }
+    },
+    [refreshProject],
+  )
+
+  const deleteApp = useCallback(
+    async (name: string) => {
+      setError(null)
+      try {
+        await apiDeleteApplication(name)
+        if (currentApp?.name === name) {
+          setCurrentApp(null)
+          setSource("")
+        }
+        await refreshProject()
+      } catch (e) {
+        setError(String(e))
+      }
+    },
+    [currentApp, refreshProject],
+  )
+
+  const createDevice = useCallback(
+    async (name: string, protocol: Protocol) => {
+      setError(null)
+      try {
+        await apiCreateDevice(name, protocol)
+        await refreshProject()
+      } catch (e) {
+        setError(String(e))
+      }
+    },
+    [refreshProject],
+  )
+
+  const deleteDevice = useCallback(
+    async (name: string) => {
+      setError(null)
+      try {
+        await apiDeleteDevice(name)
+        await refreshProject()
+      } catch (e) {
+        setError(String(e))
+      }
+    },
+    [refreshProject],
+  )
+
+  // ---------------- Run / Stop ----------------
+
+  const run = useCallback(async () => {
+    setError(null)
+    try {
+      if (currentApp && source !== currentApp.source) {
+        await saveApplication(currentApp.name, source)
+        setCurrentApp({ ...currentApp, source })
+      }
+      await runProgram(currentApp?.name)
+    } catch (e) {
+      setError(String(e))
+    }
+  }, [currentApp, source])
+
+  const stop = useCallback(async () => {
     try {
       await stopProgram()
     } catch (e) {
       setError(String(e))
     }
-  }
+  }, [])
 
-  const isDirty = programInfo !== null && source !== programInfo.source
+  const isDirty = !!currentApp && currentApp.source !== source
 
   return (
-    <RuntimeCtx.Provider
+    <Ctx.Provider
       value={{
-        programInfo,
+        project,
+        projectLoading,
+        availableProjects,
+        currentApp,
         source,
         setSource,
         isDirty,
+        diagnostics,
         isRunning,
         connected,
         lastSnapshot,
-        diagnostics,
         error,
+        createProject,
+        openProject,
+        closeProject,
+        refreshProjects,
+        refreshProject,
+        selectApp,
+        saveCurrentApp,
+        createApp,
+        deleteApp,
+        createDevice,
+        deleteDevice,
         run,
         stop,
       }}
     >
       {children}
-    </RuntimeCtx.Provider>
+    </Ctx.Provider>
   )
 }
 
 export function useRuntime() {
-  const ctx = useContext(RuntimeCtx)
+  const ctx = useContext(Ctx)
   if (!ctx) throw new Error("useRuntime must be used inside RuntimeProvider")
   return ctx
 }
