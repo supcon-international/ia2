@@ -5,7 +5,7 @@ export function ProgramPane() {
   const { programInfo, isRunning, run, stop, error } = useRuntime()
 
   return (
-    <main className="flex min-w-0 flex-col border-r border-border">
+    <main className="flex min-h-0 min-w-0 flex-col">
       <div className="flex h-9 items-center justify-between border-b border-border pl-3 pr-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
         <span className="truncate">{programInfo?.name ?? "Program"}</span>
         <div className="flex items-center gap-1">

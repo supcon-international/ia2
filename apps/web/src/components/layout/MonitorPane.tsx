@@ -5,8 +5,8 @@ export function MonitorPane() {
   const vars = lastSnapshot?.vars ?? []
 
   return (
-    <aside className="flex min-w-0 flex-col">
-      <div className="flex h-9 items-center justify-between border-b border-border px-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+    <section className="flex min-h-0 min-w-0 flex-col border-t border-border bg-muted/20">
+      <div className="flex h-7 items-center justify-between border-b border-border px-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
         <span>Monitor</span>
         {lastSnapshot && (
           <span className="font-mono normal-case tracking-normal">
@@ -50,6 +50,6 @@ export function MonitorPane() {
           </ul>
         )}
       </div>
-    </aside>
+    </section>
   )
 }
