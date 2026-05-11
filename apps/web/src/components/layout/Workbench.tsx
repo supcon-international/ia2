@@ -1,13 +1,16 @@
-import { ProjectPane } from "./ProjectPane"
+import { RuntimeProvider } from "@/state/runtime"
+import { MonitorPane } from "./MonitorPane"
 import { ProgramPane } from "./ProgramPane"
-import { ConnectionsPane } from "./ConnectionsPane"
+import { ProjectPane } from "./ProjectPane"
 
 export function Workbench() {
   return (
-    <div className="grid h-screen grid-cols-[280px_1fr_320px] bg-background text-foreground">
-      <ProjectPane />
-      <ProgramPane />
-      <ConnectionsPane />
-    </div>
+    <RuntimeProvider>
+      <div className="grid h-screen grid-cols-[280px_1fr_340px] bg-background text-foreground">
+        <ProjectPane />
+        <ProgramPane />
+        <MonitorPane />
+      </div>
+    </RuntimeProvider>
   )
 }

@@ -6,6 +6,16 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+# Vendored ironplc crates (path deps into vendor/ironplc/compiler/).
+ironplc-parser = { path = "../../vendor/ironplc/compiler/parser" }
+ironplc-analyzer = { path = "../../vendor/ironplc/compiler/analyzer" }
+ironplc-codegen = { path = "../../vendor/ironplc/compiler/codegen" }
+ironplc-container = { path = "../../vendor/ironplc/compiler/container" }
+ironplc-vm = { path = "../../vendor/ironplc/compiler/vm" }
+ironplc-dsl = { path = "../../vendor/ironplc/compiler/dsl" }
+
+tokio.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+ts-rs.workspace = true
