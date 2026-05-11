@@ -1225,7 +1225,10 @@ dependencies = [
 name = "iomap-ethercat"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
  "ethercrab",
+ "iocore",
+ "project",
  "serde",
  "thiserror 2.0.18",
  "tokio",
@@ -1277,6 +1280,7 @@ name = "ironplc-bridge"
 version = "0.0.1"
 dependencies = [
  "iocore",
+ "iomap-ethercat",
  "iomap-modbus",
  "ironplc-analyzer",
  "ironplc-codegen",

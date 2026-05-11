@@ -56,6 +56,10 @@ async fn main() -> anyhow::Result<()> {
                 .put(routes::save_application)
                 .delete(routes::delete_application),
         )
+        .route(
+            "/api/applications/{name}/variables",
+            get(routes::application_variables),
+        )
         // Devices
         .route("/api/devices", post(routes::create_device))
         .route(
@@ -71,6 +75,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/run", post(routes::run))
         .route("/api/stop", post(routes::stop))
         .route("/api/events", get(routes::events))
+        // LSP bridge — WebSocket-upgraded; the browser-side monaco-
+        // languageclient connects here and talks LSP JSON-RPC to a
+        // freshly-spawned ironplc LSP process.
+        .route("/api/lsp", get(routes::lsp))
         // Internal: peek demo slave's memory for verification + UI display
         .route("/api/_demo/slave", get(routes::demo_slave))
         .layer(CorsLayer::permissive())

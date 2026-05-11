@@ -1,6 +1,7 @@
 import type { Application } from "@/types/generated/Application"
 import type { ApplicationKind } from "@/types/generated/ApplicationKind"
 import type { CheckDiagnostic } from "@/types/generated/CheckDiagnostic"
+import type { DemoSlaveSnapshot } from "@/types/generated/DemoSlaveSnapshot"
 import type { Device } from "@/types/generated/Device"
 import type { IoMap } from "@/types/generated/IoMap"
 import type { ProjectInfo } from "@/types/generated/ProjectInfo"
@@ -8,6 +9,7 @@ import type { ProjectListing } from "@/types/generated/ProjectListing"
 import type { ProjectTree } from "@/types/generated/ProjectTree"
 import type { Protocol } from "@/types/generated/Protocol"
 import type { RunResponse } from "@/types/generated/RunResponse"
+import type { VariableInfo } from "@/types/generated/VariableInfo"
 
 async function jsonOrThrow<T>(res: Response, label: string): Promise<T> {
   if (!res.ok) {
@@ -102,6 +104,15 @@ export async function deleteApplication(name: string): Promise<RunResponse> {
       method: "DELETE",
     }),
     `DELETE /api/applications/${name}`,
+  )
+}
+
+export async function fetchApplicationVariables(
+  name: string,
+): Promise<VariableInfo[]> {
+  return jsonOrThrow(
+    await fetch(`/api/applications/${encodeURIComponent(name)}/variables`),
+    `GET /api/applications/${name}/variables`,
   )
 }
 
@@ -201,4 +212,8 @@ export async function stopProgram(): Promise<RunResponse> {
 
 export function eventsUrl(): string {
   return `/api/events`
+}
+
+export async function fetchDemoSlaveSnapshot(): Promise<DemoSlaveSnapshot> {
+  return jsonOrThrow(await fetch(`/api/_demo/slave`), "GET /api/_demo/slave")
 }

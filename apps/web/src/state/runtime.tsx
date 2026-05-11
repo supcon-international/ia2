@@ -18,7 +18,6 @@ import type { ProjectTree } from "@/types/generated/ProjectTree"
 import type { Protocol } from "@/types/generated/Protocol"
 import type { VarSnapshot } from "@/types/generated/VarSnapshot"
 import {
-  checkProgram,
   closeProject as apiCloseProject,
   createApplication as apiCreateApplication,
   createDevice as apiCreateDevice,
@@ -38,6 +37,7 @@ import {
   updateDevice as apiUpdateDevice,
   updateIomap as apiUpdateIomap,
 } from "@/lib/api"
+import { LspClient } from "@/lib/lsp-client"
 
 export type View = "app" | "device" | "iomap"
 
@@ -209,19 +209,33 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  // ---------------- Diagnostics (debounced) ----------------
+  // ---------------- LSP-driven diagnostics ----------------
 
+  // One client per opened POU. Tears down on app switch / project close;
+  // publishDiagnostics from the ironplc LSP land in `diagnostics` and
+  // flow to Monaco markers + the ProgramPane header badge.
+  const lspRef = useRef<LspClient | null>(null)
   useEffect(() => {
-    if (!source) {
+    if (!currentApp) {
       setDiagnostics([])
+      lspRef.current?.dispose()
+      lspRef.current = null
       return
     }
-    const handle = setTimeout(() => {
-      checkProgram(source)
-        .then(setDiagnostics)
-        .catch(() => {})
-    }, 300)
-    return () => clearTimeout(handle)
+    const client = new LspClient({
+      uri: `file:///${currentApp.name}.st`,
+      languageId: "iec61131",
+      onDiagnostics: setDiagnostics,
+    })
+    lspRef.current = client
+    return () => {
+      client.dispose()
+      lspRef.current = null
+    }
+  }, [currentApp?.name])
+
+  useEffect(() => {
+    lspRef.current?.setSource(source)
   }, [source])
 
   // ---------------- Project actions ----------------

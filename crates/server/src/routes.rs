@@ -6,21 +6,31 @@
 use std::convert::Infallible;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::Duration;
 
 use axum::{
     Json,
-    extract::{Path as AxumPath, State},
-    response::sse::{Event, KeepAlive, Sse},
+    extract::{
+        Path as AxumPath, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
+    response::{
+        IntoResponse,
+        sse::{Event, KeepAlive, Sse},
+    },
 };
 use futures_util::stream::Stream;
-use ironplc_bridge::{CheckDiagnostic, DeviceSpec};
+use futures_util::{SinkExt, StreamExt as FuturesStreamExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::process::Command;
+use ironplc_bridge::{CheckDiagnostic, DeviceSpec, VariableInfo};
 use project::{
     Application, ApplicationKind, Device, IoMap, ProjectListing, ProjectManifest, ProjectStore,
     ProjectTree, Protocol, default_projects_dir, load_last_opened, save_last_opened,
 };
 use serde::{Deserialize, Serialize};
-use tokio_stream::StreamExt;
+use tokio_stream::StreamExt as TokioStreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use ts_rs::TS;
 
@@ -211,6 +221,20 @@ pub async fn delete_application(
     Ok(Json(RunResponse { ok: true }))
 }
 
+/// Variables declared inside the named POU. Returns an empty list rather
+/// than an error if the source can't be parsed — useful while the user is
+/// mid-typing.
+pub async fn application_variables(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<Vec<VariableInfo>>, ApiError> {
+    let source = with_project(&state, |store| {
+        store.read_application(&name).map_err(Into::into)
+    })?
+    .source;
+    Ok(Json(ironplc_bridge::extract_variables(&source)))
+}
+
 // ============================================================
 //  Devices
 // ============================================================
@@ -371,11 +395,120 @@ pub async fn events(
     State(state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let rx = state.event_tx.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|res| match res {
+    let stream = TokioStreamExt::filter_map(BroadcastStream::new(rx), |res| match res {
         Ok(event) => Event::default().json_data(&event).ok().map(Ok),
         Err(_) => None,
     });
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+}
+
+// ============================================================
+//  LSP WebSocket bridge
+// ============================================================
+
+/// Upgrade to WebSocket and bridge to a freshly-spawned ironplc LSP
+/// process. WS frames are LSP JSON-RPC bodies (no Content-Length header);
+/// the proxy adds/strips headers when talking to stdio.
+pub async fn lsp(ws: WebSocketUpgrade) -> impl IntoResponse {
+    ws.on_upgrade(handle_lsp_ws)
+}
+
+fn lsp_launcher_path() -> PathBuf {
+    if let Ok(p) = std::env::var("LSP_LAUNCHER") {
+        return PathBuf::from(p);
+    }
+    let mut path = std::env::current_exe().expect("current_exe");
+    path.pop();
+    path.push("lsp-launcher");
+    path
+}
+
+async fn handle_lsp_ws(socket: WebSocket) {
+    let cmd = lsp_launcher_path();
+    let mut child = match Command::new(&cmd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(path = %cmd.display(), %e, "failed to spawn lsp-launcher");
+            return;
+        }
+    };
+    tracing::info!(path = %cmd.display(), "lsp-launcher spawned for ws client");
+
+    let mut stdin = child.stdin.take().expect("stdin");
+    let stdout = child.stdout.take().expect("stdout");
+    let (mut ws_tx, mut ws_rx) = FuturesStreamExt::split(socket);
+
+    // WS → child stdin: add LSP Content-Length framing.
+    let to_child = async move {
+        while let Some(msg) = FuturesStreamExt::next(&mut ws_rx).await {
+            let Ok(msg) = msg else { break };
+            let text = match msg {
+                Message::Text(t) => t.to_string(),
+                Message::Close(_) => break,
+                _ => continue,
+            };
+            let body = text.as_bytes();
+            let header = format!("Content-Length: {}\r\n\r\n", body.len());
+            if stdin.write_all(header.as_bytes()).await.is_err() {
+                break;
+            }
+            if stdin.write_all(body).await.is_err() {
+                break;
+            }
+            if stdin.flush().await.is_err() {
+                break;
+            }
+        }
+    };
+
+    // child stdout → WS: strip LSP Content-Length framing.
+    let from_child = async move {
+        let mut reader = BufReader::new(stdout);
+        loop {
+            let mut content_length: Option<usize> = None;
+            // Read headers until empty line.
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line).await {
+                    Ok(0) => return,
+                    Ok(_) => {}
+                    Err(_) => return,
+                }
+                let trimmed = line.trim_end_matches(['\r', '\n']);
+                if trimmed.is_empty() {
+                    break;
+                }
+                if let Some(v) = trimmed.strip_prefix("Content-Length:") {
+                    content_length = v.trim().parse().ok();
+                }
+            }
+            let Some(len) = content_length else {
+                continue;
+            };
+            let mut body = vec![0u8; len];
+            if reader.read_exact(&mut body).await.is_err() {
+                return;
+            }
+            let Ok(text) = String::from_utf8(body) else {
+                continue;
+            };
+            if ws_tx.send(Message::Text(text.into())).await.is_err() {
+                return;
+            }
+        }
+    };
+
+    tokio::select! {
+        _ = to_child => {}
+        _ = from_child => {}
+    }
+    let _ = child.kill().await;
 }
 
 // ============================================================

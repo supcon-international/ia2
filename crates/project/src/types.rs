@@ -64,6 +64,13 @@ impl ProtocolConfig {
             ProtocolConfig::Ethercat(_) => Protocol::Ethercat,
         }
     }
+
+    pub fn channel_names(&self) -> Vec<String> {
+        match self {
+            ProtocolConfig::Modbus(c) => c.channels.iter().map(|c| c.name.clone()).collect(),
+            ProtocolConfig::Ethercat(_) => vec![],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -120,12 +127,6 @@ pub struct Device {
     pub config: ProtocolConfig,
 }
 
-#[derive(Debug, Clone, Serialize, TS)]
-#[ts(export)]
-pub struct DeviceSummary {
-    pub name: String,
-    pub protocol: Protocol,
-}
 
 // ---------------- IO Mapping ----------------
 
@@ -162,7 +163,9 @@ pub struct ProjectTree {
     pub name: String,
     pub path: String,
     pub applications: Vec<ApplicationSummary>,
-    pub devices: Vec<DeviceSummary>,
+    /// Full Device records (config inline) so the IO Mapping UI can
+    /// resolve channel kind/address without per-device fetches.
+    pub devices: Vec<Device>,
     pub iomap: IoMap,
 }
 

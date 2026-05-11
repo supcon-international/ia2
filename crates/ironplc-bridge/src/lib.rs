@@ -9,6 +9,9 @@ pub use errors::BridgeError;
 pub use runtime::{DeviceSpec, ProgramHandle, VarSnapshot, VarValue, spawn};
 
 use ironplc_container::Container;
+use ironplc_dsl::common::{
+    InitialValueAssignmentKind, LibraryElementKind, VarDecl, VariableType,
+};
 use ironplc_dsl::core::FileId;
 use ironplc_dsl::diagnostic::{Diagnostic, LineColumn};
 use ironplc_parser::options::CompilerOptions;
@@ -75,6 +78,82 @@ pub fn check(source: &str) -> Vec<CheckDiagnostic> {
         .iter()
         .map(|d| diag_to_dto(d, source))
         .collect()
+}
+
+/// A single declared variable in a POU, surfaced to the frontend so it can
+/// offer auto-complete in the IO Mapping form.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct VariableInfo {
+    pub name: String,
+    pub type_name: String,
+    /// "local" | "input" | "output" | "in_out" | "external" | "global" | "access" | "temp"
+    pub direction: String,
+}
+
+/// Parse an ST source (no full compile required) and pull out the declared
+/// variables of any PROGRAM or FUNCTION_BLOCK at the top level. Returns an
+/// empty list if parsing fails — the frontend can fall back to free text.
+pub fn extract_variables(source: &str) -> Vec<VariableInfo> {
+    let file_id = FileId::default();
+    let options = CompilerOptions::default();
+    let library = match ironplc_parser::parse_program(source, &file_id, &options) {
+        Ok(l) => l,
+        Err(_) => return vec![],
+    };
+
+    let mut out: Vec<VariableInfo> = Vec::new();
+    for element in &library.elements {
+        let vars = match element {
+            LibraryElementKind::ProgramDeclaration(p) => Some(&p.variables),
+            LibraryElementKind::FunctionBlockDeclaration(fb) => Some(&fb.variables),
+            _ => None,
+        };
+        if let Some(vars) = vars {
+            for v in vars {
+                if let Some(info) = var_decl_to_info(v) {
+                    out.push(info);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn var_decl_to_info(v: &VarDecl) -> Option<VariableInfo> {
+    let name = v.identifier.symbolic_id()?.to_string();
+    let type_name = init_type_name(&v.initializer);
+    let direction = match v.var_type {
+        VariableType::Var => "local",
+        VariableType::VarTemp => "temp",
+        VariableType::Input => "input",
+        VariableType::Output => "output",
+        VariableType::InOut => "in_out",
+        VariableType::External => "external",
+        VariableType::Global => "global",
+        VariableType::Access => "access",
+    }
+    .to_string();
+    Some(VariableInfo {
+        name,
+        type_name,
+        direction,
+    })
+}
+
+fn init_type_name(init: &InitialValueAssignmentKind) -> String {
+    use InitialValueAssignmentKind::*;
+    match init {
+        Simple(s) => s.type_name.to_string(),
+        String(s) => s.type_name().to_string(),
+        FunctionBlock(fb) => fb.type_name.to_string(),
+        LateResolvedType(t) => t.to_string(),
+        EnumeratedType(e) => e.type_name.to_string(),
+        Structure(s) => s.type_name.to_string(),
+        Array(_) => "ARRAY".into(),
+        Reference(_) => "REF_TO".into(),
+        _ => "?".into(),
+    }
 }
 
 fn diag_to_dto(d: &Diagnostic, source: &str) -> CheckDiagnostic {

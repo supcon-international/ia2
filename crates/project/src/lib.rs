@@ -23,7 +23,7 @@ pub use paths::{
 };
 pub use store::ProjectStore;
 pub use types::{
-    Application, ApplicationKind, ApplicationSummary, Device, DeviceSummary, Direction,
-    EthercatConfig, IoMap, Mapping, ModbusChannel, ModbusChannelKind, ModbusConfig,
-    ProjectListing, ProjectManifest, ProjectTree, Protocol, ProtocolConfig,
+    Application, ApplicationKind, ApplicationSummary, Device, Direction, EthercatConfig, IoMap,
+    Mapping, ModbusChannel, ModbusChannelKind, ModbusConfig, ProjectListing, ProjectManifest,
+    ProjectTree, Protocol, ProtocolConfig,
 };

@@ -114,8 +114,14 @@ async fn run_loop_async(
                     Err(e) => tracing::warn!(name = %spec.name, %e, "modbus connect failed"),
                 }
             }
-            ProtocolConfig::Ethercat(_) => {
-                tracing::warn!(name = %spec.name, "EtherCAT device skipped (not implemented yet)");
+            ProtocolConfig::Ethercat(cfg) => {
+                match iomap_ethercat::EthercatDevice::connect(spec.name.clone(), cfg).await {
+                    Ok(d) => {
+                        tracing::info!(name = %spec.name, nic = %cfg.nic, "ethercat connected");
+                        devices.push(Box::new(d));
+                    }
+                    Err(e) => tracing::warn!(name = %spec.name, %e, "ethercat connect failed"),
+                }
             }
         }
     }

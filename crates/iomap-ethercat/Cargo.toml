@@ -11,3 +11,7 @@ ethercrab.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+async-trait.workspace = true
+
+iocore = { path = "../iocore" }
+project = { path = "../project" }

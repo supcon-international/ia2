@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::errors::StoreError;
 use crate::types::{
-    Application, ApplicationKind, ApplicationSummary, Device, DeviceSummary, IoMap, ModbusConfig,
+    Application, ApplicationKind, ApplicationSummary, Device, IoMap, ModbusConfig,
     ProjectManifest, ProjectTree, Protocol, ProtocolConfig,
 };
 
@@ -77,13 +77,7 @@ impl ProjectStore {
                     kind: a.kind,
                 })
                 .collect(),
-            devices: devices
-                .into_iter()
-                .map(|d| DeviceSummary {
-                    name: d.name,
-                    protocol: d.config.protocol(),
-                })
-                .collect(),
+            devices,
             iomap,
         })
     }

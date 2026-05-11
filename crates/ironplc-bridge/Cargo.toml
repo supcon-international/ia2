@@ -23,3 +23,4 @@ ts-rs.workspace = true
 iocore = { path = "../iocore" }
 project = { path = "../project" }
 iomap-modbus = { path = "../iomap-modbus" }
+iomap-ethercat = { path = "../iomap-ethercat" }
