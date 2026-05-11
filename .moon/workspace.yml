@@ -1,0 +1,10 @@
+$schema: 'https://moonrepo.dev/schemas/workspace.json'
+
+# Where moon looks for project roots.
+projects:
+  - 'apps/*'
+  - 'crates/*'
+
+vcs:
+  manager: 'git'
+  defaultBranch: 'main'

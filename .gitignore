@@ -1,0 +1,38 @@
+# Rust
+target/
+**/*.rs.bk
+
+# Node
+node_modules/
+.pnpm-store/
+dist/
+.tanstack/
+.output/
+.nitro/
+.vinxi/
+
+# Generated types (ts-rs output)
+apps/web/src/types/generated/*
+!apps/web/src/types/generated/.gitkeep
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/settings.json.example
+*.swp
+*.swo
+
+# moon
+.moon/cache

@@ -1,0 +1,13 @@
+{
+  "name": "controlsoftware",
+  "private": true,
+  "version": "0.0.1",
+  "packageManager": "pnpm@11.0.9",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @cs/web dev",
+    "build": "pnpm --filter @cs/web build"
+  }
+}

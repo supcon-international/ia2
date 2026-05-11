@@ -1,0 +1,13 @@
+[package]
+name = "iomap-modbus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+tokio.workspace = true
+tokio-modbus.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
