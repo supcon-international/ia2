@@ -1,37 +1,45 @@
+//! HTTP route handlers.
+//!
+//! Grouped by concern (project lifecycle / POUs / devices / iomap / runtime
+//! / health) but kept in one file because the layer is still small.
+
 use std::convert::Infallible;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use axum::{
     Json,
-    extract::State,
-    http::StatusCode,
+    extract::{Path as AxumPath, State},
     response::sse::{Event, KeepAlive, Sse},
 };
 use futures_util::stream::Stream;
-use serde::Serialize;
+use ironplc_bridge::CheckDiagnostic;
+use project::{
+    Application, ApplicationKind, Device, IoMap, ProjectListing, ProjectManifest, ProjectStore,
+    ProjectTree, Protocol, default_projects_dir, load_last_opened, save_last_opened,
+};
+use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use ts_rs::TS;
 
-use ironplc_bridge::CheckDiagnostic;
-
+use crate::error::ApiError;
 use crate::events::AppEvent;
-use crate::sample::{SAMPLE_NAME, SAMPLE_SOURCE};
+use crate::sample::SAMPLE_SOURCE;
 use crate::state::AppState;
+
+// ============================================================
+//  Response types (TS-exported)
+// ============================================================
 
 #[derive(Debug, Serialize, TS)]
 #[ts(export)]
 pub struct HealthStatus {
     pub status: String,
     pub uptime_secs: u64,
+    pub project_open: bool,
     pub program_running: bool,
-}
-
-#[derive(Debug, Serialize, TS)]
-#[ts(export)]
-pub struct ProgramInfo {
-    pub name: String,
-    pub source: String,
 }
 
 #[derive(Debug, Serialize, TS)]
@@ -40,43 +48,251 @@ pub struct RunResponse {
     pub ok: bool,
 }
 
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct ProjectInfo {
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct CreateProjectRequest {
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct OpenProjectRequest {
+    pub path: String,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct CreateApplicationRequest {
+    pub name: String,
+    pub kind: ApplicationKind,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct CreateDeviceRequest {
+    pub name: String,
+    pub protocol: Protocol,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct RunRequest {
+    /// Application (POU) name to compile and run. When omitted the bundled
+    /// counter/blink sample is used (handy for curl-only smoke tests).
+    #[serde(default)]
+    pub app: Option<String>,
+}
+
+// ============================================================
+//  Health
+// ============================================================
+
 pub async fn health(State(state): State<AppState>) -> Json<HealthStatus> {
     let elapsed = state.start_time.elapsed().as_secs();
-    let running = state.program.lock().expect("program mutex poisoned").is_some();
+    let project_open = state.project.lock().expect("project mutex").is_some();
+    let program_running = state.program.lock().expect("program mutex").is_some();
     Json(HealthStatus {
         status: "ok".into(),
         uptime_secs: elapsed,
-        program_running: running,
+        project_open,
+        program_running,
     })
 }
+
+// ============================================================
+//  Project lifecycle
+// ============================================================
+
+pub async fn list_projects() -> Json<Vec<ProjectListing>> {
+    Json(scan_projects())
+}
+
+pub async fn create_project(
+    State(state): State<AppState>,
+    Json(req): Json<CreateProjectRequest>,
+) -> Result<Json<ProjectInfo>, ApiError> {
+    let root = default_projects_dir().join(&req.name);
+    let store = ProjectStore::create(root, &req.name)?;
+    let info = ProjectInfo {
+        name: store.name().into(),
+        path: store.root().display().to_string(),
+    };
+    save_last_opened(store.root());
+    *state.project.lock().expect("project mutex") = Some(store);
+    Ok(Json(info))
+}
+
+pub async fn open_project(
+    State(state): State<AppState>,
+    Json(req): Json<OpenProjectRequest>,
+) -> Result<Json<ProjectInfo>, ApiError> {
+    let path = PathBuf::from(req.path);
+    let store = ProjectStore::open(path)?;
+    let info = ProjectInfo {
+        name: store.name().into(),
+        path: store.root().display().to_string(),
+    };
+    save_last_opened(store.root());
+    *state.project.lock().expect("project mutex") = Some(store);
+    Ok(Json(info))
+}
+
+pub async fn close_project(State(state): State<AppState>) -> Json<RunResponse> {
+    if let Some(handle) = state.program.lock().expect("program").take() {
+        handle.stop();
+    }
+    *state.project.lock().expect("project") = None;
+    Json(RunResponse { ok: true })
+}
+
+pub async fn project_tree(
+    State(state): State<AppState>,
+) -> Result<Json<ProjectTree>, ApiError> {
+    with_project(&state, |store| store.tree().map_err(Into::into)).map(Json)
+}
+
+// ============================================================
+//  Applications (POUs)
+// ============================================================
+
+pub async fn get_application(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<Application>, ApiError> {
+    with_project(&state, |store| store.read_application(&name).map_err(Into::into)).map(Json)
+}
+
+pub async fn create_application(
+    State(state): State<AppState>,
+    Json(req): Json<CreateApplicationRequest>,
+) -> Result<Json<Application>, ApiError> {
+    with_project(&state, |store| {
+        store
+            .create_application(&req.name, req.kind)
+            .map_err(Into::into)
+    })
+    .map(Json)
+}
+
+pub async fn save_application(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+    body: String,
+) -> Result<Json<RunResponse>, ApiError> {
+    with_project(&state, |store| {
+        store.write_application(&name, &body).map_err(Into::into)
+    })?;
+    Ok(Json(RunResponse { ok: true }))
+}
+
+pub async fn delete_application(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<RunResponse>, ApiError> {
+    with_project(&state, |store| {
+        store.delete_application(&name).map_err(Into::into)
+    })?;
+    Ok(Json(RunResponse { ok: true }))
+}
+
+// ============================================================
+//  Devices
+// ============================================================
+
+pub async fn get_device(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<Device>, ApiError> {
+    with_project(&state, |store| store.read_device(&name).map_err(Into::into)).map(Json)
+}
+
+pub async fn create_device(
+    State(state): State<AppState>,
+    Json(req): Json<CreateDeviceRequest>,
+) -> Result<Json<Device>, ApiError> {
+    with_project(&state, |store| {
+        store
+            .create_device(&req.name, req.protocol)
+            .map_err(Into::into)
+    })
+    .map(Json)
+}
+
+pub async fn update_device(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+    Json(device): Json<Device>,
+) -> Result<Json<RunResponse>, ApiError> {
+    if device.name != name {
+        return Err(ApiError::BadRequest(format!(
+            "path name '{name}' does not match body name '{}'",
+            device.name
+        )));
+    }
+    with_project(&state, |store| store.write_device(&device).map_err(Into::into))?;
+    Ok(Json(RunResponse { ok: true }))
+}
+
+pub async fn delete_device(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<RunResponse>, ApiError> {
+    with_project(&state, |store| {
+        store.delete_device(&name).map_err(Into::into)
+    })?;
+    Ok(Json(RunResponse { ok: true }))
+}
+
+// ============================================================
+//  IO Mapping
+// ============================================================
+
+pub async fn get_iomap(State(state): State<AppState>) -> Result<Json<IoMap>, ApiError> {
+    with_project(&state, |store| store.read_iomap().map_err(Into::into)).map(Json)
+}
+
+pub async fn put_iomap(
+    State(state): State<AppState>,
+    Json(iomap): Json<IoMap>,
+) -> Result<Json<RunResponse>, ApiError> {
+    with_project(&state, |store| store.write_iomap(&iomap).map_err(Into::into))?;
+    Ok(Json(RunResponse { ok: true }))
+}
+
+// ============================================================
+//  Compile / run / stream
+// ============================================================
 
 pub async fn check(body: String) -> Json<Vec<CheckDiagnostic>> {
     Json(ironplc_bridge::check(&body))
 }
 
-pub async fn program() -> Json<ProgramInfo> {
-    Json(ProgramInfo {
-        name: SAMPLE_NAME.into(),
-        source: SAMPLE_SOURCE.into(),
-    })
-}
-
 pub async fn run(
     State(state): State<AppState>,
-    body: String,
-) -> Result<Json<RunResponse>, (StatusCode, String)> {
-    // Empty body → fall back to the bundled sample so `curl -X POST /api/run`
-    // (no body) still works as a quick demo.
-    let source = if body.trim().is_empty() {
-        SAMPLE_SOURCE
-    } else {
-        body.as_str()
+    body: Option<Json<RunRequest>>,
+) -> Result<Json<RunResponse>, ApiError> {
+    // Resolve the ST source: prefer the named app from the current project,
+    // fall back to the bundled sample if no app is named or no project open.
+    let source = match body.and_then(|Json(req)| req.app) {
+        Some(app) => {
+            let store_guard = state.project.lock().expect("project mutex");
+            let store = store_guard.as_ref().ok_or(ApiError::NoProject)?;
+            store.read_application(&app)?.source
+        }
+        None => SAMPLE_SOURCE.to_string(),
     };
-    let container = ironplc_bridge::compile(source)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    let container = ironplc_bridge::compile(&source)?;
 
     {
-        let mut guard = state.program.lock().expect("program mutex poisoned");
+        let mut guard = state.program.lock().expect("program mutex");
         if let Some(old) = guard.take() {
             old.stop();
         }
@@ -87,8 +303,6 @@ pub async fn run(
     let event_tx = state.event_tx.clone();
 
     tokio::spawn(async move {
-        // Forward snapshots even when no SSE clients are subscribed yet — they
-        // may connect later. Only exit when the bridge channel itself closes.
         while let Ok(snap) = rx.recv().await {
             let _ = event_tx.send(AppEvent::Snapshot(snap));
         }
@@ -97,7 +311,7 @@ pub async fn run(
     state
         .program
         .lock()
-        .expect("program mutex poisoned")
+        .expect("program mutex")
         .replace(handle);
     let _ = state.event_tx.send(AppEvent::Started);
 
@@ -108,7 +322,7 @@ pub async fn stop(State(state): State<AppState>) -> Json<RunResponse> {
     if let Some(handle) = state
         .program
         .lock()
-        .expect("program mutex poisoned")
+        .expect("program mutex")
         .take()
     {
         handle.stop();
@@ -123,8 +337,70 @@ pub async fn events(
     let rx = state.event_tx.subscribe();
     let stream = BroadcastStream::new(rx).filter_map(|res| match res {
         Ok(event) => Event::default().json_data(&event).ok().map(Ok),
-        // Lagged subscribers: skip the missed event rather than disconnect.
         Err(_) => None,
     });
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+}
+
+// ============================================================
+//  Helpers
+// ============================================================
+
+fn with_project<T>(
+    state: &AppState,
+    f: impl FnOnce(&ProjectStore) -> Result<T, ApiError>,
+) -> Result<T, ApiError> {
+    let guard = state.project.lock().expect("project mutex");
+    let store = guard.as_ref().ok_or(ApiError::NoProject)?;
+    f(store)
+}
+
+/// Walk the default projects dir and surface anything that looks like a
+/// project. Also includes the last-opened path if it lives elsewhere.
+fn scan_projects() -> Vec<ProjectListing> {
+    let last = load_last_opened();
+    let mut out = Vec::new();
+    let default_dir = default_projects_dir();
+    if default_dir.exists() {
+        if let Ok(entries) = fs::read_dir(&default_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                if let Some(listing) = listing_for(&path, last.as_deref()) {
+                    out.push(listing);
+                }
+            }
+        }
+    }
+    // Include the last-opened project even if it's outside the default dir.
+    if let Some(ref last_path) = last {
+        let already_listed = out.iter().any(|p| Path::new(&p.path) == last_path);
+        if !already_listed {
+            if let Some(listing) = listing_for(last_path, Some(last_path)) {
+                out.push(listing);
+            }
+        }
+    }
+    out.sort_by(|a, b| {
+        b.is_last_opened
+            .cmp(&a.is_last_opened)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    out
+}
+
+fn listing_for(path: &Path, last_opened: Option<&Path>) -> Option<ProjectListing> {
+    let manifest_path = path.join("project.toml");
+    if !manifest_path.exists() {
+        return None;
+    }
+    let text = fs::read_to_string(&manifest_path).ok()?;
+    let manifest: ProjectManifest = toml::from_str(&text).ok()?;
+    Some(ProjectListing {
+        name: manifest.name,
+        path: path.display().to_string(),
+        is_last_opened: last_opened == Some(path),
+    })
 }

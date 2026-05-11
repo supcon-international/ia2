@@ -1,3 +1,4 @@
+mod error;
 mod events;
 mod routes;
 mod sample;
@@ -7,6 +8,7 @@ use axum::{
     Router,
     routing::{get, post},
 };
+use project::{ProjectStore, load_last_opened};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
@@ -22,10 +24,34 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let state = AppState::new();
+    try_open_last_project(&state);
 
     let app = Router::new()
         .route("/health", get(routes::health))
-        .route("/api/program", get(routes::program))
+        // Project lifecycle
+        .route("/api/projects", get(routes::list_projects).post(routes::create_project))
+        .route("/api/projects/open", post(routes::open_project))
+        .route("/api/projects/close", post(routes::close_project))
+        .route("/api/project", get(routes::project_tree))
+        // Applications (POUs)
+        .route("/api/applications", post(routes::create_application))
+        .route(
+            "/api/applications/{name}",
+            get(routes::get_application)
+                .put(routes::save_application)
+                .delete(routes::delete_application),
+        )
+        // Devices
+        .route("/api/devices", post(routes::create_device))
+        .route(
+            "/api/devices/{name}",
+            get(routes::get_device)
+                .put(routes::update_device)
+                .delete(routes::delete_device),
+        )
+        // IO Mapping
+        .route("/api/iomap", get(routes::get_iomap).put(routes::put_iomap))
+        // Compile / runtime
         .route("/api/check", post(routes::check))
         .route("/api/run", post(routes::run))
         .route("/api/stop", post(routes::stop))
@@ -39,4 +65,17 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(%addr, "server listening");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn try_open_last_project(state: &AppState) {
+    let Some(path) = load_last_opened() else {
+        return;
+    };
+    match ProjectStore::open(path.clone()) {
+        Ok(store) => {
+            tracing::info!(path = %store.root().display(), "reopened last project");
+            *state.project.lock().expect("project mutex") = Some(store);
+        }
+        Err(e) => tracing::warn!(?path, %e, "failed to reopen last project"),
+    }
 }

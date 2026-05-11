@@ -20,3 +20,5 @@ ts-rs.workspace = true
 anyhow.workspace = true
 
 ironplc-bridge = { path = "../ironplc-bridge" }
+project = { path = "../project" }
+toml.workspace = true

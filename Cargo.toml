@@ -44,6 +44,10 @@ ethercrab = "0.7"
 anyhow = "1"
 thiserror = "2"
 
+# project on-disk model
+toml = "0.8"
+dirs = "5"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
