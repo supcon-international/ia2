@@ -1,7 +1,8 @@
 import Editor, { type OnMount } from "@monaco-editor/react"
 import type { editor, Monaco } from "@monaco-editor/react"
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef } from "react"
 
+import { useDarkMode } from "@/lib/dark-mode"
 import type { CheckDiagnostic } from "@/types/generated/CheckDiagnostic"
 import {
   LANGUAGE_ID,
@@ -21,22 +22,8 @@ type Props = {
 export function STEditor({ value, onChange, diagnostics }: Props) {
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null)
   const monacoRef = useRef<Monaco | null>(null)
-
-  const [theme, setTheme] = useState(() =>
-    typeof window !== "undefined" &&
-    window.matchMedia("(prefers-color-scheme: dark)").matches
-      ? "vs-dark"
-      : "light"
-  )
-
-  useEffect(() => {
-    if (typeof window === "undefined") return
-    const mq = window.matchMedia("(prefers-color-scheme: dark)")
-    const handler = (e: MediaQueryListEvent) =>
-      setTheme(e.matches ? "vs-dark" : "light")
-    mq.addEventListener("change", handler)
-    return () => mq.removeEventListener("change", handler)
-  }, [])
+  const dark = useDarkMode()
+  const theme = dark === "dark" ? "vs-dark" : "light"
 
   const handleMount: OnMount = useCallback((editorInstance, monaco) => {
     editorRef.current = editorInstance
