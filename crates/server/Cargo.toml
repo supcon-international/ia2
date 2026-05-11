@@ -21,4 +21,5 @@ anyhow.workspace = true
 
 ironplc-bridge = { path = "../ironplc-bridge" }
 project = { path = "../project" }
+iomap-modbus = { path = "../iomap-modbus" }
 toml.workspace = true

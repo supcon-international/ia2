@@ -8,11 +8,14 @@ use axum::{
     Router,
     routing::{get, post},
 };
+use iomap_modbus::{DemoSlave, run_demo_slave};
 use project::{ProjectStore, load_last_opened};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
 use crate::state::AppState;
+
+const DEMO_MODBUS_ADDR: &str = "127.0.0.1:5502";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -23,8 +26,20 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let state = AppState::new();
+    // Spin up the demo Modbus slave so users can wire a Modbus device at
+    // 127.0.0.1:5502 without external hardware. The slave is shared with
+    // AppState so the frontend can peek register/coil values.
+    let demo_slave = DemoSlave::new();
+    let state = AppState::new(demo_slave.clone());
     try_open_last_project(&state);
+
+    let slave_for_task = demo_slave.clone();
+    tokio::spawn(async move {
+        let addr = DEMO_MODBUS_ADDR.parse().expect("valid socket addr");
+        if let Err(e) = run_demo_slave(addr, slave_for_task).await {
+            tracing::error!(%e, "demo modbus slave exited");
+        }
+    });
 
     let app = Router::new()
         .route("/health", get(routes::health))
@@ -56,6 +71,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/run", post(routes::run))
         .route("/api/stop", post(routes::stop))
         .route("/api/events", get(routes::events))
+        // Internal: peek demo slave's memory for verification + UI display
+        .route("/api/_demo/slave", get(routes::demo_slave))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state);

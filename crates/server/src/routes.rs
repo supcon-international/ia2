@@ -14,7 +14,7 @@ use axum::{
     response::sse::{Event, KeepAlive, Sse},
 };
 use futures_util::stream::Stream;
-use ironplc_bridge::CheckDiagnostic;
+use ironplc_bridge::{CheckDiagnostic, DeviceSpec};
 use project::{
     Application, ApplicationKind, Device, IoMap, ProjectListing, ProjectManifest, ProjectStore,
     ProjectTree, Protocol, default_projects_dir, load_last_opened, save_last_opened,
@@ -32,6 +32,15 @@ use crate::state::AppState;
 // ============================================================
 //  Response types (TS-exported)
 // ============================================================
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct DemoSlaveSnapshot {
+    pub coils: Vec<bool>,
+    pub discrete_inputs: Vec<bool>,
+    pub holding_registers: Vec<u16>,
+    pub input_registers: Vec<u16>,
+}
 
 #[derive(Debug, Serialize, TS)]
 #[ts(export)]
@@ -278,15 +287,26 @@ pub async fn run(
     State(state): State<AppState>,
     body: Option<Json<RunRequest>>,
 ) -> Result<Json<RunResponse>, ApiError> {
-    // Resolve the ST source: prefer the named app from the current project,
-    // fall back to the bundled sample if no app is named or no project open.
-    let source = match body.and_then(|Json(req)| req.app) {
+    // Source + devices + mappings all come from the open project (when an
+    // app is named); a no-body request falls back to the bundled sample with
+    // no IO at all (handy for curl smoke tests).
+    let (source, device_specs, mappings) = match body.and_then(|Json(req)| req.app) {
         Some(app) => {
             let store_guard = state.project.lock().expect("project mutex");
             let store = store_guard.as_ref().ok_or(ApiError::NoProject)?;
-            store.read_application(&app)?.source
+            let source = store.read_application(&app)?.source;
+            let devices = store.list_devices()?;
+            let iomap = store.read_iomap()?;
+            let specs = devices
+                .into_iter()
+                .map(|d| DeviceSpec {
+                    name: d.name,
+                    config: d.config,
+                })
+                .collect::<Vec<_>>();
+            (source, specs, iomap.mappings)
         }
-        None => SAMPLE_SOURCE.to_string(),
+        None => (SAMPLE_SOURCE.to_string(), vec![], vec![]),
     };
 
     let container = ironplc_bridge::compile(&source)?;
@@ -298,7 +318,7 @@ pub async fn run(
         }
     }
 
-    let handle = ironplc_bridge::spawn(container);
+    let handle = ironplc_bridge::spawn(container, device_specs, mappings);
     let mut rx = handle.subscribe();
     let event_tx = state.event_tx.clone();
 
@@ -329,6 +349,22 @@ pub async fn stop(State(state): State<AppState>) -> Json<RunResponse> {
     }
     let _ = state.event_tx.send(AppEvent::Stopped);
     Json(RunResponse { ok: true })
+}
+
+/// First 32 entries of each address space in the in-process demo slave.
+/// Useful for verifying that the scan loop wrote to / read from the bus.
+pub async fn demo_slave(State(state): State<AppState>) -> Json<DemoSlaveSnapshot> {
+    const N: usize = 32;
+    let coils = state.demo_slave.coils().lock().unwrap()[..N].to_vec();
+    let discrete_inputs = state.demo_slave.discrete_inputs().lock().unwrap()[..N].to_vec();
+    let holding_registers = state.demo_slave.holding_registers().lock().unwrap()[..N].to_vec();
+    let input_registers = state.demo_slave.input_registers().lock().unwrap()[..N].to_vec();
+    Json(DemoSlaveSnapshot {
+        coils,
+        discrete_inputs,
+        holding_registers,
+        input_registers,
+    })
 }
 
 pub async fn events(
