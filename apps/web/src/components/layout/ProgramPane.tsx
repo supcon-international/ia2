@@ -11,6 +11,7 @@ export function ProgramPane() {
     isRunning,
     run,
     stop,
+    diagnostics,
     error,
   } = useRuntime()
 
@@ -22,6 +23,12 @@ export function ProgramPane() {
           {isDirty && (
             <span className="rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-[9px] normal-case tracking-normal text-amber-700 dark:text-amber-400">
               modified
+            </span>
+          )}
+          {diagnostics.length > 0 && (
+            <span className="rounded bg-red-500/15 px-1.5 py-0.5 font-mono text-[9px] normal-case tracking-normal text-red-700 dark:text-red-400">
+              {diagnostics.length}{" "}
+              {diagnostics.length === 1 ? "issue" : "issues"}
             </span>
           )}
         </span>
@@ -64,7 +71,11 @@ export function ProgramPane() {
         </div>
       )}
       <div className="flex-1 min-h-0">
-        <STEditor value={source} onChange={setSource} />
+        <STEditor
+          value={source}
+          onChange={setSource}
+          diagnostics={diagnostics}
+        />
       </div>
     </main>
   )

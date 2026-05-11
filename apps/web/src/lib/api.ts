@@ -1,3 +1,4 @@
+import type { CheckDiagnostic } from "@/types/generated/CheckDiagnostic"
 import type { ProgramInfo } from "@/types/generated/ProgramInfo"
 import type { RunResponse } from "@/types/generated/RunResponse"
 
@@ -31,4 +32,14 @@ export async function stopProgram(): Promise<RunResponse> {
 
 export function eventsUrl(): string {
   return `/api/events`
+}
+
+export async function checkProgram(source: string): Promise<CheckDiagnostic[]> {
+  const res = await fetch(`/api/check`, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain" },
+    body: source,
+  })
+  if (!res.ok) throw new Error(`POST /api/check → ${res.status}`)
+  return res.json()
 }

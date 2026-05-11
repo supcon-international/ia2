@@ -26,6 +26,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/health", get(routes::health))
         .route("/api/program", get(routes::program))
+        .route("/api/check", post(routes::check))
         .route("/api/run", post(routes::run))
         .route("/api/stop", post(routes::stop))
         .route("/api/events", get(routes::events))

@@ -1,0 +1,15 @@
+[package]
+name = "lsp-launcher"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Vendored ironplc-cli — we only use its library-side `lsp::start()` here.
+ironplc-cli = { path = "../../vendor/ironplc/compiler/ironplc-cli" }
+env_logger = "0.11"
+
+[[bin]]
+name = "lsp-launcher"
+path = "src/main.rs"

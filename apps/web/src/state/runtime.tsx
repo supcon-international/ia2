@@ -7,9 +7,16 @@ import {
   type ReactNode,
 } from "react"
 import type { AppEvent } from "@/types/generated/AppEvent"
+import type { CheckDiagnostic } from "@/types/generated/CheckDiagnostic"
 import type { ProgramInfo } from "@/types/generated/ProgramInfo"
 import type { VarSnapshot } from "@/types/generated/VarSnapshot"
-import { eventsUrl, fetchProgram, runProgram, stopProgram } from "@/lib/api"
+import {
+  checkProgram,
+  eventsUrl,
+  fetchProgram,
+  runProgram,
+  stopProgram,
+} from "@/lib/api"
 
 type RuntimeState = {
   programInfo: ProgramInfo | null
@@ -19,6 +26,7 @@ type RuntimeState = {
   isRunning: boolean
   connected: boolean
   lastSnapshot: VarSnapshot | null
+  diagnostics: CheckDiagnostic[]
   error: string | null
   run: () => Promise<void>
   stop: () => Promise<void>
@@ -33,6 +41,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   const [connected, setConnected] = useState(false)
   const [lastSnapshot, setLastSnapshot] = useState<VarSnapshot | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [diagnostics, setDiagnostics] = useState<CheckDiagnostic[]>([])
   const esRef = useRef<EventSource | null>(null)
 
   useEffect(() => {
@@ -78,6 +87,22 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
+  // Debounced syntax/semantic check whenever the source changes.
+  useEffect(() => {
+    if (!source) {
+      setDiagnostics([])
+      return
+    }
+    const handle = setTimeout(() => {
+      checkProgram(source)
+        .then(setDiagnostics)
+        .catch(() => {
+          /* ignore — the editor still works without diagnostics */
+        })
+    }, 300)
+    return () => clearTimeout(handle)
+  }, [source])
+
   const run = async () => {
     setError(null)
     try {
@@ -107,6 +132,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         isRunning,
         connected,
         lastSnapshot,
+        diagnostics,
         error,
         run,
         stop,

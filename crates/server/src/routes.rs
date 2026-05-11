@@ -13,6 +13,8 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use ts_rs::TS;
 
+use ironplc_bridge::CheckDiagnostic;
+
 use crate::events::AppEvent;
 use crate::sample::{SAMPLE_NAME, SAMPLE_SOURCE};
 use crate::state::AppState;
@@ -46,6 +48,10 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthStatus> {
         uptime_secs: elapsed,
         program_running: running,
     })
+}
+
+pub async fn check(body: String) -> Json<Vec<CheckDiagnostic>> {
+    Json(ironplc_bridge::check(&body))
 }
 
 pub async fn program() -> Json<ProgramInfo> {

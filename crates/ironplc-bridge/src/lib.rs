@@ -10,7 +10,10 @@ pub use runtime::{ProgramHandle, VarSnapshot, VarValue, spawn};
 
 use ironplc_container::Container;
 use ironplc_dsl::core::FileId;
+use ironplc_dsl::diagnostic::{Diagnostic, LineColumn};
 use ironplc_parser::options::CompilerOptions;
+use serde::Serialize;
+use ts_rs::TS;
 
 /// Compile an IEC 61131-3 Structured Text source string into an executable
 /// ironplc bytecode `Container`. Uses dialect Ed2 with no vendor extensions.
@@ -33,4 +36,57 @@ pub fn compile(source: &str) -> Result<Container, BridgeError> {
         .map_err(|d| BridgeError::Codegen(format!("{d:?}")))?;
 
     Ok(container)
+}
+
+/// One diagnostic in source-positioned form (1-indexed line/column for the
+/// Monaco editor). Severity is "error" for now — ironplc emits a single
+/// diagnostic stream without warning/info distinction at this layer.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct CheckDiagnostic {
+    pub severity: String,
+    pub code: String,
+    pub message: String,
+    pub start_line: u32,
+    pub start_column: u32,
+    pub end_line: u32,
+    pub end_column: u32,
+}
+
+/// Parse + analyse a Structured Text source and return all diagnostics
+/// (syntax errors, type errors, undeclared identifiers, etc.). Does NOT run
+/// codegen — this is the fast path for editor squiggles.
+pub fn check(source: &str) -> Vec<CheckDiagnostic> {
+    let file_id = FileId::default();
+    let options = CompilerOptions::default();
+
+    let library = match ironplc_parser::parse_program(source, &file_id, &options) {
+        Ok(l) => l,
+        Err(d) => return vec![diag_to_dto(&d, source)],
+    };
+
+    let (_, context) = match ironplc_analyzer::stages::analyze(&[&library], &options) {
+        Ok(t) => t,
+        Err(ds) => return ds.iter().map(|d| diag_to_dto(d, source)).collect(),
+    };
+
+    context
+        .diagnostics()
+        .iter()
+        .map(|d| diag_to_dto(d, source))
+        .collect()
+}
+
+fn diag_to_dto(d: &Diagnostic, source: &str) -> CheckDiagnostic {
+    let start = LineColumn::from_offset(source, d.primary.location.start);
+    let end = LineColumn::from_offset(source, d.primary.location.end);
+    CheckDiagnostic {
+        severity: "error".into(),
+        code: d.code.clone(),
+        message: d.description(),
+        start_line: start.line + 1,
+        start_column: start.column + 1,
+        end_line: end.line + 1,
+        end_column: end.column + 1,
+    }
 }
