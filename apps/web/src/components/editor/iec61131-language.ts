@@ -2,7 +2,7 @@ import type { editor, languages } from "monaco-editor"
 
 export const LANGUAGE_ID = "iec61131"
 
-const keywords = [
+export const keywords = [
   "PROGRAM", "END_PROGRAM",
   "FUNCTION", "END_FUNCTION",
   "FUNCTION_BLOCK", "END_FUNCTION_BLOCK",
@@ -25,7 +25,7 @@ const keywords = [
   "REF_TO", "REF", "NULL",
 ]
 
-const typeKeywords = [
+export const typeKeywords = [
   "BOOL", "BYTE", "WORD", "DWORD", "LWORD",
   "SINT", "INT", "DINT", "LINT",
   "USINT", "UINT", "UDINT", "ULINT",
@@ -37,7 +37,7 @@ const typeKeywords = [
   "ARRAY", "ANY", "ANY_INT", "ANY_NUM", "ANY_REAL", "ANY_BIT", "ANY_STRING",
 ]
 
-const builtins = [
+export const builtins = [
   "ABS", "SQRT", "LN", "LOG", "EXP",
   "SIN", "COS", "TAN", "ASIN", "ACOS", "ATAN",
   "MIN", "MAX", "LIMIT", "MUX", "SEL",
