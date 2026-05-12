@@ -46,27 +46,39 @@ pub fn compile(source: &str) -> Result<Container, BridgeError> {
     Ok(container)
 }
 
-/// Compile a whole project: concatenate every POU source, synthesize one
-/// IEC `CONFIGURATION` block from `tasks.toml`, and hand the combined
-/// text to `compile`.
-///
-/// POU files should NOT contain their own CONFIGURATION blocks — the
-/// auto-migration step strips them on first open of legacy projects. If
-/// any survive (e.g. user pasted one in by hand), they're stripped here
-/// so the synthesized one wins without conflict.
+/// Compile a whole project against the schedule stored in `tasks.toml`.
+/// Thin wrapper over `compile_project_with_tasks` that reads the schedule
+/// from disk — the natural entry point for "Run the project" / Deploy.
 pub fn compile_project(store: &project::ProjectStore) -> Result<Container, BridgeError> {
-    let pou_paths = store
-        .list_pou_paths()
-        .map_err(|e| BridgeError::Parse(format!("listing pous: {e}")))?;
     let tasks = store
         .read_tasks()
         .map_err(|e| BridgeError::Parse(format!("reading tasks.toml: {e}")))?
         .unwrap_or_default();
+    compile_project_with_tasks(store, &tasks)
+}
+
+/// Same as `compile_project` but takes an explicit `Tasks` instead of
+/// reading `tasks.toml`. Lets the server layer compose ad-hoc schedules
+/// (e.g. "Run just THIS POU once, ignoring the persisted schedule") for
+/// the ProgramPane Run button without touching tasks.toml on disk.
+///
+/// POU files should NOT contain their own CONFIGURATION blocks — the
+/// auto-migration step strips them on first open of legacy projects.
+/// If any survive (e.g. user pasted one in by hand), they're stripped
+/// here so the synthesized one wins without conflict.
+pub fn compile_project_with_tasks(
+    store: &project::ProjectStore,
+    tasks: &project::Tasks,
+) -> Result<Container, BridgeError> {
+    let pou_paths = store
+        .list_pou_paths()
+        .map_err(|e| BridgeError::Parse(format!("listing pous: {e}")))?;
 
     if tasks.programs.is_empty() {
         return Err(BridgeError::Parse(
-            "no PROGRAM instances declared in tasks.toml — bind a PROGRAM \
-             to a task in the Tasks pane before running"
+            "no PROGRAM instances to run — bind a PROGRAM to a task in the \
+             Tasks pane, or click Run from a POU file's editor (which schedules \
+             that PROGRAM ad-hoc for one run)"
                 .into(),
         ));
     }
@@ -82,8 +94,31 @@ pub fn compile_project(store: &project::ProjectStore) -> Result<Container, Bridg
             combined.push('\n');
         }
     }
-    combined.push_str(&synthesize_configuration(&tasks));
+    combined.push_str(&synthesize_configuration(tasks));
     tracing::debug!(len = combined.len(), "compile_project: combined source built");
+    compile(&combined)
+}
+
+/// Compile a single POU source + synthesized CONFIGURATION. Used by the
+/// ProgramPane's ad-hoc Run path so opening cascade_pid.st and clicking
+/// Run actually runs cascade_pid in isolation — without ironplc's debug
+/// section pulling in variables from PROGRAMs declared in *other* files
+/// (which is what happens when `compile_project` concatenates everything).
+pub fn compile_isolated_source(
+    source: &str,
+    tasks: &project::Tasks,
+) -> Result<Container, BridgeError> {
+    if tasks.programs.is_empty() {
+        return Err(BridgeError::Parse(
+            "no PROGRAM instance to run".into(),
+        ));
+    }
+    let mut combined = String::with_capacity(source.len() + 256);
+    combined.push_str(&strip_any_configuration(source));
+    if !combined.ends_with('\n') {
+        combined.push('\n');
+    }
+    combined.push_str(&synthesize_configuration(tasks));
     compile(&combined)
 }
 

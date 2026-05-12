@@ -253,12 +253,26 @@ export async function checkProgram(source: string): Promise<CheckDiagnostic[]> {
   )
 }
 
-export async function runProgram(): Promise<RunResponse> {
+/**
+ * Run a project.
+ *
+ * - No args → use the project's `tasks.toml` schedule (every PROGRAM
+ *   instance declared there). The "production" path.
+ * - `(program, file_path)` → ad-hoc one-shot: spawn a synthetic single-
+ *   PROGRAM schedule on a default 100 ms task. When `file_path` is also
+ *   set, the compile input is limited to that file alone — Monitor only
+ *   sees the running PROGRAM's variables (no bleed from other POUs).
+ */
+export async function runProgram(
+  program?: string,
+  file_path?: string,
+): Promise<RunResponse> {
+  const body = program ? (file_path ? { program, file_path } : { program }) : {}
   return jsonOrThrow(
     await fetch(`/api/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: "{}",
+      body: JSON.stringify(body),
     }),
     "POST /api/run",
   )

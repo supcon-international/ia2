@@ -135,14 +135,37 @@ export function ProgramPane() {
               Stop
             </button>
           ) : (
-            <button
-              type="button"
-              onClick={run}
-              className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium tracking-normal text-emerald-700 normal-case hover:bg-emerald-100 dark:text-emerald-400 dark:hover:bg-emerald-950/50"
-            >
-              <Play className="size-3 fill-current" />
-              Run
-            </button>
+            (() => {
+              // Run this file's PROGRAM ad-hoc (not whatever's in
+              // tasks.toml). The first declared PROGRAM in the file wins
+              // — typical case is one PROGRAM per file. If the file has
+              // none (FB-only or Function-only), Run is disabled with a
+              // tooltip steering the user to the Tasks pane.
+              const target = currentPou.declarations.find(
+                (d) => d.type === "program",
+              )
+              return target ? (
+                <button
+                  type="button"
+                  onClick={() => void run(target.name, currentPou.path)}
+                  title={`Compile and run PROGRAM ${target.name} in isolation (just this file's source — Monitor shows only its variables)`}
+                  className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium tracking-normal text-emerald-700 normal-case hover:bg-emerald-100 dark:text-emerald-400 dark:hover:bg-emerald-950/50"
+                >
+                  <Play className="size-3 fill-current" />
+                  Run {target.name}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled
+                  title="No PROGRAM in this file to run. Use the Tasks pane to run the whole project."
+                  className="flex cursor-not-allowed items-center gap-1 rounded-md px-2 py-1 text-xs font-medium tracking-normal text-muted-foreground/50 normal-case"
+                >
+                  <Play className="size-3 fill-current" />
+                  Run
+                </button>
+              )
+            })()
           )}
           <button
             type="button"

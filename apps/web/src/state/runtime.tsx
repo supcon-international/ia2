@@ -131,8 +131,11 @@ type AppState = {
   saveDevice: (device: Device) => Promise<void>
   saveIomap: (iomap: IoMap) => Promise<void>
 
-  // Runtime actions
-  run: () => Promise<void>
+  // Runtime actions. `run()` runs the project's tasks.toml schedule.
+  // `run(program, file_path)` runs JUST that PROGRAM ad-hoc, compiling
+  // only the named file's source so Monitor shows exactly the running
+  // PROGRAM's variables. Tasks.toml on disk is never touched either way.
+  run: (program?: string, file_path?: string) => Promise<void>
   stop: () => Promise<void>
 }
 
@@ -646,21 +649,24 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
 
   // ---------------- Run / Stop ----------------
 
-  const run = useCallback(async () => {
-    setError(null)
-    try {
-      // Save the currently-open POU first if it's dirty; the runtime
-      // re-reads the project from disk on compile, so unsaved edits would
-      // otherwise be silently ignored.
-      if (currentPou && source !== currentPou.source) {
-        await savePou(currentPou.path, source)
-        setCurrentPou({ ...currentPou, source })
+  const run = useCallback(
+    async (program?: string, file_path?: string) => {
+      setError(null)
+      try {
+        // Save the currently-open POU first if it's dirty — the runtime
+        // re-reads the project from disk on compile, so unsaved edits
+        // would otherwise be silently ignored.
+        if (currentPou && source !== currentPou.source) {
+          await savePou(currentPou.path, source)
+          setCurrentPou({ ...currentPou, source })
+        }
+        await runProgram(program, file_path)
+      } catch (e) {
+        setError(String(e))
       }
-      await runProgram()
-    } catch (e) {
-      setError(String(e))
-    }
-  }, [currentPou, source])
+    },
+    [currentPou, source],
+  )
 
   const stop = useCallback(async () => {
     try {

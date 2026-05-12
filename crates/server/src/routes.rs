@@ -28,9 +28,9 @@ use ironplc_bridge::{
     CheckDiagnostic, DeviceSpec, ProgramHandle, RuntimeWriteError, VarSnapshot, VariableInfo,
 };
 use project::{
-    Device, Edge, IoMap, MigrationReport, Pou, PouFile, PouLanguage, PouType, ProjectListing,
-    ProjectManifest, ProjectStore, ProjectTree, Protocol, Tasks, default_projects_dir,
-    load_last_opened, save_last_opened,
+    Device, Edge, IoMap, MigrationReport, Pou, PouFile, PouLanguage, PouType, ProgramInstance,
+    ProjectListing, ProjectManifest, ProjectStore, ProjectTree, Protocol, Task, Tasks,
+    default_projects_dir, load_last_opened, save_last_opened,
 };
 use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt as TokioStreamExt;
@@ -127,13 +127,35 @@ pub struct CreateEdgeRequest {
     pub host: String,
 }
 
-/// /api/run takes no body — the project's `tasks.toml` (+ all POU sources)
-/// is now the single source of truth for "what runs". Kept as an opaque
-/// type to preserve the route signature; future "dry-run" / "compile only"
-/// flags can go here.
+/// Body for /api/run. Two modes:
+///
+/// - `{}` (empty) — uses the project's `tasks.toml` as the schedule.
+///   Runs every PROGRAM instance declared there. Used by the Tasks
+///   pane's Run button and any agent that wants the production schedule.
+///
+/// - `{ "program": "<iec_name>" }` — ad-hoc single-PROGRAM run. The
+///   server synthesizes a minimal schedule (one default task + one
+///   instance of the named PROGRAM) without touching tasks.toml.
+///   Used by the ProgramPane's Run button so "click Run while looking
+///   at cascade_pid" runs cascade_pid, period — matching engineer
+///   intuition even when tasks.toml schedules something else.
 #[derive(Debug, Default, Deserialize, TS)]
 #[ts(export)]
-pub struct RunRequest {}
+pub struct RunRequest {
+    /// IEC POU identifier of the PROGRAM to run in ad-hoc mode. None =
+    /// fall back to tasks.toml.
+    #[serde(default)]
+    pub program: Option<String>,
+    /// POU file path containing `program`. When set together with
+    /// `program`, the compile input is limited to this file alone —
+    /// other POU files are not concatenated, so ironplc's debug section
+    /// (and therefore the Monitor pane) only sees the running PROGRAM's
+    /// variables, not those of unrelated PROGRAMs in other files.
+    ///
+    /// Ignored when `program` is None.
+    #[serde(default)]
+    pub file_path: Option<String>,
+}
 
 // ============================================================
 //  Health
@@ -754,14 +776,40 @@ pub async fn project_variables(
 
 pub async fn run(
     State(state): State<AppState>,
-    _body: Option<Json<RunRequest>>,
+    body: Option<Json<RunRequest>>,
 ) -> Result<Json<RunResponse>, ApiError> {
-    // The whole project compiles+runs as one unit. POUs + tasks.toml +
-    // devices + iomap all read from disk under one mutex hold.
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+
+    // Two modes (matched in the handler so the bridge stays simple):
+    //  - `program: None`           → compile_project (reads tasks.toml)
+    //  - `program: Some("foo")`    → compile_project_with_tasks (synthetic
+    //                                 single-instance schedule; tasks.toml
+    //                                 untouched on disk)
     let (container, device_specs, mappings) = {
         let store_guard = state.project.lock().expect("project mutex");
         let store = store_guard.as_ref().ok_or(ApiError::NoProject)?;
-        let container = ironplc_bridge::compile_project(store)?;
+        let container = match (req.program.as_deref(), req.file_path.as_deref()) {
+            (None, _) => ironplc_bridge::compile_project(store)?,
+            (Some(name), Some(file_path)) => {
+                // Ad-hoc isolated run: compile only the named file's
+                // source + a single-PROGRAM CONFIGURATION. ironplc's
+                // debug section then only knows about this file's
+                // declarations, so Monitor + /api/runtime/snapshot show
+                // exactly the variables the user is looking at.
+                let source = store.read_pou_source(file_path)?;
+                let tasks = single_program_tasks(name);
+                ironplc_bridge::compile_isolated_source(&source, &tasks)?
+            }
+            (Some(name), None) => {
+                // Ad-hoc but no file scope — fall back to whole-project
+                // concatenation with a single-PROGRAM schedule. Other
+                // files' variables WILL bleed into the debug section
+                // (ironplc limitation); document this if a client hits
+                // it.
+                let tasks = single_program_tasks(name);
+                ironplc_bridge::compile_project_with_tasks(store, &tasks)?
+            }
+        };
         let devices = store.list_devices()?;
         let iomap = store.read_iomap()?;
         let specs = devices
@@ -1226,4 +1274,22 @@ fn listing_for(path: &Path, last_opened: Option<&Path>) -> Option<ProjectListing
         path: path.display().to_string(),
         is_last_opened: last_opened == Some(path),
     })
+}
+
+/// Build the ad-hoc `Tasks` for "run just this PROGRAM once":
+/// one 100-ms / priority-1 task hosting one instance of the named PROGRAM.
+/// Used by the /api/run path's `program` override.
+fn single_program_tasks(program_name: &str) -> Tasks {
+    Tasks {
+        tasks: vec![Task {
+            name: "plc_task".into(),
+            interval_ms: 100,
+            priority: 1,
+        }],
+        programs: vec![ProgramInstance {
+            instance: format!("{program_name}_inst"),
+            program: program_name.into(),
+            task: "plc_task".into(),
+        }],
+    }
 }
