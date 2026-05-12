@@ -6,6 +6,7 @@ use ironplc_bridge::ProgramHandle;
 use project::ProjectStore;
 use tokio::sync::broadcast;
 
+use crate::edges::AttachmentRegistry;
 use crate::events::AppEvent;
 
 #[derive(Clone)]
@@ -18,6 +19,10 @@ pub struct AppState {
     /// The address the in-process demo Modbus slave is listening on
     /// (e.g. "127.0.0.1:5502"). Empty string when the slave is disabled.
     pub demo_modbus_addr: String,
+    /// Currently-open `ssh -N -L` tunnels to edge boxes, keyed by edge
+    /// name. Lifecycle is owned by the server process — dropping an
+    /// entry kills the child via `kill_on_drop`.
+    pub attachments: Arc<AttachmentRegistry>,
 }
 
 impl AppState {
@@ -30,6 +35,7 @@ impl AppState {
             event_tx,
             demo_slave,
             demo_modbus_addr,
+            attachments: AttachmentRegistry::new(),
         }
     }
 }

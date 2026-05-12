@@ -22,7 +22,11 @@ use ts_rs::TS;
 /// ironplc bytecode `Container`. Uses dialect Ed2 with no vendor extensions.
 pub fn compile(source: &str) -> Result<Container, BridgeError> {
     let file_id = FileId::default();
-    let options = CompilerOptions::default();
+    // `allow_empty_var_blocks` mirrors the ironplc CLI flag. POU templates
+    // we ship intentionally start with empty VAR / VAR_INPUT / VAR_OUTPUT
+    // blocks — those should compile, not error.
+    let mut options = CompilerOptions::default();
+    options.allow_empty_var_blocks = true;
 
     let library = ironplc_parser::parse_program(source, &file_id, &options)
         .map_err(|d| BridgeError::Parse(format!("{d:?}")))?;
@@ -39,6 +43,105 @@ pub fn compile(source: &str) -> Result<Container, BridgeError> {
         .map_err(|d| BridgeError::Codegen(format!("{d:?}")))?;
 
     Ok(container)
+}
+
+/// Compile a whole project: concatenate every POU source, synthesize one
+/// IEC `CONFIGURATION` block from `tasks.toml`, and hand the combined
+/// text to `compile`.
+///
+/// POU files should NOT contain their own CONFIGURATION blocks — the
+/// auto-migration step strips them on first open of legacy projects. If
+/// any survive (e.g. user pasted one in by hand), they're stripped here
+/// so the synthesized one wins without conflict.
+pub fn compile_project(store: &project::ProjectStore) -> Result<Container, BridgeError> {
+    let apps = store
+        .list_applications()
+        .map_err(|e| BridgeError::Parse(format!("listing applications: {e}")))?;
+    let tasks = store
+        .read_tasks()
+        .map_err(|e| BridgeError::Parse(format!("reading tasks.toml: {e}")))?
+        .unwrap_or_default();
+
+    if tasks.programs.is_empty() {
+        return Err(BridgeError::Parse(
+            "no PROGRAM instances declared in tasks.toml — bind a PROGRAM \
+             to a task in the Tasks pane before running"
+                .into(),
+        ));
+    }
+
+    let mut combined = String::new();
+    for app in &apps {
+        let cleaned = strip_any_configuration(&app.source);
+        combined.push_str(&cleaned);
+        if !combined.ends_with('\n') {
+            combined.push('\n');
+        }
+    }
+    combined.push_str(&synthesize_configuration(&tasks));
+    tracing::debug!(len = combined.len(), "compile_project: combined source built");
+    compile(&combined)
+}
+
+/// Build a single CONFIGURATION block from the project's task / program
+/// bindings. Currently emits one fixed RESOURCE — multi-RESOURCE projects
+/// aren't supported yet (the IEC standard allows them; not a frequent need
+/// for single-edge deployments).
+fn synthesize_configuration(tasks: &project::Tasks) -> String {
+    let mut s = String::new();
+    s.push_str("CONFIGURATION config\n");
+    s.push_str("    RESOURCE plc_res ON PLC\n");
+    for t in &tasks.tasks {
+        s.push_str(&format!(
+            "        TASK {}(INTERVAL := T#{}ms, PRIORITY := {});\n",
+            sanitise_ident(&t.name),
+            t.interval_ms.max(1),
+            t.priority,
+        ));
+    }
+    for p in &tasks.programs {
+        s.push_str(&format!(
+            "        PROGRAM {} WITH {} : {};\n",
+            sanitise_ident(&p.instance),
+            sanitise_ident(&p.task),
+            sanitise_ident(&p.program),
+        ));
+    }
+    s.push_str("    END_RESOURCE\n");
+    s.push_str("END_CONFIGURATION\n");
+    s
+}
+
+/// IEC identifiers are letters/digits/underscore. The project tree allows
+/// `/` in POU names (folder paths); use just the leaf when referring to
+/// program / task / instance names in the generated IEC source.
+fn sanitise_ident(name: &str) -> &str {
+    name.rsplit('/').next().unwrap_or(name)
+}
+
+/// Find every `CONFIGURATION … END_CONFIGURATION` block in `source` and
+/// remove it. Tolerant of case + whitespace; used to defend against POU
+/// files that still carry a pre-migration scheduling block.
+fn strip_any_configuration(source: &str) -> String {
+    let lower = source.to_ascii_lowercase();
+    let mut out = String::with_capacity(source.len());
+    let mut cursor = 0usize;
+    while let Some(start_rel) = lower[cursor..].find("configuration ") {
+        let abs = cursor + start_rel;
+        out.push_str(&source[cursor..abs]);
+        let Some(end_rel) = lower[abs..].find("end_configuration") else {
+            out.push_str(&source[abs..]);
+            cursor = source.len();
+            break;
+        };
+        let abs_end = abs + end_rel + "end_configuration".len();
+        cursor = abs_end;
+        if source.as_bytes().get(cursor).copied() == Some(b'\n') {
+            cursor += 1;
+        }
+    }
+    out.push_str(&source[cursor..]);
+    out
 }
 
 /// One diagnostic in source-positioned form (1-indexed line/column for the
@@ -61,7 +164,11 @@ pub struct CheckDiagnostic {
 /// codegen — this is the fast path for editor squiggles.
 pub fn check(source: &str) -> Vec<CheckDiagnostic> {
     let file_id = FileId::default();
-    let options = CompilerOptions::default();
+    // `allow_empty_var_blocks` mirrors the ironplc CLI flag. POU templates
+    // we ship intentionally start with empty VAR / VAR_INPUT / VAR_OUTPUT
+    // blocks — those should compile, not error.
+    let mut options = CompilerOptions::default();
+    options.allow_empty_var_blocks = true;
 
     let library = match ironplc_parser::parse_program(source, &file_id, &options) {
         Ok(l) => l,
@@ -96,7 +203,11 @@ pub struct VariableInfo {
 /// empty list if parsing fails — the frontend can fall back to free text.
 pub fn extract_variables(source: &str) -> Vec<VariableInfo> {
     let file_id = FileId::default();
-    let options = CompilerOptions::default();
+    // `allow_empty_var_blocks` mirrors the ironplc CLI flag. POU templates
+    // we ship intentionally start with empty VAR / VAR_INPUT / VAR_OUTPUT
+    // blocks — those should compile, not error.
+    let mut options = CompilerOptions::default();
+    options.allow_empty_var_blocks = true;
     let library = match ironplc_parser::parse_program(source, &file_id, &options) {
         Ok(l) => l,
         Err(_) => return vec![],

@@ -1,14 +1,21 @@
 import type { Application } from "@/types/generated/Application"
 import type { ApplicationKind } from "@/types/generated/ApplicationKind"
+import type { AttachInfo } from "@/types/generated/AttachInfo"
+import type { AttachmentStatus } from "@/types/generated/AttachmentStatus"
 import type { CheckDiagnostic } from "@/types/generated/CheckDiagnostic"
 import type { DemoSlaveSnapshot } from "@/types/generated/DemoSlaveSnapshot"
+import type { DeployReport } from "@/types/generated/DeployReport"
 import type { Device } from "@/types/generated/Device"
+import type { Edge } from "@/types/generated/Edge"
+import type { EdgeProbe } from "@/types/generated/EdgeProbe"
 import type { IoMap } from "@/types/generated/IoMap"
 import type { ProjectInfo } from "@/types/generated/ProjectInfo"
+import type { MigrationResponse } from "@/types/generated/MigrationResponse"
 import type { ProjectListing } from "@/types/generated/ProjectListing"
 import type { ProjectTree } from "@/types/generated/ProjectTree"
 import type { Protocol } from "@/types/generated/Protocol"
 import type { RunResponse } from "@/types/generated/RunResponse"
+import type { Tasks } from "@/types/generated/Tasks"
 import type { VariableInfo } from "@/types/generated/VariableInfo"
 
 async function jsonOrThrow<T>(res: Response, label: string): Promise<T> {
@@ -107,6 +114,19 @@ export async function deleteApplication(name: string): Promise<RunResponse> {
   )
 }
 
+export async function createApplicationFolder(
+  path: string,
+): Promise<RunResponse> {
+  return jsonOrThrow(
+    await fetch(`/api/applications/folders`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    }),
+    "POST /api/applications/folders",
+  )
+}
+
 export async function fetchApplicationVariables(
   name: string,
 ): Promise<VariableInfo[]> {
@@ -162,6 +182,41 @@ export async function deleteDevice(name: string): Promise<RunResponse> {
   )
 }
 
+export async function createDeviceFolder(path: string): Promise<RunResponse> {
+  return jsonOrThrow(
+    await fetch(`/api/devices/folders`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    }),
+    "POST /api/devices/folders",
+  )
+}
+
+// ---------- Tasks (project-level scheduling) ----------
+
+export async function fetchTasks(): Promise<Tasks> {
+  return jsonOrThrow(await fetch(`/api/tasks`), "GET /api/tasks")
+}
+
+export async function updateTasks(tasks: Tasks): Promise<RunResponse> {
+  return jsonOrThrow(
+    await fetch(`/api/tasks`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(tasks),
+    }),
+    "PUT /api/tasks",
+  )
+}
+
+export async function migrateTasks(): Promise<MigrationResponse> {
+  return jsonOrThrow(
+    await fetch(`/api/project/migrate-tasks`, { method: "POST" }),
+    "POST /api/project/migrate-tasks",
+  )
+}
+
 // ---------- IO Mapping ----------
 
 export async function fetchIomap(): Promise<IoMap> {
@@ -192,12 +247,12 @@ export async function checkProgram(source: string): Promise<CheckDiagnostic[]> {
   )
 }
 
-export async function runProgram(app?: string): Promise<RunResponse> {
+export async function runProgram(): Promise<RunResponse> {
   return jsonOrThrow(
     await fetch(`/api/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(app ? { app } : {}),
+      body: "{}",
     }),
     "POST /api/run",
   )
@@ -216,4 +271,94 @@ export function eventsUrl(): string {
 
 export async function fetchDemoSlaveSnapshot(): Promise<DemoSlaveSnapshot> {
   return jsonOrThrow(await fetch(`/api/_demo/slave`), "GET /api/_demo/slave")
+}
+
+// ---------- Edges ----------
+
+export async function fetchEdge(name: string): Promise<Edge> {
+  return jsonOrThrow(
+    await fetch(`/api/edges/${encodeURIComponent(name)}`),
+    `GET /api/edges/${name}`,
+  )
+}
+
+export async function createEdge(name: string, host: string): Promise<Edge> {
+  return jsonOrThrow(
+    await fetch(`/api/edges`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, host }),
+    }),
+    "POST /api/edges",
+  )
+}
+
+export async function updateEdge(name: string, edge: Edge): Promise<RunResponse> {
+  return jsonOrThrow(
+    await fetch(`/api/edges/${encodeURIComponent(name)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(edge),
+    }),
+    `PUT /api/edges/${name}`,
+  )
+}
+
+export async function deleteEdge(name: string): Promise<RunResponse> {
+  return jsonOrThrow(
+    await fetch(`/api/edges/${encodeURIComponent(name)}`, { method: "DELETE" }),
+    `DELETE /api/edges/${name}`,
+  )
+}
+
+export async function createEdgeFolder(path: string): Promise<RunResponse> {
+  return jsonOrThrow(
+    await fetch(`/api/edges/folders`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    }),
+    "POST /api/edges/folders",
+  )
+}
+
+export async function probeEdge(name: string): Promise<EdgeProbe> {
+  return jsonOrThrow(
+    await fetch(`/api/edges/${encodeURIComponent(name)}/probe`),
+    `GET /api/edges/${name}/probe`,
+  )
+}
+
+export async function deployEdge(name: string): Promise<DeployReport> {
+  return jsonOrThrow(
+    await fetch(`/api/edges/${encodeURIComponent(name)}/deploy`, {
+      method: "POST",
+    }),
+    `POST /api/edges/${name}/deploy`,
+  )
+}
+
+export async function attachEdge(name: string): Promise<AttachInfo> {
+  return jsonOrThrow(
+    await fetch(`/api/edges/${encodeURIComponent(name)}/attach`, {
+      method: "POST",
+    }),
+    `POST /api/edges/${name}/attach`,
+  )
+}
+
+export async function detachEdge(name: string): Promise<RunResponse> {
+  return jsonOrThrow(
+    await fetch(`/api/edges/${encodeURIComponent(name)}/detach`, {
+      method: "POST",
+    }),
+    `POST /api/edges/${name}/detach`,
+  )
+}
+
+export async function fetchAttachment(name: string): Promise<AttachmentStatus> {
+  return jsonOrThrow(
+    await fetch(`/api/edges/${encodeURIComponent(name)}/attachment`),
+    `GET /api/edges/${name}/attachment`,
+  )
 }

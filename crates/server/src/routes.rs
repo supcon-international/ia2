@@ -26,17 +26,18 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use ironplc_bridge::{CheckDiagnostic, DeviceSpec, VariableInfo};
 use project::{
-    Application, ApplicationKind, Device, IoMap, ProjectListing, ProjectManifest, ProjectStore,
-    ProjectTree, Protocol, default_projects_dir, load_last_opened, save_last_opened,
+    Application, ApplicationKind, Device, Edge, IoMap, MigrationReport, ProjectListing,
+    ProjectManifest, ProjectStore, ProjectTree, Protocol, Tasks, default_projects_dir,
+    load_last_opened, save_last_opened,
 };
 use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt as TokioStreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use ts_rs::TS;
 
+use crate::edges::{AttachInfo, DeployReport, EdgeProbe, attach_edge, deploy_to_edge, probe_edge};
 use crate::error::ApiError;
 use crate::events::AppEvent;
-use crate::sample::SAMPLE_SOURCE;
 use crate::state::AppState;
 
 // ============================================================
@@ -105,12 +106,28 @@ pub struct CreateDeviceRequest {
 
 #[derive(Debug, Deserialize, TS)]
 #[ts(export)]
-pub struct RunRequest {
-    /// Application (POU) name to compile and run. When omitted the bundled
-    /// counter/blink sample is used (handy for curl-only smoke tests).
-    #[serde(default)]
-    pub app: Option<String>,
+pub struct CreateFolderRequest {
+    /// Forward-slash relative path under `applications/` or `devices/`,
+    /// e.g. `"pid_loops"` or `"actuators/valves"`. Each segment must be
+    /// non-empty, not start with '.', and contain no backslashes/colons.
+    pub path: String,
 }
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct CreateEdgeRequest {
+    pub name: String,
+    /// SSH host or ~/.ssh/config alias. Anything ssh(1) would accept.
+    pub host: String,
+}
+
+/// /api/run takes no body — the project's `tasks.toml` (+ all POU sources)
+/// is now the single source of truth for "what runs". Kept as an opaque
+/// type to preserve the route signature; future "dry-run" / "compile only"
+/// flags can go here.
+#[derive(Debug, Default, Deserialize, TS)]
+#[ts(export)]
+pub struct RunRequest {}
 
 // ============================================================
 //  Health
@@ -225,6 +242,16 @@ pub async fn delete_application(
     Ok(Json(RunResponse { ok: true }))
 }
 
+pub async fn create_application_folder(
+    State(state): State<AppState>,
+    Json(req): Json<CreateFolderRequest>,
+) -> Result<Json<RunResponse>, ApiError> {
+    with_project(&state, |store| {
+        store.create_application_folder(&req.path).map_err(Into::into)
+    })?;
+    Ok(Json(RunResponse { ok: true }))
+}
+
 /// Variables declared inside the named POU. Returns an empty list rather
 /// than an error if the source can't be parsed — useful while the user is
 /// mid-typing.
@@ -287,6 +314,167 @@ pub async fn delete_device(
     Ok(Json(RunResponse { ok: true }))
 }
 
+pub async fn create_device_folder(
+    State(state): State<AppState>,
+    Json(req): Json<CreateFolderRequest>,
+) -> Result<Json<RunResponse>, ApiError> {
+    with_project(&state, |store| {
+        store.create_device_folder(&req.path).map_err(Into::into)
+    })?;
+    Ok(Json(RunResponse { ok: true }))
+}
+
+// ============================================================
+//  Edges (deploy targets)
+// ============================================================
+
+pub async fn get_edge(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<Edge>, ApiError> {
+    with_project(&state, |store| store.read_edge(&name).map_err(Into::into)).map(Json)
+}
+
+pub async fn create_edge(
+    State(state): State<AppState>,
+    Json(req): Json<CreateEdgeRequest>,
+) -> Result<Json<Edge>, ApiError> {
+    with_project(&state, |store| {
+        store.create_edge(&req.name, &req.host).map_err(Into::into)
+    })
+    .map(Json)
+}
+
+pub async fn update_edge(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+    Json(edge): Json<Edge>,
+) -> Result<Json<RunResponse>, ApiError> {
+    if edge.name != name {
+        return Err(ApiError::BadRequest(format!(
+            "path name '{name}' does not match body name '{}'",
+            edge.name
+        )));
+    }
+    with_project(&state, |store| store.write_edge(&edge).map_err(Into::into))?;
+    Ok(Json(RunResponse { ok: true }))
+}
+
+pub async fn delete_edge(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<RunResponse>, ApiError> {
+    with_project(&state, |store| store.delete_edge(&name).map_err(Into::into))?;
+    // Drop any active attachment for this edge so we don't leak ssh procs.
+    state.attachments.detach(&name);
+    Ok(Json(RunResponse { ok: true }))
+}
+
+pub async fn create_edge_folder(
+    State(state): State<AppState>,
+    Json(req): Json<CreateFolderRequest>,
+) -> Result<Json<RunResponse>, ApiError> {
+    with_project(&state, |store| {
+        store.create_edge_folder(&req.path).map_err(Into::into)
+    })?;
+    Ok(Json(RunResponse { ok: true }))
+}
+
+pub async fn probe_edge_route(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<EdgeProbe>, ApiError> {
+    let edge = with_project(&state, |store| store.read_edge(&name).map_err(Into::into))?;
+    Ok(Json(probe_edge(&edge).await))
+}
+
+pub async fn deploy_edge_route(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<DeployReport>, ApiError> {
+    let (edge, project_dir) = {
+        let guard = state.project.lock().expect("project mutex");
+        let store = guard.as_ref().ok_or(ApiError::NoProject)?;
+        let edge = store
+            .read_edge(&name)
+            .map_err(|e| ApiError::from(crate::error::project_err(e)))?;
+        (edge, store.root().to_path_buf())
+    };
+    let runtime_binary = find_runtime_binary();
+    deploy_to_edge(&edge, &project_dir, runtime_binary.as_deref())
+        .await
+        .map(Json)
+        .map_err(|e| ApiError::Internal(e.to_string()))
+}
+
+pub async fn attach_edge_route(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<AttachInfo>, ApiError> {
+    let edge = with_project(&state, |store| store.read_edge(&name).map_err(Into::into))?;
+    attach_edge(&edge, &state.attachments)
+        .await
+        .map(Json)
+        .map_err(|e| ApiError::Internal(e.to_string()))
+}
+
+pub async fn detach_edge_route(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Json<RunResponse> {
+    state.attachments.detach(&name);
+    Json(RunResponse { ok: true })
+}
+
+/// Convenience: the IDE keeps showing the local /api/events stream by
+/// default; switching to an attached edge means changing the SSE source
+/// URL on the client. Rather than build a streaming proxy, we tell the
+/// client where to point — `attach` already returns the local port.
+///
+/// This endpoint lets the UI ask "is anything attached right now, and at
+/// what port?" on page load (so a detach across reload is visible).
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct AttachmentStatus {
+    pub attached: bool,
+    pub local_port: Option<u16>,
+}
+
+pub async fn attachment_status(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Json<AttachmentStatus> {
+    let port = state.attachments.current_port(&name);
+    Json(AttachmentStatus {
+        attached: port.is_some(),
+        local_port: port,
+    })
+}
+
+/// Look for a freshly-built runtime binary on the dev machine. Heuristic:
+/// release first, then debug, then env var override. Returns None if no
+/// binary is found — deploy falls back to "reuse current/runtime".
+fn find_runtime_binary() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("CONTROLSOFTWARE_RUNTIME_BIN") {
+        let p = std::path::PathBuf::from(p);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    let exe = std::env::current_exe().ok()?;
+    let parent = exe.parent()?.to_path_buf();
+    // Sibling of `server` binary in the same target dir.
+    for candidate in [
+        parent.join("controlsoftware-runtime"),
+        parent.parent()?.join("release").join("controlsoftware-runtime"),
+    ] {
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 // ============================================================
 //  IO Mapping
 // ============================================================
@@ -304,6 +492,62 @@ pub async fn put_iomap(
 }
 
 // ============================================================
+//  Tasks (project-level scheduling)
+// ============================================================
+
+pub async fn get_tasks(State(state): State<AppState>) -> Result<Json<Tasks>, ApiError> {
+    with_project(&state, |store| {
+        Ok(store.read_tasks()?.unwrap_or_default())
+    })
+    .map(Json)
+}
+
+pub async fn put_tasks(
+    State(state): State<AppState>,
+    Json(tasks): Json<Tasks>,
+) -> Result<Json<RunResponse>, ApiError> {
+    with_project(&state, |store| store.write_tasks(&tasks).map_err(Into::into))?;
+    Ok(Json(RunResponse { ok: true }))
+}
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct MigrationResponse {
+    pub migrated: bool,
+    pub tasks_count: usize,
+    pub programs_count: usize,
+    pub pous_modified: Vec<String>,
+}
+
+/// Promote a legacy project (inline CONFIGURATION blocks in each POU) to
+/// the new project-level `tasks.toml`. Idempotent — running on an
+/// already-migrated project is a no-op.
+pub async fn migrate_tasks(
+    State(state): State<AppState>,
+) -> Result<Json<MigrationResponse>, ApiError> {
+    let report = with_project(&state, |store| store.migrate_tasks().map_err(Into::into))?;
+    let resp = match report {
+        MigrationReport::Skipped => MigrationResponse {
+            migrated: false,
+            tasks_count: 0,
+            programs_count: 0,
+            pous_modified: vec![],
+        },
+        MigrationReport::Migrated {
+            tasks_count,
+            programs_count,
+            pous_modified,
+        } => MigrationResponse {
+            migrated: true,
+            tasks_count,
+            programs_count,
+            pous_modified,
+        },
+    };
+    Ok(Json(resp))
+}
+
+// ============================================================
 //  Compile / run / stream
 // ============================================================
 
@@ -313,31 +557,25 @@ pub async fn check(body: String) -> Json<Vec<CheckDiagnostic>> {
 
 pub async fn run(
     State(state): State<AppState>,
-    body: Option<Json<RunRequest>>,
+    _body: Option<Json<RunRequest>>,
 ) -> Result<Json<RunResponse>, ApiError> {
-    // Source + devices + mappings all come from the open project (when an
-    // app is named); a no-body request falls back to the bundled sample with
-    // no IO at all (handy for curl smoke tests).
-    let (source, device_specs, mappings) = match body.and_then(|Json(req)| req.app) {
-        Some(app) => {
-            let store_guard = state.project.lock().expect("project mutex");
-            let store = store_guard.as_ref().ok_or(ApiError::NoProject)?;
-            let source = store.read_application(&app)?.source;
-            let devices = store.list_devices()?;
-            let iomap = store.read_iomap()?;
-            let specs = devices
-                .into_iter()
-                .map(|d| DeviceSpec {
-                    name: d.name,
-                    config: d.config,
-                })
-                .collect::<Vec<_>>();
-            (source, specs, iomap.mappings)
-        }
-        None => (SAMPLE_SOURCE.to_string(), vec![], vec![]),
+    // The whole project compiles+runs as one unit. POUs + tasks.toml +
+    // devices + iomap all read from disk under one mutex hold.
+    let (container, device_specs, mappings) = {
+        let store_guard = state.project.lock().expect("project mutex");
+        let store = store_guard.as_ref().ok_or(ApiError::NoProject)?;
+        let container = ironplc_bridge::compile_project(store)?;
+        let devices = store.list_devices()?;
+        let iomap = store.read_iomap()?;
+        let specs = devices
+            .into_iter()
+            .map(|d| DeviceSpec {
+                name: d.name,
+                config: d.config,
+            })
+            .collect::<Vec<_>>();
+        (container, specs, iomap.mappings)
     };
-
-    let container = ironplc_bridge::compile(&source)?;
 
     {
         let mut guard = state.program.lock().expect("program mutex");

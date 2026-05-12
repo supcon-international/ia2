@@ -1,15 +1,22 @@
-import { useState } from "react"
+import { useMemo, useState } from "react"
 import {
+  Cable,
+  Clock,
   ChevronDown,
   ChevronRight,
-  Cable,
   Cpu,
   FileCode2,
+  Folder,
+  FolderOpen,
+  FolderPlus,
   Network,
   Plus,
+  Server,
 } from "lucide-react"
 
 import { NewDeviceDialog } from "@/components/dialogs/NewDeviceDialog"
+import { NewEdgeDialog } from "@/components/dialogs/NewEdgeDialog"
+import { NewFolderDialog } from "@/components/dialogs/NewFolderDialog"
 import { NewPouDialog } from "@/components/dialogs/NewPouDialog"
 import {
   ContextMenu,
@@ -19,8 +26,12 @@ import {
   ContextMenuTrigger,
 } from "@/components/ui/context-menu"
 import { cn } from "@/lib/utils"
+import { buildTree, type TreeNode } from "@/lib/project-tree"
 import { useRuntime } from "@/state/runtime"
 import type { ApplicationKind } from "@/types/generated/ApplicationKind"
+import type { ApplicationSummary } from "@/types/generated/ApplicationSummary"
+import type { Device } from "@/types/generated/Device"
+import type { Edge } from "@/types/generated/Edge"
 import type { Protocol } from "@/types/generated/Protocol"
 
 export function ProjectTree() {
@@ -29,14 +40,65 @@ export function ProjectTree() {
     view,
     currentApp,
     currentDevice,
+    currentEdge,
+    attached,
     selectApp,
     selectDevice,
+    selectEdge,
     openIoMap,
+    openTasks,
     deleteApp,
     deleteDevice,
+    deleteEdge,
   } = useRuntime()
+
+  // Section open/close. Persists across re-renders so toggling a sibling
+  // folder doesn't collapse the section.
   const [appsOpen, setAppsOpen] = useState(true)
   const [devicesOpen, setDevicesOpen] = useState(true)
+  const [edgesOpen, setEdgesOpen] = useState(true)
+
+  // Folder open-state keyed by `section/path` so each section is independent.
+  const [openFolders, setOpenFolders] = useState<Record<string, boolean>>({})
+  const toggleFolder = (key: string) =>
+    setOpenFolders((prev) => ({ ...prev, [key]: !prev[key] }))
+
+  // Controlled NewFolder / NewPou / NewDevice dialogs — opened from the
+  // folder context menu with a known parent path.
+  const [folderDialog, setFolderDialog] = useState<{
+    section: "applications" | "devices" | "edges"
+    parent: string
+  } | null>(null)
+  const [pouDialog, setPouDialog] = useState<{ parent: string } | null>(null)
+  const [deviceDialog, setDeviceDialog] = useState<{ parent: string } | null>(
+    null,
+  )
+  const [edgeDialog, setEdgeDialog] = useState<{ parent: string } | null>(null)
+
+  const appTree = useMemo(
+    () =>
+      project
+        ? buildTree<ApplicationSummary>(
+            project.applications,
+            project.app_folders,
+          )
+        : [],
+    [project],
+  )
+
+  const deviceTree = useMemo(
+    () =>
+      project
+        ? buildTree<Device>(project.devices, project.device_folders)
+        : [],
+    [project],
+  )
+
+  const edgeTree = useMemo(
+    () =>
+      project ? buildTree<Edge>(project.edges, project.edge_folders) : [],
+    [project],
+  )
 
   if (!project) return null
 
@@ -48,73 +110,61 @@ export function ProjectTree() {
         count={project.applications.length}
         onToggle={() => setAppsOpen(!appsOpen)}
         action={
-          <NewPouDialog
-            trigger={
-              <button
-                type="button"
-                title="New POU"
-                onClick={(e) => e.stopPropagation()}
-                className="flex size-5 items-center justify-center rounded text-muted-foreground hover:bg-accent/40 hover:text-foreground"
-              >
-                <Plus className="size-3.5" />
-              </button>
+          <SectionActions
+            onAddItem={() => setPouDialog({ parent: "" })}
+            onAddFolder={() =>
+              setFolderDialog({ section: "applications", parent: "" })
             }
+            itemTitle="New POU"
+            folderTitle="New folder"
           />
         }
       />
-      {appsOpen &&
-        project.applications.map((a) => (
-          <ContextMenu key={a.name}>
-            <ContextMenuTrigger asChild>
-              <button
-                type="button"
-                onClick={() => selectApp(a.name)}
-                className={cn(
-                  "flex w-full items-center gap-1.5 px-2 py-1 text-left transition-colors hover:bg-accent/40",
-                  view === "app" && currentApp?.name === a.name &&
-                    "bg-accent/60",
-                )}
-                style={{ paddingLeft: 26 }}
-              >
-                <FileCode2
-                  className={cn(
-                    "size-3.5 shrink-0",
-                    a.kind === "function_block"
-                      ? "text-violet-600 dark:text-violet-400"
-                      : "text-sky-600 dark:text-sky-400",
-                  )}
-                />
-                <span className="flex-1 truncate">{a.name}</span>
-                <span className="font-mono text-[9px] uppercase text-muted-foreground">
-                  {kindAbbrev(a.kind)}
-                </span>
-              </button>
-            </ContextMenuTrigger>
-            <ContextMenuContent>
-              <ContextMenuItem onSelect={() => selectApp(a.name)}>
-                Open
-              </ContextMenuItem>
-              <ContextMenuSeparator />
+      {appsOpen && (
+        <TreeChildren
+          nodes={appTree}
+          depth={0}
+          renderItem={(node) => (
+            <AppItem
+              node={node}
+              active={view === "app" && currentApp?.name === node.path}
+              onOpen={() => selectApp(node.path)}
+              onDelete={() => {
+                if (confirm(`Delete POU "${node.path}"?`)) {
+                  void deleteApp(node.path)
+                }
+              }}
+            />
+          )}
+          folderContextMenu={(folder) => (
+            <>
               <ContextMenuItem
-                variant="destructive"
-                onSelect={() => {
-                  if (confirm(`Delete POU "${a.name}"?`)) {
-                    void deleteApp(a.name)
-                  }
-                }}
+                onSelect={() => setPouDialog({ parent: folder.path })}
               >
-                Delete
+                New POU here…
               </ContextMenuItem>
-            </ContextMenuContent>
-          </ContextMenu>
-        ))}
-      {appsOpen && project.applications.length === 0 && (
-        <div
-          className="py-1 text-[11px] italic text-muted-foreground"
-          style={{ paddingLeft: 26 }}
-        >
-          (none)
-        </div>
+              <ContextMenuItem
+                onSelect={() =>
+                  setFolderDialog({
+                    section: "applications",
+                    parent: folder.path,
+                  })
+                }
+              >
+                New folder here…
+              </ContextMenuItem>
+            </>
+          )}
+          openFolders={openFolders}
+          toggleFolder={toggleFolder}
+          section="apps"
+          emptyHint={
+            project.applications.length === 0 &&
+            project.app_folders.length === 0
+              ? "No POUs yet — click + to create one."
+              : null
+          }
+        />
       )}
 
       <SectionHeader
@@ -123,73 +173,145 @@ export function ProjectTree() {
         count={project.devices.length}
         onToggle={() => setDevicesOpen(!devicesOpen)}
         action={
-          <NewDeviceDialog
-            trigger={
-              <button
-                type="button"
-                title="New device"
-                onClick={(e) => e.stopPropagation()}
-                className="flex size-5 items-center justify-center rounded text-muted-foreground hover:bg-accent/40 hover:text-foreground"
-              >
-                <Plus className="size-3.5" />
-              </button>
+          <SectionActions
+            onAddItem={() => setDeviceDialog({ parent: "" })}
+            onAddFolder={() =>
+              setFolderDialog({ section: "devices", parent: "" })
             }
+            itemTitle="New device"
+            folderTitle="New folder"
           />
         }
       />
-      {devicesOpen &&
-        project.devices.map((d) => (
-          <ContextMenu key={d.name}>
-            <ContextMenuTrigger asChild>
-              <button
-                type="button"
-                onClick={() => selectDevice(d.name)}
-                className={cn(
-                  "flex w-full items-center gap-1.5 px-2 py-1 text-left transition-colors hover:bg-accent/40",
-                  view === "device" && currentDevice?.name === d.name &&
-                    "bg-accent/60",
-                )}
-                style={{ paddingLeft: 26 }}
-              >
-                <ProtocolIcon protocol={d.protocol} />
-                <span className="flex-1 truncate">{d.name}</span>
-                <span className="font-mono text-[9px] uppercase text-muted-foreground">
-                  {d.protocol}
-                </span>
-              </button>
-            </ContextMenuTrigger>
-            <ContextMenuContent>
-              <ContextMenuItem onSelect={() => selectDevice(d.name)}>
-                Open
-              </ContextMenuItem>
-              <ContextMenuSeparator />
+      {devicesOpen && (
+        <TreeChildren
+          nodes={deviceTree}
+          depth={0}
+          renderItem={(node) => (
+            <DeviceItem
+              node={node}
+              active={
+                view === "device" && currentDevice?.name === node.path
+              }
+              onOpen={() => selectDevice(node.path)}
+              onDelete={() => {
+                if (confirm(`Delete device "${node.path}"?`)) {
+                  void deleteDevice(node.path)
+                }
+              }}
+            />
+          )}
+          folderContextMenu={(folder) => (
+            <>
               <ContextMenuItem
-                variant="destructive"
-                onSelect={() => {
-                  if (confirm(`Delete device "${d.name}"?`)) {
-                    void deleteDevice(d.name)
-                  }
-                }}
+                onSelect={() => setDeviceDialog({ parent: folder.path })}
               >
-                Delete
+                New device here…
               </ContextMenuItem>
-            </ContextMenuContent>
-          </ContextMenu>
-        ))}
-      {devicesOpen && project.devices.length === 0 && (
-        <div
-          className="py-1 text-[11px] italic text-muted-foreground"
-          style={{ paddingLeft: 26 }}
-        >
-          (none)
-        </div>
+              <ContextMenuItem
+                onSelect={() =>
+                  setFolderDialog({
+                    section: "devices",
+                    parent: folder.path,
+                  })
+                }
+              >
+                New folder here…
+              </ContextMenuItem>
+            </>
+          )}
+          openFolders={openFolders}
+          toggleFolder={toggleFolder}
+          section="devices"
+          emptyHint={
+            project.devices.length === 0 && project.device_folders.length === 0
+              ? "No devices yet — click + to add one."
+              : null
+          }
+        />
       )}
+
+      <SectionHeader
+        label="Edges"
+        open={edgesOpen}
+        count={project.edges.length}
+        onToggle={() => setEdgesOpen(!edgesOpen)}
+        action={
+          <SectionActions
+            onAddItem={() => setEdgeDialog({ parent: "" })}
+            onAddFolder={() =>
+              setFolderDialog({ section: "edges", parent: "" })
+            }
+            itemTitle="New edge"
+            folderTitle="New folder"
+          />
+        }
+      />
+      {edgesOpen && (
+        <TreeChildren
+          nodes={edgeTree}
+          depth={0}
+          renderItem={(node) => (
+            <EdgeItem
+              node={node}
+              active={view === "edge" && currentEdge?.name === node.path}
+              attached={attached?.name === node.path}
+              onOpen={() => selectEdge(node.path)}
+              onDelete={() => {
+                if (confirm(`Delete edge "${node.path}"?`)) {
+                  void deleteEdge(node.path)
+                }
+              }}
+            />
+          )}
+          folderContextMenu={(folder) => (
+            <>
+              <ContextMenuItem
+                onSelect={() => setEdgeDialog({ parent: folder.path })}
+              >
+                New edge here…
+              </ContextMenuItem>
+              <ContextMenuItem
+                onSelect={() =>
+                  setFolderDialog({ section: "edges", parent: folder.path })
+                }
+              >
+                New folder here…
+              </ContextMenuItem>
+            </>
+          )}
+          openFolders={openFolders}
+          toggleFolder={toggleFolder}
+          section="edges"
+          emptyHint={
+            project.edges.length === 0 && project.edge_folders.length === 0
+              ? "No edges yet — click + to add a deploy target."
+              : null
+          }
+        />
+      )}
+
+      <button
+        type="button"
+        onClick={() => void openTasks()}
+        className={cn(
+          "mt-1 flex w-full items-center gap-1.5 border-t border-border px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent/40",
+          view === "tasks" && "bg-accent/60",
+        )}
+        style={{ paddingLeft: 12 }}
+      >
+        <Clock className="size-3.5 shrink-0 text-violet-600 dark:text-violet-400" />
+        <span className="flex-1 truncate font-medium">Tasks</span>
+        <span className="font-mono text-[9px] uppercase text-muted-foreground">
+          {project.tasks.tasks.length}/{project.tasks.programs.length}
+        </span>
+      </button>
 
       <button
         type="button"
         onClick={() => void openIoMap()}
         className={cn(
-          "mt-1 flex w-full items-center gap-1.5 border-t border-border px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent/40",
+          "flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent/40",
           view === "iomap" && "bg-accent/60",
         )}
         style={{ paddingLeft: 12 }}
@@ -200,8 +322,150 @@ export function ProjectTree() {
           {project.iomap.mappings.length}
         </span>
       </button>
+
+      {/* Controlled dialogs popped open by folder context menus. */}
+      {folderDialog && (
+        <NewFolderDialog
+          open
+          onOpenChange={(o) => {
+            if (!o) setFolderDialog(null)
+          }}
+          section={folderDialog.section}
+          parent={folderDialog.parent}
+        />
+      )}
+      {pouDialog && (
+        <NewPouDialog
+          open
+          onOpenChange={(o) => {
+            if (!o) setPouDialog(null)
+          }}
+          parent={pouDialog.parent}
+        />
+      )}
+      {deviceDialog && (
+        <NewDeviceDialog
+          open
+          onOpenChange={(o) => {
+            if (!o) setDeviceDialog(null)
+          }}
+          parent={deviceDialog.parent}
+        />
+      )}
+      {edgeDialog && (
+        <NewEdgeDialog
+          open
+          onOpenChange={(o) => {
+            if (!o) setEdgeDialog(null)
+          }}
+          parent={edgeDialog.parent}
+        />
+      )}
     </div>
   )
+}
+
+// ============================================================
+//  Tree internals
+// ============================================================
+
+function TreeChildren<T>({
+  nodes,
+  depth,
+  renderItem,
+  folderContextMenu,
+  openFolders,
+  toggleFolder,
+  section,
+  emptyHint,
+}: {
+  nodes: TreeNode<T>[]
+  depth: number
+  renderItem: (node: Extract<TreeNode<T>, { kind: "item" }>) => React.ReactNode
+  folderContextMenu: (
+    folder: Extract<TreeNode<T>, { kind: "folder" }>,
+  ) => React.ReactNode
+  openFolders: Record<string, boolean>
+  toggleFolder: (key: string) => void
+  section: string
+  emptyHint?: string | null
+}) {
+  if (nodes.length === 0) {
+    return emptyHint ? (
+      <div
+        className="py-1 text-[11px] italic text-muted-foreground"
+        style={{ paddingLeft: pad(depth + 1) }}
+      >
+        {emptyHint}
+      </div>
+    ) : null
+  }
+
+  return (
+    <>
+      {nodes.map((node) => {
+        if (node.kind === "folder") {
+          const key = `${section}/${node.path}`
+          const isOpen = openFolders[key] ?? true
+          return (
+            <div key={key}>
+              <ContextMenu>
+                <ContextMenuTrigger asChild>
+                  <button
+                    type="button"
+                    onClick={() => toggleFolder(key)}
+                    className="flex w-full items-center gap-1 py-1 text-left text-sm text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground"
+                    style={{ paddingLeft: pad(depth) }}
+                  >
+                    {isOpen ? (
+                      <ChevronDown className="size-3 shrink-0" />
+                    ) : (
+                      <ChevronRight className="size-3 shrink-0" />
+                    )}
+                    {isOpen ? (
+                      <FolderOpen className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+                    ) : (
+                      <Folder className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+                    )}
+                    <span className="flex-1 truncate text-foreground">
+                      {node.name}
+                    </span>
+                  </button>
+                </ContextMenuTrigger>
+                <ContextMenuContent>
+                  {folderContextMenu(node)}
+                </ContextMenuContent>
+              </ContextMenu>
+              {isOpen && (
+                <TreeChildren
+                  nodes={node.children}
+                  depth={depth + 1}
+                  renderItem={renderItem}
+                  folderContextMenu={folderContextMenu}
+                  openFolders={openFolders}
+                  toggleFolder={toggleFolder}
+                  section={section}
+                />
+              )}
+            </div>
+          )
+        }
+        return (
+          <div
+            key={`${section}-item-${node.path}`}
+            style={{ paddingLeft: pad(depth) }}
+          >
+            {renderItem(node)}
+          </div>
+        )
+      })}
+    </>
+  )
+}
+
+/** Pixel padding for a given tree depth — keeps icons aligned across levels. */
+function pad(depth: number): number {
+  return 12 + depth * 14
 }
 
 function SectionHeader({
@@ -239,11 +503,191 @@ function SectionHeader({
   )
 }
 
+function SectionActions({
+  onAddItem,
+  onAddFolder,
+  itemTitle,
+  folderTitle,
+}: {
+  onAddItem: () => void
+  onAddFolder: () => void
+  itemTitle: string
+  folderTitle: string
+}) {
+  return (
+    <div className="flex items-center">
+      <button
+        type="button"
+        title={folderTitle}
+        onClick={(e) => {
+          e.stopPropagation()
+          onAddFolder()
+        }}
+        className="flex size-5 items-center justify-center rounded text-muted-foreground hover:bg-accent/40 hover:text-foreground"
+      >
+        <FolderPlus className="size-3.5" />
+      </button>
+      <button
+        type="button"
+        title={itemTitle}
+        onClick={(e) => {
+          e.stopPropagation()
+          onAddItem()
+        }}
+        className="flex size-5 items-center justify-center rounded text-muted-foreground hover:bg-accent/40 hover:text-foreground"
+      >
+        <Plus className="size-3.5" />
+      </button>
+    </div>
+  )
+}
+
+function AppItem({
+  node,
+  active,
+  onOpen,
+  onDelete,
+}: {
+  node: { name: string; path: string; item: ApplicationSummary }
+  active: boolean
+  onOpen: () => void
+  onDelete: () => void
+}) {
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <button
+          type="button"
+          onClick={onOpen}
+          className={cn(
+            "flex w-full items-center gap-1.5 py-1 pl-3 pr-2 text-left transition-colors hover:bg-accent/40",
+            active && "bg-accent/60",
+          )}
+        >
+          <FileCode2
+            className={cn(
+              "size-3.5 shrink-0",
+              node.item.kind === "function_block"
+                ? "text-violet-600 dark:text-violet-400"
+                : "text-sky-600 dark:text-sky-400",
+            )}
+          />
+          <span className="flex-1 truncate">{node.name}</span>
+          <span className="font-mono text-[9px] uppercase text-muted-foreground">
+            {kindAbbrev(node.item.kind)}
+          </span>
+        </button>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem onSelect={onOpen}>Open</ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem variant="destructive" onSelect={onDelete}>
+          Delete
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
+  )
+}
+
+function DeviceItem({
+  node,
+  active,
+  onOpen,
+  onDelete,
+}: {
+  node: { name: string; path: string; item: Device }
+  active: boolean
+  onOpen: () => void
+  onDelete: () => void
+}) {
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <button
+          type="button"
+          onClick={onOpen}
+          className={cn(
+            "flex w-full items-center gap-1.5 py-1 pl-3 pr-2 text-left transition-colors hover:bg-accent/40",
+            active && "bg-accent/60",
+          )}
+        >
+          <ProtocolIcon protocol={node.item.protocol} />
+          <span className="flex-1 truncate">{node.name}</span>
+          <span className="font-mono text-[9px] uppercase text-muted-foreground">
+            {node.item.protocol}
+          </span>
+        </button>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem onSelect={onOpen}>Open</ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem variant="destructive" onSelect={onDelete}>
+          Delete
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
+  )
+}
+
+function EdgeItem({
+  node,
+  active,
+  attached,
+  onOpen,
+  onDelete,
+}: {
+  node: { name: string; path: string; item: Edge }
+  active: boolean
+  attached: boolean
+  onOpen: () => void
+  onDelete: () => void
+}) {
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <button
+          type="button"
+          onClick={onOpen}
+          className={cn(
+            "flex w-full items-center gap-1.5 py-1 pl-3 pr-2 text-left transition-colors hover:bg-accent/40",
+            active && "bg-accent/60",
+          )}
+        >
+          <Server className="size-3.5 shrink-0 text-rose-600 dark:text-rose-400" />
+          <span className="flex-1 truncate">{node.name}</span>
+          {attached && (
+            <span
+              className="font-mono text-[9px] uppercase tracking-wider text-emerald-700 dark:text-emerald-400"
+              title="IDE is attached to this edge"
+            >
+              attached
+            </span>
+          )}
+          <span className="truncate font-mono text-[9px] lowercase text-muted-foreground">
+            {node.item.host}
+          </span>
+        </button>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem onSelect={onOpen}>Open</ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem variant="destructive" onSelect={onDelete}>
+          Delete
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
+  )
+}
+
 function ProtocolIcon({ protocol }: { protocol: Protocol }) {
   if (protocol === "modbus") {
-    return <Network className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+    return (
+      <Network className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+    )
   }
-  return <Cpu className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+  return (
+    <Cpu className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+  )
 }
 
 function kindAbbrev(k: ApplicationKind): string {

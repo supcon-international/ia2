@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -21,34 +21,66 @@ import {
 import { useRuntime } from "@/state/runtime"
 import type { ApplicationKind } from "@/types/generated/ApplicationKind"
 
-type Props = {
-  trigger: React.ReactNode
+type ControlledProps = {
+  trigger?: undefined
+  open: boolean
+  onOpenChange: (next: boolean) => void
+  /** Optional parent folder; the new POU is placed under it. */
+  parent?: string
 }
 
-export function NewPouDialog({ trigger }: Props) {
+type UncontrolledProps = {
+  trigger: React.ReactNode
+  open?: undefined
+  onOpenChange?: undefined
+  parent?: string
+}
+
+type Props = ControlledProps | UncontrolledProps
+
+export function NewPouDialog(props: Props) {
   const { createApp } = useRuntime()
-  const [open, setOpen] = useState(false)
+  const [internalOpen, setInternalOpen] = useState(false)
+  const open = props.open ?? internalOpen
+  const setOpen = props.onOpenChange ?? setInternalOpen
+  const parent = props.parent ?? ""
   const [name, setName] = useState("")
   const [kind, setKind] = useState<ApplicationKind>("program")
   const [submitting, setSubmitting] = useState(false)
+
+  // Clear inputs each time the dialog opens, so re-opening for a
+  // different folder doesn't leak last submission's text.
+  useEffect(() => {
+    if (open) {
+      setName("")
+      setKind("program")
+    }
+  }, [open, parent])
+
   const trimmed = name.trim()
+  const fullPath = parent ? `${parent}/${trimmed}` : trimmed
 
   const submit = async () => {
     if (!trimmed) return
     setSubmitting(true)
-    await createApp(trimmed, kind)
+    await createApp(fullPath, kind)
     setSubmitting(false)
     setOpen(false)
-    setName("")
-    setKind("program")
   }
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>{trigger}</DialogTrigger>
+      {props.trigger ? <DialogTrigger asChild>{props.trigger}</DialogTrigger> : null}
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>New POU</DialogTitle>
+          <DialogTitle>
+            New POU{" "}
+            {parent && (
+              <span className="font-mono text-xs text-muted-foreground">
+                under {parent}
+              </span>
+            )}
+          </DialogTitle>
         </DialogHeader>
         <div className="space-y-3">
           <div className="space-y-2">
@@ -63,6 +95,11 @@ export function NewPouDialog({ trigger }: Props) {
               }}
               autoFocus
             />
+            {trimmed && parent && (
+              <div className="font-mono text-[11px] text-muted-foreground">
+                applications/{fullPath}.st
+              </div>
+            )}
           </div>
           <div className="space-y-2">
             <Label>Type</Label>

@@ -17,7 +17,7 @@ export function ProjectPane() {
   const { project, closeProject } = useRuntime()
 
   return (
-    <aside className="flex min-w-0 flex-col">
+    <aside className="flex h-full min-w-0 flex-col">
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <button

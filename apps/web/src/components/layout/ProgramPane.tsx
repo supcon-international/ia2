@@ -1,7 +1,10 @@
-import { Play, RotateCcw, Save, Square } from "lucide-react"
+import { PanelRight, Play, RotateCcw, Save, Square } from "lucide-react"
+import { useState } from "react"
 
 import { STEditor } from "@/components/editor/STEditor"
+import { cn } from "@/lib/utils"
 import { useRuntime } from "@/state/runtime"
+import { VariablesPanel } from "./VariablesPanel"
 
 export function ProgramPane() {
   const {
@@ -17,9 +20,14 @@ export function ProgramPane() {
     error,
   } = useRuntime()
 
+  // Right-side Variables panel — defaults open so users discover the
+  // binding picker without hunting. Persists across POU switches but not
+  // across reloads (keeping the state ephemeral keeps the toolbar simple).
+  const [varsOpen, setVarsOpen] = useState(true)
+
   if (!currentApp) {
     return (
-      <main className="flex min-h-0 min-w-0 flex-col">
+      <main className="flex h-full min-h-0 min-w-0 flex-col">
         <div className="flex h-9 items-center border-b border-border px-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
           Program
         </div>
@@ -32,7 +40,7 @@ export function ProgramPane() {
   }
 
   return (
-    <main className="flex min-h-0 min-w-0 flex-col">
+    <main className="flex h-full min-h-0 min-w-0 flex-col">
       <div className="flex h-9 items-center justify-between border-b border-border pl-3 pr-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
         <span className="flex items-center gap-2 truncate normal-case tracking-normal text-foreground">
           <span className="truncate font-mono">{currentApp.name}</span>
@@ -93,6 +101,17 @@ export function ProgramPane() {
               Run
             </button>
           )}
+          <button
+            type="button"
+            onClick={() => setVarsOpen((v) => !v)}
+            title={varsOpen ? "Hide Variables panel" : "Show Variables panel"}
+            className={cn(
+              "flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium tracking-normal normal-case hover:bg-accent/40",
+              varsOpen ? "text-foreground" : "text-muted-foreground",
+            )}
+          >
+            <PanelRight className="size-3.5" />
+          </button>
         </div>
       </div>
       {error && (
@@ -100,12 +119,19 @@ export function ProgramPane() {
           {error}
         </div>
       )}
-      <div className="flex-1 min-h-0">
-        <STEditor
-          value={source}
-          onChange={setSource}
-          diagnostics={diagnostics}
-        />
+      <div className="flex min-h-0 flex-1">
+        <div className="min-h-0 min-w-0 flex-1">
+          <STEditor
+            value={source}
+            onChange={setSource}
+            diagnostics={diagnostics}
+          />
+        </div>
+        {varsOpen && (
+          <div className="hidden min-h-0 w-[240px] shrink-0 md:block">
+            <VariablesPanel />
+          </div>
+        )}
       </div>
     </main>
   )

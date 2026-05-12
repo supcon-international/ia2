@@ -21,9 +21,10 @@ pub use errors::StoreError;
 pub use paths::{
     default_projects_dir, default_state_path, load_last_opened, save_last_opened,
 };
-pub use store::ProjectStore;
+pub use store::{MigrationReport, ProjectStore};
 pub use types::{
-    Application, ApplicationKind, ApplicationSummary, Device, Direction, EthercatConfig, IoMap,
-    Mapping, ModbusChannel, ModbusChannelKind, ModbusConfig, ProjectListing, ProjectManifest,
-    ProjectTree, Protocol, ProtocolConfig,
+    Application, ApplicationKind, ApplicationSummary, Device, Direction, Edge, EthercatChannel,
+    EthercatConfig, EthercatDataType, EthercatPdoDirection, EthercatSlave, IoMap, Mapping,
+    ModbusChannel, ModbusChannelKind, ModbusConfig, ProgramInstance, ProjectListing,
+    ProjectManifest, ProjectTree, Protocol, ProtocolConfig, Task, Tasks,
 };

@@ -18,6 +18,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 ts-rs.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
 
 ironplc-bridge = { path = "../ironplc-bridge" }
 project = { path = "../project" }

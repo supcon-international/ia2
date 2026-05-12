@@ -17,12 +17,21 @@ pub enum StoreError {
     #[error("project already exists at {0}")]
     AlreadyExists(String),
 
-    #[error("invalid name '{0}': must be a single path segment, no slashes or dots")]
+    #[error(
+        "invalid name '{0}': each path segment must be non-empty, not start with '.', \
+         and contain no backslashes or colons"
+    )]
     InvalidName(String),
+
+    #[error("folder '{0}' already exists")]
+    FolderExists(String),
 
     #[error("application '{0}' not found")]
     AppNotFound(String),
 
     #[error("device '{0}' not found")]
     DeviceNotFound(String),
+
+    #[error("edge '{0}' not found")]
+    EdgeNotFound(String),
 }

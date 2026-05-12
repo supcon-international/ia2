@@ -70,7 +70,7 @@ export function MonitorPane() {
   const stale = !!lastSnapshot && !isRunning
 
   return (
-    <section className="flex min-h-0 min-w-0 flex-col border-t border-border bg-muted/20">
+    <section className="flex h-full min-h-0 min-w-0 flex-col border-t border-border bg-muted/20">
       <div className="flex h-7 items-center justify-between border-b border-border px-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
         <span>Monitor</span>
         {lastSnapshot && (
@@ -106,7 +106,7 @@ export function MonitorPane() {
           </div>
         ) : (
           <ul className="divide-y divide-border/60">
-            {vars.map((v) => {
+            {vars.map((v, i) => {
               const history = historyRef.current.get(v.name) ?? []
               const binary = isBoolType(v.type_name)
               const isPinned = pinned.has(v.name)
@@ -116,7 +116,7 @@ export function MonitorPane() {
                 : "text-sky-600 dark:text-sky-400"
               return (
                 <li
-                  key={v.name}
+                  key={`${i}:${v.name}`}
                   className={cn(
                     "flex items-center gap-2 px-2 py-1",
                     stale && "opacity-60",

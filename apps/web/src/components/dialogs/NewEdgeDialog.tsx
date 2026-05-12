@@ -11,15 +11,7 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
 import { useRuntime } from "@/state/runtime"
-import type { Protocol } from "@/types/generated/Protocol"
 
 type ControlledProps = {
   trigger?: undefined
@@ -37,41 +29,44 @@ type UncontrolledProps = {
 
 type Props = ControlledProps | UncontrolledProps
 
-export function NewDeviceDialog(props: Props) {
-  const { createDevice } = useRuntime()
+export function NewEdgeDialog(props: Props) {
+  const { createEdge } = useRuntime()
   const [internalOpen, setInternalOpen] = useState(false)
   const open = props.open ?? internalOpen
   const setOpen = props.onOpenChange ?? setInternalOpen
   const parent = props.parent ?? ""
   const [name, setName] = useState("")
-  const [protocol, setProtocol] = useState<Protocol>("modbus")
+  const [host, setHost] = useState("")
   const [submitting, setSubmitting] = useState(false)
 
   useEffect(() => {
     if (open) {
       setName("")
-      setProtocol("modbus")
+      setHost("")
     }
   }, [open, parent])
 
-  const trimmed = name.trim()
-  const fullPath = parent ? `${parent}/${trimmed}` : trimmed
+  const trimmedName = name.trim()
+  const trimmedHost = host.trim()
+  const fullPath = parent ? `${parent}/${trimmedName}` : trimmedName
 
   const submit = async () => {
-    if (!trimmed) return
+    if (!trimmedName || !trimmedHost) return
     setSubmitting(true)
-    await createDevice(fullPath, protocol)
+    await createEdge(fullPath, trimmedHost)
     setSubmitting(false)
     setOpen(false)
   }
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      {props.trigger ? <DialogTrigger asChild>{props.trigger}</DialogTrigger> : null}
+      {props.trigger ? (
+        <DialogTrigger asChild>{props.trigger}</DialogTrigger>
+      ) : null}
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            New device{" "}
+            New edge{" "}
             {parent && (
               <span className="font-mono text-xs text-muted-foreground">
                 under {parent}
@@ -81,44 +76,46 @@ export function NewDeviceDialog(props: Props) {
         </DialogHeader>
         <div className="space-y-3">
           <div className="space-y-2">
-            <Label htmlFor="device-name">Name</Label>
+            <Label htmlFor="edge-name">Name</Label>
             <Input
-              id="device-name"
-              placeholder="tank1"
+              id="edge-name"
+              placeholder="line1-controller"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") submit()
-              }}
               autoFocus
             />
-            {trimmed && parent && (
+            {trimmedName && parent && (
               <div className="font-mono text-[11px] text-muted-foreground">
-                devices/{fullPath}.toml
+                edges/{fullPath}.toml
               </div>
             )}
           </div>
           <div className="space-y-2">
-            <Label>Protocol</Label>
-            <Select
-              value={protocol}
-              onValueChange={(v) => setProtocol(v as Protocol)}
-            >
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="modbus">Modbus TCP</SelectItem>
-                <SelectItem value="ethercat">EtherCAT</SelectItem>
-              </SelectContent>
-            </Select>
+            <Label htmlFor="edge-host">SSH host or ~/.ssh/config alias</Label>
+            <Input
+              id="edge-host"
+              placeholder="line1.lan or production-line-1"
+              value={host}
+              onChange={(e) => setHost(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") submit()
+              }}
+            />
+            <p className="text-[11px] text-muted-foreground">
+              The IDE runs <span className="font-mono">ssh {host || "<host>"}</span>{" "}
+              — credentials come from your SSH agent / ~/.ssh/config, never
+              stored in the project.
+            </p>
           </div>
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={() => setOpen(false)}>
             Cancel
           </Button>
-          <Button onClick={submit} disabled={!trimmed || submitting}>
+          <Button
+            onClick={submit}
+            disabled={!trimmedName || !trimmedHost || submitting}
+          >
             Create
           </Button>
         </DialogFooter>

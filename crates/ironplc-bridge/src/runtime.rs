@@ -274,23 +274,29 @@ fn build_snapshot(
 ) -> VarSnapshot {
     let num_vars = running.num_variables();
     let mut vars = Vec::with_capacity(num_vars as usize);
+    // Skip slots that have no debug-map entry (unnamed VM scratch storage
+    // for FB internals / non-instantiated POUs) and dedup names that
+    // collide across POU types — `compile_project` concatenates every
+    // POU's source, so two POUs declaring the same variable name both
+    // get debug entries with that name. We keep the first-seen slot;
+    // surfacing the same name twice in the Monitor pane is worse than
+    // hiding the inactive duplicate (which is usually idle at zero anyway).
+    let mut seen = std::collections::HashSet::<String>::new();
     for i in 0..num_vars {
         let raw = match running.read_variable_raw(VarIndex::new(i)) {
             Ok(r) => r,
             Err(_) => continue,
         };
-        let (name, type_name, tag) = match debug_map.get(&i) {
-            Some(info) => (
-                info.name.clone(),
-                info.type_name.clone(),
-                info.iec_type_tag,
-            ),
-            None => (format!("var[{i}]"), String::new(), 0),
+        let Some(info) = debug_map.get(&i) else {
+            continue;
         };
+        if !seen.insert(info.name.clone()) {
+            continue;
+        }
         vars.push(VarValue {
-            name,
-            type_name,
-            value: format_variable_value(raw, tag),
+            name: info.name.clone(),
+            type_name: info.type_name.clone(),
+            value: format_variable_value(raw, info.iec_type_tag),
         });
     }
     VarSnapshot {

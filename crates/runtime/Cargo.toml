@@ -1,12 +1,30 @@
 [package]
-name = "runtime"
+name = "controlsoftware-runtime"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "controlsoftware-runtime"
+path = "src/main.rs"
+
 [dependencies]
 tokio.workspace = true
+tokio-stream.workspace = true
+axum.workspace = true
+tower-http.workspace = true
+futures-util.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Reused IDE-side crates — the whole point of this binary is that it's a
+# thin CLI wrapper around the bridge + project loader. No HTTP/LSP/CORS
+# from the IDE-side `server` crate; nothing that wouldn't run on a
+# headless edge box.
+ironplc-bridge = { path = "../ironplc-bridge" }
+project = { path = "../project" }

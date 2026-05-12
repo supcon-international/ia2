@@ -98,7 +98,7 @@ export function IoMapPane() {
   }
 
   return (
-    <main className="flex min-h-0 min-w-0 flex-col">
+    <main className="flex h-full min-h-0 min-w-0 flex-col">
       <div className="flex h-9 items-center justify-between border-b border-border pl-3 pr-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
         <span className="truncate normal-case tracking-normal text-foreground">
           IO Mapping
@@ -303,8 +303,10 @@ function channelsOf(
   deviceName: string,
 ): string[] {
   const device = project?.devices.find((d) => d.name === deviceName)
-  if (!device || device.protocol !== "modbus") return []
-  return device.channels.map((c) => c.name)
+  if (!device) return []
+  if (device.protocol === "modbus") return device.channels.map((c) => c.name)
+  if (device.protocol === "ethercat") return device.channels.map((c) => c.name)
+  return []
 }
 
 /** Resolve a mapping's current bus value from the demo slave snapshot. */
@@ -315,6 +317,9 @@ function currentValue(
 ): string | null {
   if (!slave || !project) return null
   const device = project.devices.find((d) => d.name === mapping.device)
+  // EtherCAT sim-mode buffer lives inside the runtime thread and isn't
+  // peekable like the demo Modbus slave, so leave the "Current" column
+  // empty for ethercat channels rather than showing stale/zero values.
   if (!device || device.protocol !== "modbus") return null
   const channel = device.channels.find((c) => c.name === mapping.channel)
   if (!channel) return null

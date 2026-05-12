@@ -1,7 +1,7 @@
+mod edges;
 mod error;
 mod events;
 mod routes;
-mod sample;
 mod state;
 
 use axum::{
@@ -65,6 +65,10 @@ async fn main() -> anyhow::Result<()> {
         // Applications (POUs)
         .route("/api/applications", post(routes::create_application))
         .route(
+            "/api/applications/folders",
+            post(routes::create_application_folder),
+        )
+        .route(
             "/api/applications/{name}",
             get(routes::get_application)
                 .put(routes::save_application)
@@ -77,13 +81,40 @@ async fn main() -> anyhow::Result<()> {
         // Devices
         .route("/api/devices", post(routes::create_device))
         .route(
+            "/api/devices/folders",
+            post(routes::create_device_folder),
+        )
+        .route(
             "/api/devices/{name}",
             get(routes::get_device)
                 .put(routes::update_device)
                 .delete(routes::delete_device),
         )
+        // Edges (deploy targets)
+        .route("/api/edges", post(routes::create_edge))
+        .route(
+            "/api/edges/folders",
+            post(routes::create_edge_folder),
+        )
+        .route(
+            "/api/edges/{name}",
+            get(routes::get_edge)
+                .put(routes::update_edge)
+                .delete(routes::delete_edge),
+        )
+        .route("/api/edges/{name}/probe", get(routes::probe_edge_route))
+        .route("/api/edges/{name}/deploy", post(routes::deploy_edge_route))
+        .route("/api/edges/{name}/attach", post(routes::attach_edge_route))
+        .route("/api/edges/{name}/detach", post(routes::detach_edge_route))
+        .route(
+            "/api/edges/{name}/attachment",
+            get(routes::attachment_status),
+        )
         // IO Mapping
         .route("/api/iomap", get(routes::get_iomap).put(routes::put_iomap))
+        // Tasks (project-level scheduling)
+        .route("/api/tasks", get(routes::get_tasks).put(routes::put_tasks))
+        .route("/api/project/migrate-tasks", post(routes::migrate_tasks))
         // Compile / runtime
         .route("/api/check", post(routes::check))
         .route("/api/run", post(routes::run))

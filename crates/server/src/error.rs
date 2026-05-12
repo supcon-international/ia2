@@ -22,9 +22,17 @@ impl From<StoreError> for ApiError {
             StoreError::InvalidName(n) => Self::BadRequest(format!("invalid name: {n}")),
             StoreError::AppNotFound(n) => Self::NotFound(format!("application '{n}' not found")),
             StoreError::DeviceNotFound(n) => Self::NotFound(format!("device '{n}' not found")),
+            StoreError::EdgeNotFound(n) => Self::NotFound(format!("edge '{n}' not found")),
             other => Self::Internal(other.to_string()),
         }
     }
+}
+
+/// Wrap a StoreError as ApiError. Tiny helper for places where the
+/// `.map_err(Into::into)` form is awkward — e.g. when not inside
+/// `with_project`'s closure.
+pub fn project_err(e: StoreError) -> ApiError {
+    ApiError::from(e)
 }
 
 impl From<BridgeError> for ApiError {

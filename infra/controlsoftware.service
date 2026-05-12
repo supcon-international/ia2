@@ -1,0 +1,48 @@
+[Unit]
+Description=controlsoftware PLC runtime
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Atomic deploys point `current` at the latest versioned dir; the runtime
+# binary + project dir always live under there.
+Environment=INSTALL_DIR=/opt/controlsoftware
+ExecStart=/opt/controlsoftware/current/runtime \
+  --project-dir /opt/controlsoftware/current/project \
+  --bind 127.0.0.1:13001
+
+# Restart on crash but back off if we're crash-looping (don't hammer the
+# bus / journald).
+Restart=on-failure
+RestartSec=3s
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Stop with SIGTERM first; the runtime stops the scan loop cooperatively.
+# 10s should be plenty even for slow Modbus connect timeouts.
+KillSignal=SIGTERM
+TimeoutStopSec=10s
+
+# Logs go to journald — `journalctl -u controlsoftware -f` on the edge.
+StandardOutput=journal
+StandardError=journal
+
+# Run as root for now so EtherCAT (when wired) has CAP_NET_RAW. For Modbus-
+# only deployments, switch to a dedicated user:
+#   User=controlsoftware
+#   AmbientCapabilities=
+# and remove the cap line below.
+User=root
+AmbientCapabilities=CAP_NET_RAW
+
+# Hardening — tighten what the runtime can reach. Loosen if you find a
+# legitimate access blocked.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# Allow writes only under the install dir; everything else is read-only.
+ReadWritePaths=/opt/controlsoftware
+
+[Install]
+WantedBy=multi-user.target

@@ -1,6 +1,6 @@
 export function AgentsPane() {
   return (
-    <aside className="flex min-w-0 flex-col">
+    <aside className="flex h-full min-w-0 flex-col">
       <div className="flex h-9 items-center border-b border-border px-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
         Agents
       </div>

@@ -1,6 +1,7 @@
 (*
-    Default starter program. Counter increments every 100ms task scan;
-    blink flips every 50 cycles.
+    Default starter program. Counter increments each scan; blink flips
+    every 50 cycles. The scan period is set in the project's Tasks pane
+    (defaults to 100 ms).
 
     Map `counter` or `blink` to a device channel in the IO Mapping view
     to drive Modbus / EtherCAT outputs.
@@ -17,10 +18,3 @@ PROGRAM main
         blink := NOT blink;
     END_IF;
 END_PROGRAM
-
-CONFIGURATION config
-    RESOURCE plc_res ON PLC
-        TASK plc_task(INTERVAL := T#100ms, PRIORITY := 1);
-        PROGRAM plc_task_instance WITH plc_task : main;
-    END_RESOURCE
-END_CONFIGURATION
