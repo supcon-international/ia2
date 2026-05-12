@@ -57,16 +57,23 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/health", get(routes::health))
+        .route("/api/health", get(routes::api_health))
         // Project lifecycle
         .route("/api/projects", get(routes::list_projects).post(routes::create_project))
         .route("/api/projects/open", post(routes::open_project))
         .route("/api/projects/close", post(routes::close_project))
         .route("/api/project", get(routes::project_tree))
+        .route("/api/project/validate", post(routes::validate_project))
+        .route("/api/project/variables", get(routes::project_variables))
         // Applications (POUs)
         .route("/api/applications", post(routes::create_application))
         .route(
             "/api/applications/folders",
             post(routes::create_application_folder),
+        )
+        .route(
+            "/api/applications/folders/{*path}",
+            axum::routing::delete(routes::delete_application_folder),
         )
         .route(
             "/api/applications/{name}",
@@ -85,6 +92,10 @@ async fn main() -> anyhow::Result<()> {
             post(routes::create_device_folder),
         )
         .route(
+            "/api/devices/folders/{*path}",
+            axum::routing::delete(routes::delete_device_folder),
+        )
+        .route(
             "/api/devices/{name}",
             get(routes::get_device)
                 .put(routes::update_device)
@@ -95,6 +106,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/edges/folders",
             post(routes::create_edge_folder),
+        )
+        .route(
+            "/api/edges/folders/{*path}",
+            axum::routing::delete(routes::delete_edge_folder),
         )
         .route(
             "/api/edges/{name}",
@@ -120,12 +135,23 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/run", post(routes::run))
         .route("/api/stop", post(routes::stop))
         .route("/api/events", get(routes::events))
+        // Synchronous runtime queries — agent-friendly alternatives to SSE.
+        .route("/api/runtime/snapshot", get(routes::runtime_snapshot))
+        .route("/api/runtime/status", get(routes::runtime_status))
+        .route(
+            "/api/runtime/variables/{name}",
+            post(routes::write_runtime_variable),
+        )
         // LSP bridge — WebSocket-upgraded; the browser-side monaco-
         // languageclient connects here and talks LSP JSON-RPC to a
         // freshly-spawned ironplc LSP process.
         .route("/api/lsp", get(routes::lsp))
-        // Internal: peek demo slave's memory for verification + UI display
+        // Internal: peek + poke the in-process demo Modbus slave.
         .route("/api/_demo/slave", get(routes::demo_slave))
+        .route(
+            "/api/_demo/slave/{kind}/{addr}",
+            axum::routing::put(routes::poke_demo_slave),
+        )
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state);

@@ -383,6 +383,36 @@ impl ProjectStore {
         Ok(())
     }
 
+    pub fn delete_application_folder(&self, path: &str) -> Result<(), StoreError> {
+        self.delete_folder("applications", path)
+    }
+
+    pub fn delete_device_folder(&self, path: &str) -> Result<(), StoreError> {
+        self.delete_folder("devices", path)
+    }
+
+    pub fn delete_edge_folder(&self, path: &str) -> Result<(), StoreError> {
+        self.delete_folder("edges", path)
+    }
+
+    /// Remove a folder under `subdir`. Requires the folder to be empty
+    /// (no .st / .toml children, no sub-folders) — agents and humans
+    /// alike should delete contents explicitly first so an accidental
+    /// recursive wipe isn't possible via a single API call.
+    fn delete_folder(&self, subdir: &str, path: &str) -> Result<(), StoreError> {
+        validate_path(path)?;
+        let dir = self.root.join(subdir).join(path);
+        if !dir.exists() {
+            return Err(StoreError::FolderNotFound(path.into()));
+        }
+        let mut entries = fs::read_dir(&dir)?;
+        if entries.next().is_some() {
+            return Err(StoreError::FolderNotEmpty(path.into()));
+        }
+        fs::remove_dir(&dir)?;
+        Ok(())
+    }
+
     // ---------------- IO Mapping ----------------
 
     pub fn read_iomap(&self) -> Result<IoMap, StoreError> {

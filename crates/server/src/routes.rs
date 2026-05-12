@@ -24,7 +24,7 @@ use futures_util::stream::Stream;
 use futures_util::{SinkExt, StreamExt as FuturesStreamExt};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use ironplc_bridge::{CheckDiagnostic, DeviceSpec, VariableInfo};
+use ironplc_bridge::{CheckDiagnostic, DeviceSpec, ProgramHandle, RuntimeWriteError, VarSnapshot, VariableInfo};
 use project::{
     Application, ApplicationKind, Device, Edge, IoMap, MigrationReport, ProjectListing,
     ProjectManifest, ProjectStore, ProjectTree, Protocol, Tasks, default_projects_dir,
@@ -146,6 +146,12 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthStatus> {
     })
 }
 
+/// /api/health alias — same payload as /health. Exists so agents that
+/// scope to /api/* don't have to special-case liveness.
+pub async fn api_health(State(state): State<AppState>) -> Json<HealthStatus> {
+    health(State(state)).await
+}
+
 // ============================================================
 //  Project lifecycle
 // ============================================================
@@ -189,6 +195,11 @@ pub async fn close_project(State(state): State<AppState>) -> Json<RunResponse> {
         handle.stop();
     }
     *state.project.lock().expect("project") = None;
+    // Wipe runtime caches — the data belonged to the project that's
+    // being closed, and stale-looking values across projects would
+    // confuse anyone hitting /api/runtime/snapshot.
+    *state.last_snapshot.lock().expect("last_snapshot") = None;
+    *state.last_error.lock().expect("last_error") = None;
     Json(RunResponse { ok: true })
 }
 
@@ -555,6 +566,83 @@ pub async fn check(body: String) -> Json<Vec<CheckDiagnostic>> {
     Json(ironplc_bridge::check(&body))
 }
 
+/// Compile the whole project (every POU + tasks.toml-synthesized
+/// CONFIGURATION) without spawning. Returns diagnostics from the parser
+/// + analyzer + codegen pipeline. Empty list = clean; safe to Run.
+///
+/// Agent use-case: validate before Deploy. Cheaper than POST /api/run
+/// because no bridge thread or devices are touched.
+pub async fn validate_project(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<CheckDiagnostic>>, ApiError> {
+    with_project(&state, |store| {
+        // compile_project returns Ok(Container) when clean, Err on any
+        // problem. Convert the error into a single CheckDiagnostic for
+        // the agent — full per-line diagnostics live in /api/check for
+        // POU-level editing. compile_project's failure surface is one of:
+        //  - missing tasks.toml programs
+        //  - parser / analyzer / codegen diagnostics (synthetic source)
+        //  - file read failures
+        match ironplc_bridge::compile_project(store) {
+            Ok(_) => Ok(vec![]),
+            Err(e) => Ok(vec![CheckDiagnostic {
+                severity: "error".into(),
+                code: "project-validate".into(),
+                message: e.to_string(),
+                start_line: 1,
+                start_column: 1,
+                end_line: 1,
+                end_column: 1,
+            }]),
+        }
+    })
+    .map(Json)
+}
+
+// ============================================================
+//  Cross-POU variable index
+// ============================================================
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct ProjectVariable {
+    pub application: String,
+    pub name: String,
+    pub type_name: String,
+    pub direction: String,
+}
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct ProjectVariables {
+    pub variables: Vec<ProjectVariable>,
+}
+
+/// All variables declared anywhere in the project, qualified by their
+/// owning POU. Used by debug agents to answer "which POU declares
+/// `counter`?" / "list every BOOL variable" without round-tripping
+/// per-POU.
+pub async fn project_variables(
+    State(state): State<AppState>,
+) -> Result<Json<ProjectVariables>, ApiError> {
+    with_project(&state, |store| {
+        let apps = store.list_applications()?;
+        let mut out = Vec::new();
+        for app in apps {
+            for v in ironplc_bridge::extract_variables(&app.source) {
+                out.push(ProjectVariable {
+                    application: app.name.clone(),
+                    name: v.name,
+                    type_name: v.type_name,
+                    direction: v.direction,
+                });
+            }
+        }
+        Ok(ProjectVariables { variables: out })
+    })
+    .map(Json)
+}
+
 pub async fn run(
     State(state): State<AppState>,
     _body: Option<Json<RunRequest>>,
@@ -587,9 +675,15 @@ pub async fn run(
     let handle = ironplc_bridge::spawn(container, device_specs, mappings);
     let mut rx = handle.subscribe();
     let event_tx = state.event_tx.clone();
+    let last_snapshot_cache = state.last_snapshot.clone();
+    // Fresh run wipes the prior error; if this run errors, the SSE error
+    // event will refill it.
+    *state.last_error.lock().expect("last_error mutex") = None;
 
     tokio::spawn(async move {
         while let Ok(snap) = rx.recv().await {
+            *last_snapshot_cache.lock().expect("last_snapshot mutex") =
+                Some(snap.clone());
             let _ = event_tx.send(AppEvent::Snapshot(snap));
         }
     });
@@ -642,6 +736,224 @@ pub async fn events(
         Err(_) => None,
     });
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+}
+
+// ============================================================
+//  Runtime — synchronous queries + variable writes
+// ============================================================
+
+/// Most recent VarSnapshot from the running bridge, or `null` when
+/// nothing has been snapshotted in the current session (no run, or
+/// project was just closed). Lets agents poll one-shot without
+/// subscribing to /api/events SSE.
+pub async fn runtime_snapshot(
+    State(state): State<AppState>,
+) -> Json<Option<VarSnapshot>> {
+    Json(state.last_snapshot.lock().expect("last_snapshot").clone())
+}
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct RuntimeStatus {
+    pub running: bool,
+    pub project: Option<String>,
+    /// Program instances declared in tasks.toml (what's actually scheduled).
+    pub program_instances: Vec<String>,
+    pub devices: Vec<String>,
+    /// Scan count from the most recent snapshot; 0 before the first one.
+    pub scan_count: u64,
+    /// Timestamp_us of the most recent snapshot, or 0.
+    pub last_snapshot_us: u64,
+    pub last_error: Option<String>,
+}
+
+/// One-shot overview of the runtime — designed for agents who want
+/// "what's going on right now" without composing /health + /api/project
+/// + the SSE stream.
+pub async fn runtime_status(
+    State(state): State<AppState>,
+) -> Json<RuntimeStatus> {
+    let project_open = state.project.lock().expect("project").is_some();
+    let running = state.program.lock().expect("program").is_some();
+    let (project_name, programs, devices) = {
+        let guard = state.project.lock().expect("project");
+        match guard.as_ref() {
+            Some(store) => {
+                let tasks = store.read_tasks().ok().flatten().unwrap_or_default();
+                let programs = tasks
+                    .programs
+                    .iter()
+                    .map(|p| p.instance.clone())
+                    .collect();
+                let devices = store
+                    .list_devices()
+                    .map(|ds| ds.iter().map(|d| d.name.clone()).collect())
+                    .unwrap_or_default();
+                (Some(store.name().to_string()), programs, devices)
+            }
+            None => (None, vec![], vec![]),
+        }
+    };
+    let snap = state.last_snapshot.lock().expect("last_snapshot").clone();
+    let last_error = state.last_error.lock().expect("last_error").clone();
+    let _ = project_open; // suppress unused — kept for symmetry with runtime
+    Json(RuntimeStatus {
+        running,
+        project: project_name,
+        program_instances: programs,
+        devices,
+        scan_count: snap.as_ref().map(|s| s.scan_count).unwrap_or(0),
+        last_snapshot_us: snap.as_ref().map(|s| s.timestamp_us).unwrap_or(0),
+        last_error,
+    })
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct WriteVariableRequest {
+    /// Raw i32 value to write — the VM's variable-write primitive is
+    /// `write_variable(VarIndex, i32)`, so callers map their domain type
+    /// to an i32 (BOOL → 0/1, USINT/UINT → numeric, etc.).
+    pub value: i32,
+}
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct WriteVariableResponse {
+    pub name: String,
+    pub value: i32,
+}
+
+/// Poke a variable while the program is running. Applied between scan
+/// rounds (so the next round's logic sees the new value). 404 if the
+/// name doesn't resolve to any declared variable; 409 if no program is
+/// running.
+pub async fn write_runtime_variable(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+    Json(req): Json<WriteVariableRequest>,
+) -> Result<Json<WriteVariableResponse>, ApiError> {
+    // Clone the handle out of the mutex so we don't hold a sync lock
+    // across the .await below — see the bridge::ProgramHandle docs.
+    let handle: ProgramHandle = state
+        .program
+        .lock()
+        .expect("program")
+        .as_ref()
+        .cloned()
+        .ok_or(ApiError::Conflict("no program running".into()))?;
+    match handle.write_variable(&name, req.value).await {
+        Ok(value) => Ok(Json(WriteVariableResponse { name, value })),
+        Err(RuntimeWriteError::UnknownVariable(n)) => {
+            Err(ApiError::NotFound(format!("variable '{n}' not declared")))
+        }
+        Err(RuntimeWriteError::Disconnected) => {
+            Err(ApiError::Conflict("scan loop has stopped".into()))
+        }
+        Err(RuntimeWriteError::Vm(e)) => Err(ApiError::Internal(e)),
+    }
+}
+
+// ============================================================
+//  Folder deletion (applications / devices / edges)
+// ============================================================
+
+pub async fn delete_application_folder(
+    State(state): State<AppState>,
+    AxumPath(path): AxumPath<String>,
+) -> Result<Json<RunResponse>, ApiError> {
+    with_project(&state, |store| {
+        store.delete_application_folder(&path).map_err(Into::into)
+    })?;
+    Ok(Json(RunResponse { ok: true }))
+}
+
+pub async fn delete_device_folder(
+    State(state): State<AppState>,
+    AxumPath(path): AxumPath<String>,
+) -> Result<Json<RunResponse>, ApiError> {
+    with_project(&state, |store| {
+        store.delete_device_folder(&path).map_err(Into::into)
+    })?;
+    Ok(Json(RunResponse { ok: true }))
+}
+
+pub async fn delete_edge_folder(
+    State(state): State<AppState>,
+    AxumPath(path): AxumPath<String>,
+) -> Result<Json<RunResponse>, ApiError> {
+    with_project(&state, |store| {
+        store.delete_edge_folder(&path).map_err(Into::into)
+    })?;
+    Ok(Json(RunResponse { ok: true }))
+}
+
+// ============================================================
+//  Demo-slave poke — inject input signals
+// ============================================================
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct DemoSlavePoke {
+    /// For coil / discrete_input, value is interpreted as boolean
+    /// (non-zero = TRUE); for holding_register / input_register it's
+    /// truncated to u16.
+    pub value: i32,
+}
+
+/// Write a single address in the in-process demo Modbus slave. Useful
+/// for simulating input signals during agent-driven testing — e.g.,
+/// flip a discrete_input to test a fault path without driving Modbus
+/// from real hardware. `kind` matches `ModbusChannelKind`.
+pub async fn poke_demo_slave(
+    State(state): State<AppState>,
+    AxumPath((kind, addr)): AxumPath<(String, u16)>,
+    Json(req): Json<DemoSlavePoke>,
+) -> Result<Json<RunResponse>, ApiError> {
+    let addr = addr as usize;
+    // Bind each Arc<Mutex<...>> to a named local so the temporary lives
+    // through the .lock() borrow — otherwise the returned Arc is dropped
+    // at the end of the same statement.
+    match kind.as_str() {
+        "coil" => {
+            let arc = state.demo_slave.coils();
+            let mut guard = arc.lock().unwrap();
+            *guard
+                .get_mut(addr)
+                .ok_or_else(|| ApiError::BadRequest("address out of range".into()))? =
+                req.value != 0;
+        }
+        "discrete_input" => {
+            let arc = state.demo_slave.discrete_inputs();
+            let mut guard = arc.lock().unwrap();
+            *guard
+                .get_mut(addr)
+                .ok_or_else(|| ApiError::BadRequest("address out of range".into()))? =
+                req.value != 0;
+        }
+        "holding_register" => {
+            let arc = state.demo_slave.holding_registers();
+            let mut guard = arc.lock().unwrap();
+            *guard
+                .get_mut(addr)
+                .ok_or_else(|| ApiError::BadRequest("address out of range".into()))? =
+                req.value as u16;
+        }
+        "input_register" => {
+            let arc = state.demo_slave.input_registers();
+            let mut guard = arc.lock().unwrap();
+            *guard
+                .get_mut(addr)
+                .ok_or_else(|| ApiError::BadRequest("address out of range".into()))? =
+                req.value as u16;
+        }
+        other => {
+            return Err(ApiError::BadRequest(format!(
+                "unknown kind '{other}' — use coil / discrete_input / holding_register / input_register"
+            )));
+        }
+    }
+    Ok(Json(RunResponse { ok: true }))
 }
 
 // ============================================================

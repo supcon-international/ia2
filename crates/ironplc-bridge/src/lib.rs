@@ -6,7 +6,7 @@ mod errors;
 mod runtime;
 
 pub use errors::BridgeError;
-pub use runtime::{DeviceSpec, ProgramHandle, VarSnapshot, VarValue, spawn};
+pub use runtime::{DeviceSpec, ProgramHandle, RuntimeWriteError, VarSnapshot, VarValue, spawn};
 
 use ironplc_container::Container;
 use ironplc_dsl::common::{

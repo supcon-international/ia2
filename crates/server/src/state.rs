@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use iomap_modbus::DemoSlave;
-use ironplc_bridge::ProgramHandle;
+use ironplc_bridge::{ProgramHandle, VarSnapshot};
 use project::ProjectStore;
 use tokio::sync::broadcast;
 
@@ -23,6 +23,15 @@ pub struct AppState {
     /// name. Lifecycle is owned by the server process — dropping an
     /// entry kills the child via `kill_on_drop`.
     pub attachments: Arc<AttachmentRegistry>,
+    /// Most recent `VarSnapshot` from the running bridge. Updated by the
+    /// SSE forwarder task; persists across stop so the Monitor pane (and
+    /// debug agents) can read the last-known state after the program
+    /// ends. Cleared on close-project.
+    pub last_snapshot: Arc<Mutex<Option<VarSnapshot>>>,
+    /// Last bridge / runtime error surfaced to /api/runtime/status, or
+    /// `None` if the last run is clean. Updated when AppEvent::Error
+    /// fires and on a clean Started.
+    pub last_error: Arc<Mutex<Option<String>>>,
 }
 
 impl AppState {
@@ -36,6 +45,8 @@ impl AppState {
             demo_slave,
             demo_modbus_addr,
             attachments: AttachmentRegistry::new(),
+            last_snapshot: Arc::new(Mutex::new(None)),
+            last_error: Arc::new(Mutex::new(None)),
         }
     }
 }

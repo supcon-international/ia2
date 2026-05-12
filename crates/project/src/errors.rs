@@ -26,6 +26,12 @@ pub enum StoreError {
     #[error("folder '{0}' already exists")]
     FolderExists(String),
 
+    #[error("folder '{0}' not found")]
+    FolderNotFound(String),
+
+    #[error("folder '{0}' is not empty — remove its contents first")]
+    FolderNotEmpty(String),
+
     #[error("application '{0}' not found")]
     AppNotFound(String),
 

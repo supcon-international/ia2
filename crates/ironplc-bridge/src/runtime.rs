@@ -45,18 +45,71 @@ pub struct DeviceSpec {
     pub config: ProtocolConfig,
 }
 
+/// Reasons a variable write can't be honoured.
+#[derive(Debug, thiserror::Error)]
+pub enum RuntimeWriteError {
+    #[error("unknown variable '{0}' — not in the program's debug map")]
+    UnknownVariable(String),
+    #[error("scan loop has stopped — no writes will reach the VM")]
+    Disconnected,
+    #[error("vm trap during write: {0}")]
+    Vm(String),
+}
+
+/// Out-of-band commands the scan loop drains between rounds. Used so
+/// HTTP handlers (in the server's tokio runtime) can poke the VM (which
+/// lives on a dedicated std::thread + current_thread runtime).
+enum RuntimeCommand {
+    WriteVariable {
+        name: String,
+        value: i32,
+        ack: tokio::sync::oneshot::Sender<Result<i32, RuntimeWriteError>>,
+    },
+}
+
+/// Cheap-to-clone handle to a running scan loop. Multiple clones share the
+/// same `stop` flag, snapshot fan-out, and command queue. Drop the last
+/// clone to let resources go; explicit `.stop()` is preferred for clean
+/// shutdown.
+#[derive(Clone)]
 pub struct ProgramHandle {
     stop: Arc<AtomicBool>,
     snapshot_tx: broadcast::Sender<VarSnapshot>,
+    cmd_tx: tokio::sync::mpsc::UnboundedSender<RuntimeCommand>,
 }
 
 impl ProgramHandle {
+    /// Cooperative stop. The scan loop checks the flag at the top of each
+    /// round; expect a few extra rounds before it actually exits.
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
     }
 
+    /// Subscribe to the per-cycle VarSnapshot stream.
     pub fn subscribe(&self) -> broadcast::Receiver<VarSnapshot> {
         self.snapshot_tx.subscribe()
+    }
+
+    /// Poke a variable while the program is running. Used by debug agents
+    /// to force a state (toggle a setpoint, simulate an event flag, etc.).
+    ///
+    /// The write is applied between scan rounds, so it's seen by the next
+    /// cycle's logic. Returns the value that was written; an error if the
+    /// name doesn't resolve to a known variable or the VM traps.
+    pub async fn write_variable(
+        &self,
+        name: &str,
+        value: i32,
+    ) -> Result<i32, RuntimeWriteError> {
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        self.cmd_tx
+            .send(RuntimeCommand::WriteVariable {
+                name: name.to_string(),
+                value,
+                ack: ack_tx,
+            })
+            .map_err(|_| RuntimeWriteError::Disconnected)?;
+        ack_rx.await.map_err(|_| RuntimeWriteError::Disconnected)?
     }
 }
 
@@ -67,6 +120,7 @@ pub fn spawn(
 ) -> ProgramHandle {
     let stop = Arc::new(AtomicBool::new(false));
     let (snapshot_tx, _) = broadcast::channel(64);
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
 
     let stop_clone = stop.clone();
     let snapshot_tx_clone = snapshot_tx.clone();
@@ -88,10 +142,15 @@ pub fn spawn(
             mappings,
             stop_clone,
             snapshot_tx_clone,
+            cmd_rx,
         ));
     });
 
-    ProgramHandle { stop, snapshot_tx }
+    ProgramHandle {
+        stop,
+        snapshot_tx,
+        cmd_tx,
+    }
 }
 
 async fn run_loop_async(
@@ -100,6 +159,7 @@ async fn run_loop_async(
     mappings: Vec<Mapping>,
     stop: Arc<AtomicBool>,
     snapshot_tx: broadcast::Sender<VarSnapshot>,
+    mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<RuntimeCommand>,
 ) {
     // ---- Connect devices (skip the ones that fail rather than abort) ----
     let mut devices: Vec<Box<dyn IoDevice>> = Vec::with_capacity(device_specs.len());
@@ -197,6 +257,28 @@ async fn run_loop_async(
         }
         if running.stop_requested() {
             break;
+        }
+
+        // Drain any pending out-of-band commands (variable writes etc.)
+        // Non-blocking — apply what's ready, leave the rest for the next
+        // round. Drops the ack channel on failure to signal disconnect.
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            match cmd {
+                RuntimeCommand::WriteVariable { name, value, ack } => {
+                    let result = match var_index_by_name.get(&name).copied() {
+                        Some(idx) => match running
+                            .write_variable(VarIndex::new(idx), value)
+                        {
+                            Ok(()) => Ok(value),
+                            Err(trap) => {
+                                Err(RuntimeWriteError::Vm(format!("{trap:?}")))
+                            }
+                        },
+                        None => Err(RuntimeWriteError::UnknownVariable(name)),
+                    };
+                    let _ = ack.send(result);
+                }
+            }
         }
 
         // Input phase: bus → VM variables
