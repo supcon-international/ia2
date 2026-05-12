@@ -24,7 +24,9 @@ use futures_util::stream::Stream;
 use futures_util::{SinkExt, StreamExt as FuturesStreamExt};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use ironplc_bridge::{CheckDiagnostic, DeviceSpec, ProgramHandle, RuntimeWriteError, VarSnapshot, VariableInfo};
+use ironplc_bridge::{
+    CheckDiagnostic, DeviceSpec, ProgramHandle, RuntimeWriteError, VarSnapshot, VariableInfo,
+};
 use project::{
     Application, ApplicationKind, Device, Edge, IoMap, MigrationReport, ProjectListing,
     ProjectManifest, ProjectStore, ProjectTree, Protocol, Tasks, default_projects_dir,
@@ -595,6 +597,54 @@ pub async fn validate_project(
                 end_column: 1,
             }]),
         }
+    })
+    .map(Json)
+}
+
+// ============================================================
+//  Cross-POU declaration index (real schedulable POU names)
+// ============================================================
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct PouInProject {
+    /// File the declaration was found in — project-relative POU path
+    /// (e.g. `pid_loops/temperature_pid`).
+    pub application: String,
+    /// IEC POU identifier — what `PROGRAM <inst> WITH <task> : <name>`
+    /// references in a CONFIGURATION block.
+    pub name: String,
+    /// "program" | "function_block" | "function".
+    pub kind: String,
+}
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct ProjectPous {
+    pub pous: Vec<PouInProject>,
+}
+
+/// Every IEC POU declared anywhere in the project, parser-driven so it
+/// reflects what's actually schedulable (the file-level `kind` is a
+/// heuristic — multi-POU files mix Program + FunctionBlock + Function
+/// declarations). Agents and the Tasks pane both use this to populate
+/// the "PROGRAM to schedule" dropdown.
+pub async fn project_pous(
+    State(state): State<AppState>,
+) -> Result<Json<ProjectPous>, ApiError> {
+    with_project(&state, |store| {
+        let apps = store.list_applications()?;
+        let mut out = Vec::new();
+        for app in apps {
+            for d in ironplc_bridge::extract_pou_declarations(&app.source) {
+                out.push(PouInProject {
+                    application: app.name.clone(),
+                    name: d.name,
+                    kind: d.kind,
+                });
+            }
+        }
+        Ok(ProjectPous { pous: out })
     })
     .map(Json)
 }

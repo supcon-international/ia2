@@ -65,6 +65,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/project", get(routes::project_tree))
         .route("/api/project/validate", post(routes::validate_project))
         .route("/api/project/variables", get(routes::project_variables))
+        .route("/api/project/pous", get(routes::project_pous))
         // Applications (POUs)
         .route("/api/applications", post(routes::create_application))
         .route(

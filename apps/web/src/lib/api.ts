@@ -12,6 +12,7 @@ import type { IoMap } from "@/types/generated/IoMap"
 import type { ProjectInfo } from "@/types/generated/ProjectInfo"
 import type { MigrationResponse } from "@/types/generated/MigrationResponse"
 import type { ProjectListing } from "@/types/generated/ProjectListing"
+import type { ProjectPous } from "@/types/generated/ProjectPous"
 import type { ProjectTree } from "@/types/generated/ProjectTree"
 import type { Protocol } from "@/types/generated/Protocol"
 import type { RunResponse } from "@/types/generated/RunResponse"
@@ -214,6 +215,13 @@ export async function migrateTasks(): Promise<MigrationResponse> {
   return jsonOrThrow(
     await fetch(`/api/project/migrate-tasks`, { method: "POST" }),
     "POST /api/project/migrate-tasks",
+  )
+}
+
+export async function fetchProjectPous(): Promise<ProjectPous> {
+  return jsonOrThrow(
+    await fetch(`/api/project/pous`),
+    "GET /api/project/pous",
   )
 }
 

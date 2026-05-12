@@ -825,15 +825,25 @@ fn walk_dirs(
     Ok(())
 }
 
+/// Best-effort classifier for the tree icon. A POU file may legally
+/// contain multiple declarations (PROGRAM + FUNCTION_BLOCK + FUNCTION
+/// side by side); when that happens we bias toward `Program` because
+/// that's the runnable thing the user almost always cares about. Pure-FB
+/// files (no PROGRAM declared anywhere) stay `FunctionBlock`. The actual
+/// list of schedulable PROGRAMs is exposed accurately via
+/// `GET /api/project/pous` (parser-driven, not this heuristic).
 fn detect_kind(source: &str) -> ApplicationKind {
-    for line in source.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("FUNCTION_BLOCK") {
-            return ApplicationKind::FunctionBlock;
-        }
-        if trimmed.starts_with("PROGRAM") {
-            return ApplicationKind::Program;
-        }
+    let has_program = source
+        .lines()
+        .any(|l| l.trim_start().starts_with("PROGRAM "));
+    if has_program {
+        return ApplicationKind::Program;
+    }
+    let has_fb = source
+        .lines()
+        .any(|l| l.trim_start().starts_with("FUNCTION_BLOCK"));
+    if has_fb {
+        return ApplicationKind::FunctionBlock;
     }
     ApplicationKind::Program
 }

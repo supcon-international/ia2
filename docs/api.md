@@ -99,6 +99,7 @@ serves a smaller subset on its own port — see `docs/edge-deploy.md`.
 | `POST` | `/api/runtime/variables/{name}` | Write a variable while running. Body: `WriteVariableRequest { value: <i32-coerceable> }`. Returns the new value. | Critical for debugging closed loops
 | `GET` | `/api/events` | SSE stream of `AppEvent` (`snapshot` / `started` / `stopped` / `error`). | For long-running IDE clients
 | `GET` | `/api/project/variables` | Flat list of every variable across every POU in the project. Returns `ProjectVariables { variables: [...] }`. | Cross-POU index for agents
+| `GET` | `/api/project/pous` | Every IEC POU declared anywhere in the project (parser-driven). Returns `ProjectPous { pous: [{ application, name, kind }] }` — `kind` ∈ `program` / `function_block` / `function`. | Source of truth for "what's schedulable" — multi-POU files (one .st declaring PROGRAM + FB + FUNCTION) are correctly enumerated, unlike `application.kind` which is a heuristic |
 
 ## Bridges
 
@@ -133,6 +134,7 @@ present.
 - ✅ Inject input signals into demo slave → **PUT /api/_demo/slave/{kind}/{addr}**
 - ✅ Delete a folder under applications / devices / edges → **DELETE /api/.../folders/{path}**
 - ✅ Cross-POU variable index → **GET /api/project/variables**
+- ✅ Cross-POU declaration index (real schedulable POU names) → **GET /api/project/pous**
 - ✅ Health-under-/api alias → **GET /api/health**
 
 # Redundancies (kept on purpose)

@@ -7,6 +7,9 @@ mod runtime;
 
 pub use errors::BridgeError;
 pub use runtime::{DeviceSpec, ProgramHandle, RuntimeWriteError, VarSnapshot, VarValue, spawn};
+// `PouDeclaration` is declared in this lib.rs (alongside `extract_pou_declarations`);
+// re-exported here for symmetry with the runtime types.
+
 
 use ironplc_container::Container;
 use ironplc_dsl::common::{
@@ -196,6 +199,53 @@ pub struct VariableInfo {
     pub type_name: String,
     /// "local" | "input" | "output" | "in_out" | "external" | "global" | "access" | "temp"
     pub direction: String,
+}
+
+/// One IEC-level POU declaration found inside a source file. A single
+/// `.st` file may legally contain multiple POUs (`PROGRAM` + `FUNCTION_BLOCK`
+/// + `FUNCTION`) side by side, so file-level metadata (the on-disk name,
+/// the heuristic `kind`) isn't sufficient to know what's actually
+/// schedulable — agents and the Tasks pane need the parser-level list.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct PouDeclaration {
+    /// IEC POU name (the identifier after `PROGRAM` / `FUNCTION_BLOCK` /
+    /// `FUNCTION`). This is what `PROGRAM <inst> WITH <task> : <name>`
+    /// references in a CONFIGURATION block.
+    pub name: String,
+    /// "program" | "function_block" | "function".
+    pub kind: String,
+}
+
+/// Parse an ST source and return every POU declaration found in it.
+/// Returns an empty list if parsing fails (we don't surface partial state —
+/// the LSP diagnostics endpoint is the right path for that).
+pub fn extract_pou_declarations(source: &str) -> Vec<PouDeclaration> {
+    let file_id = FileId::default();
+    let mut options = CompilerOptions::default();
+    options.allow_empty_var_blocks = true;
+    let Ok(library) = ironplc_parser::parse_program(source, &file_id, &options) else {
+        return vec![];
+    };
+    let mut out = Vec::new();
+    for element in &library.elements {
+        match element {
+            LibraryElementKind::ProgramDeclaration(p) => out.push(PouDeclaration {
+                name: p.name.to_string(),
+                kind: "program".into(),
+            }),
+            LibraryElementKind::FunctionBlockDeclaration(fb) => out.push(PouDeclaration {
+                name: fb.name.to_string(),
+                kind: "function_block".into(),
+            }),
+            LibraryElementKind::FunctionDeclaration(f) => out.push(PouDeclaration {
+                name: f.name.to_string(),
+                kind: "function".into(),
+            }),
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Parse an ST source (no full compile required) and pull out the declared

@@ -21,7 +21,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { fetchProjectPous } from "@/lib/api"
 import { useRuntime } from "@/state/runtime"
+import type { PouInProject } from "@/types/generated/PouInProject"
 import type { ProgramInstance } from "@/types/generated/ProgramInstance"
 import type { Task } from "@/types/generated/Task"
 import type { Tasks } from "@/types/generated/Tasks"
@@ -48,18 +50,48 @@ export function TasksPane() {
   const [draft, setDraft] = useState<Tasks>(tasks)
   const [migrating, setMigrating] = useState(false)
   const [migrationNote, setMigrationNote] = useState<string | null>(null)
+  // Parser-driven list of every IEC POU declared anywhere in the project.
+  // A single source file may declare multiple POUs (PROGRAM + FB + FUNCTION
+  // side by side); the file-level `application.kind` is a heuristic, not
+  // the truth — we use this list instead.
+  const [pous, setPous] = useState<PouInProject[]>([])
 
   useEffect(() => {
     setDraft(tasks)
   }, [tasks])
 
+  // Refresh the POU declaration list whenever the project changes (POU
+  // added/renamed/source edited). Failures are tolerated — the dropdown
+  // just falls back to the file-name list below.
+  useEffect(() => {
+    let cancelled = false
+    fetchProjectPous()
+      .then((res) => {
+        if (!cancelled) setPous(res.pous)
+      })
+      .catch(() => {
+        if (!cancelled) setPous([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [project])
+
   const dirty = JSON.stringify(draft) !== JSON.stringify(tasks)
 
-  // Only PROGRAM-kind POUs are schedulable. FBs/FUNCTIONs are used inside
-  // PROGRAMs, not directly on tasks — IEC enforces this and so do we.
-  const programOptions =
-    project?.applications.filter((a) => a.kind === "program").map((a) => a.name) ?? []
-  const programOptionsSet = new Set(programOptions)
+  // Only PROGRAM-kind POUs are schedulable. IEC enforces this — FBs and
+  // FUNCTIONs are used INSIDE programs, not bound to tasks directly.
+  // Picking from real declarations (rather than file-level kind) means
+  // multi-POU files like cascade_pid.st (which declares BOTH a FB and a
+  // PROGRAM named cascade_pid) correctly show their PROGRAM here.
+  const programOptions = pous
+    .filter((p) => p.kind === "program")
+    .map((p) => p.name)
+  // Dedup just in case two files declare a PROGRAM with the same name —
+  // the lib would reject it at compile, but the dropdown should still
+  // show a clean list.
+  const programOptionsUnique = Array.from(new Set(programOptions))
+  const programOptionsSet = new Set(programOptionsUnique)
   const taskNameSet = new Set(draft.tasks.map((t) => t.name))
 
   // Orphan = instance bound to a task that no longer exists in the draft.
@@ -143,12 +175,13 @@ export function TasksPane() {
   // instantiated on this task (so the dropdown defaults sensibly), and
   // generate a unique instance name `<program>_inst`.
   const addProgramToTask = (taskName: string) => {
-    if (programOptions.length === 0) return
+    if (programOptionsUnique.length === 0) return
     const usedOnTask = new Set(
       draft.programs.filter((p) => p.task === taskName).map((p) => p.program),
     )
     const chosen =
-      programOptions.find((name) => !usedOnTask.has(name)) ?? programOptions[0]
+      programOptionsUnique.find((name) => !usedOnTask.has(name)) ??
+      programOptionsUnique[0]
     const baseName = `${chosen}_inst`
     const taken = new Set(draft.programs.map((p) => p.instance))
     let candidate = baseName
@@ -207,7 +240,7 @@ export function TasksPane() {
                 key={taskIdx}
                 task={task}
                 programs={programsByTask.get(task.name) ?? []}
-                programOptions={programOptions}
+                programOptions={programOptionsUnique}
                 programOptionsSet={programOptionsSet}
                 allInstances={draft.programs}
                 onTaskChange={(patch) => setTaskAt(taskIdx, patch)}
@@ -241,7 +274,7 @@ export function TasksPane() {
         {orphans.length > 0 && (
           <UnscheduledGroup
             byTaskName={orphanByTaskName}
-            programOptions={programOptions}
+            programOptions={programOptionsUnique}
             programOptionsSet={programOptionsSet}
             taskNames={draft.tasks.map((t) => t.name)}
             allInstances={draft.programs}
