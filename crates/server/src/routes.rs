@@ -59,6 +59,9 @@ pub struct HealthStatus {
     pub uptime_secs: u64,
     pub project_open: bool,
     pub program_running: bool,
+    /// Where the bundled demo Modbus TCP slave is listening, or empty
+    /// when disabled (DEMO_MODBUS_ADDR="").
+    pub demo_modbus_addr: String,
 }
 
 #[derive(Debug, Serialize, TS)]
@@ -122,6 +125,7 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthStatus> {
         uptime_secs: elapsed,
         project_open,
         program_running,
+        demo_modbus_addr: state.demo_modbus_addr.clone(),
     })
 }
 

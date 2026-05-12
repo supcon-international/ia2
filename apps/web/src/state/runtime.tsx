@@ -190,10 +190,15 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
           case "started":
             setIsRunning(true)
             setError(null)
+            // Don't wipe the previous last-known snapshot on start — the
+            // Monitor pane keeps showing values until the first new
+            // snapshot arrives, avoiding a one-frame flicker to "—".
             break
           case "stopped":
             setIsRunning(false)
-            setLastSnapshot(null)
+            // Keep `lastSnapshot` so the Monitor pane displays the final
+            // state of the last run as "stale". History buffers also
+            // survive so trend charts remain interpretable.
             break
           case "error":
             setError(ev.data)

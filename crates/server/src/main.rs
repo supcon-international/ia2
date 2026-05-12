@@ -15,7 +15,10 @@ use tracing_subscriber::EnvFilter;
 
 use crate::state::AppState;
 
-const DEMO_MODBUS_ADDR: &str = "127.0.0.1:5502";
+/// Address the in-process demo Modbus TCP slave binds to. Override with
+/// `DEMO_MODBUS_ADDR=host:port`; set to an empty string to disable the
+/// slave entirely (useful when port 5502 is taken by something else).
+const DEFAULT_DEMO_MODBUS_ADDR: &str = "127.0.0.1:5502";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -26,20 +29,31 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    // Spin up the demo Modbus slave so users can wire a Modbus device at
-    // 127.0.0.1:5502 without external hardware. The slave is shared with
+    // Spin up the demo Modbus slave so users can wire a Modbus device
+    // against it without external hardware. The slave is shared with
     // AppState so the frontend can peek register/coil values.
     let demo_slave = DemoSlave::new();
-    let state = AppState::new(demo_slave.clone());
+    let demo_addr = std::env::var("DEMO_MODBUS_ADDR")
+        .unwrap_or_else(|_| DEFAULT_DEMO_MODBUS_ADDR.into());
+    let state = AppState::new(demo_slave.clone(), demo_addr.clone());
     try_open_last_project(&state);
 
-    let slave_for_task = demo_slave.clone();
-    tokio::spawn(async move {
-        let addr = DEMO_MODBUS_ADDR.parse().expect("valid socket addr");
-        if let Err(e) = run_demo_slave(addr, slave_for_task).await {
-            tracing::error!(%e, "demo modbus slave exited");
-        }
-    });
+    if !demo_addr.is_empty() {
+        let slave_for_task = demo_slave.clone();
+        let addr_for_task = demo_addr.clone();
+        tokio::spawn(async move {
+            match addr_for_task.parse() {
+                Ok(addr) => {
+                    if let Err(e) = run_demo_slave(addr, slave_for_task).await {
+                        tracing::error!(%e, addr = %addr_for_task, "demo modbus slave exited");
+                    }
+                }
+                Err(e) => tracing::error!(%e, addr = %addr_for_task, "DEMO_MODBUS_ADDR invalid"),
+            }
+        });
+    } else {
+        tracing::info!("demo modbus slave disabled (DEMO_MODBUS_ADDR=\"\")");
+    }
 
     let app = Router::new()
         .route("/health", get(routes::health))
