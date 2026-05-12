@@ -66,26 +66,22 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/project/validate", post(routes::validate_project))
         .route("/api/project/variables", get(routes::project_variables))
         .route("/api/project/pous", get(routes::project_pous))
-        // Applications (POUs)
-        .route("/api/applications", post(routes::create_application))
+        // POUs — file-level CRUD. A `.st` file may declare multiple IEC
+        // POUs (PROGRAM + FB + FUNCTION side by side); declarations are
+        // parsed and surfaced in /api/project + /api/project/pous.
+        .route("/api/pous", post(routes::create_pou))
+        .route("/api/pous/folders", post(routes::create_pou_folder))
         .route(
-            "/api/applications/folders",
-            post(routes::create_application_folder),
+            "/api/pous/folders/{*path}",
+            axum::routing::delete(routes::delete_pou_folder),
         )
         .route(
-            "/api/applications/folders/{*path}",
-            axum::routing::delete(routes::delete_application_folder),
+            "/api/pous/{path}",
+            get(routes::get_pou)
+                .put(routes::save_pou)
+                .delete(routes::delete_pou),
         )
-        .route(
-            "/api/applications/{name}",
-            get(routes::get_application)
-                .put(routes::save_application)
-                .delete(routes::delete_application),
-        )
-        .route(
-            "/api/applications/{name}/variables",
-            get(routes::application_variables),
-        )
+        .route("/api/pous/{path}/variables", get(routes::pou_variables))
         // Devices
         .route("/api/devices", post(routes::create_device))
         .route(

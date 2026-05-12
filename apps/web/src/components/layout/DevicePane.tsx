@@ -11,7 +11,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { fetchApplicationVariables } from "@/lib/api"
+import { fetchPouVariables } from "@/lib/api"
 import { useRuntime } from "@/state/runtime"
 import type { Device } from "@/types/generated/Device"
 import type { Direction } from "@/types/generated/Direction"
@@ -35,10 +35,10 @@ export function DevicePane() {
     if (!project) return
     let cancelled = false
     Promise.all(
-      project.applications.map((a) =>
-        fetchApplicationVariables(a.name)
-          .then((vs) => [a.name, vs] as const)
-          .catch(() => [a.name, [] as VariableInfo[]] as const),
+      project.pous.map((p) =>
+        fetchPouVariables(p.path)
+          .then((vs) => [p.path, vs] as const)
+          .catch(() => [p.path, [] as VariableInfo[]] as const),
       ),
     ).then((entries) => {
       if (!cancelled) setVarsByApp(Object.fromEntries(entries))
@@ -66,7 +66,7 @@ export function DevicePane() {
     deviceName: currentDevice.name,
     iomap,
     saveIomap,
-    apps: project?.applications.map((a) => a.name) ?? [],
+    apps: project?.pous.map((p) => p.path) ?? [],
     varsByApp,
   }
 

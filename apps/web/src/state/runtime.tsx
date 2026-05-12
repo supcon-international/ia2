@@ -8,13 +8,14 @@ import {
   type ReactNode,
 } from "react"
 import type { AppEvent } from "@/types/generated/AppEvent"
-import type { Application } from "@/types/generated/Application"
-import type { ApplicationKind } from "@/types/generated/ApplicationKind"
 import type { CheckDiagnostic } from "@/types/generated/CheckDiagnostic"
 import type { Device } from "@/types/generated/Device"
 import type { Edge } from "@/types/generated/Edge"
 import type { IoMap } from "@/types/generated/IoMap"
 import type { MigrationResponse } from "@/types/generated/MigrationResponse"
+import type { Pou } from "@/types/generated/Pou"
+import type { PouLanguage } from "@/types/generated/PouLanguage"
+import type { PouType } from "@/types/generated/PouType"
 import type { ProjectListing } from "@/types/generated/ProjectListing"
 import type { ProjectTree } from "@/types/generated/ProjectTree"
 import type { Protocol } from "@/types/generated/Protocol"
@@ -23,28 +24,28 @@ import type { VarSnapshot } from "@/types/generated/VarSnapshot"
 import {
   attachEdge as apiAttachEdge,
   closeProject as apiCloseProject,
-  createApplication as apiCreateApplication,
-  createApplicationFolder as apiCreateApplicationFolder,
   createDevice as apiCreateDevice,
   createDeviceFolder as apiCreateDeviceFolder,
   createEdge as apiCreateEdge,
   createEdgeFolder as apiCreateEdgeFolder,
+  createPou as apiCreatePou,
+  createPouFolder as apiCreatePouFolder,
   createProject as apiCreateProject,
-  deleteApplication as apiDeleteApplication,
   deleteDevice as apiDeleteDevice,
   deleteEdge as apiDeleteEdge,
+  deletePou as apiDeletePou,
   detachEdge as apiDetachEdge,
   eventsUrl,
-  fetchApplication,
   fetchDevice,
   fetchEdge,
   fetchIomap,
+  fetchPou,
   fetchProject,
   fetchProjects as apiFetchProjects,
   migrateTasks as apiMigrateTasks,
   openProject as apiOpenProject,
   runProgram,
-  saveApplication,
+  savePou,
   stopProgram,
   updateDevice as apiUpdateDevice,
   updateEdge as apiUpdateEdge,
@@ -68,7 +69,7 @@ type AppState = {
 
   // Center-pane focus
   view: View | null
-  currentApp: Application | null
+  currentPou: Pou | null
   source: string
   setSource: (s: string) => void
   isDirty: boolean
@@ -98,19 +99,19 @@ type AppState = {
   refreshProject: () => Promise<void>
 
   // Selection actions
-  selectApp: (name: string) => Promise<void>
+  selectPou: (path: string) => Promise<void>
   selectDevice: (name: string) => Promise<void>
   selectEdge: (name: string) => Promise<void>
   openIoMap: () => Promise<void>
   openTasks: () => Promise<void>
 
-  // App/Device mutations
-  saveCurrentApp: () => Promise<void>
-  createApp: (name: string, kind: ApplicationKind) => Promise<void>
-  deleteApp: (name: string) => Promise<void>
+  // POU / Device mutations
+  saveCurrentPou: () => Promise<void>
+  createPou: (path: string, type_: PouType, language?: PouLanguage) => Promise<void>
+  deletePou: (path: string) => Promise<void>
   createDevice: (name: string, protocol: Protocol) => Promise<void>
   deleteDevice: (name: string) => Promise<void>
-  createAppFolder: (path: string) => Promise<void>
+  createPouFolder: (path: string) => Promise<void>
   createDeviceFolder: (path: string) => Promise<void>
   createEdge: (name: string, host: string) => Promise<void>
   deleteEdge: (name: string) => Promise<void>
@@ -145,7 +146,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   )
 
   const [view, setView] = useState<View | null>(null)
-  const [currentApp, setCurrentApp] = useState<Application | null>(null)
+  const [currentPou, setCurrentPou] = useState<Pou | null>(null)
   const [source, setSource] = useState("")
   const [diagnostics, setDiagnostics] = useState<CheckDiagnostic[]>([])
   const [currentDevice, setCurrentDevice] = useState<Device | null>(null)
@@ -167,19 +168,19 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     try {
       const tree = await fetchProject()
       setProject(tree)
-      // Drop currentApp if the project lost it (e.g. deleted).
+      // Drop currentPou if the project lost it (e.g. deleted).
       if (
         tree &&
-        currentApp &&
-        !tree.applications.some((a) => a.name === currentApp.name)
+        currentPou &&
+        !tree.pous.some((p) => p.path === currentPou.path)
       ) {
-        setCurrentApp(null)
+        setCurrentPou(null)
         setSource("")
       }
     } catch (e) {
       setError(String(e))
     }
-  }, [currentApp])
+  }, [currentPou])
 
   const refreshProjects = useCallback(async () => {
     try {
@@ -209,8 +210,8 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   // Auto-select the first POU when a project loads and nothing is open yet.
   useEffect(() => {
     if (!project || view !== null) return
-    if (project.applications.length === 0) return
-    void selectApp(project.applications[0].name)
+    if (project.pous.length === 0) return
+    void selectPou(project.pous[0].path)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project])
 
@@ -293,14 +294,14 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   // flow to Monaco markers + the ProgramPane header badge.
   const lspRef = useRef<LspClient | null>(null)
   useEffect(() => {
-    if (!currentApp) {
+    if (!currentPou) {
       setDiagnostics([])
       lspRef.current?.dispose()
       lspRef.current = null
       return
     }
     const client = new LspClient({
-      uri: `file:///${currentApp.name}.st`,
+      uri: `file:///${currentPou.path}.st`,
       languageId: "iec61131",
       onDiagnostics: setDiagnostics,
     })
@@ -309,7 +310,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       client.dispose()
       lspRef.current = null
     }
-  }, [currentApp?.name])
+  }, [currentPou?.path])
 
   useEffect(() => {
     lspRef.current?.setSource(source)
@@ -323,7 +324,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       await apiCreateProject(name)
       const tree = await fetchProject()
       setProject(tree)
-      setCurrentApp(null)
+      setCurrentPou(null)
       setSource("")
     } catch (e) {
       setError(String(e))
@@ -336,7 +337,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       await apiOpenProject(path)
       const tree = await fetchProject()
       setProject(tree)
-      setCurrentApp(null)
+      setCurrentPou(null)
       setSource("")
     } catch (e) {
       setError(String(e))
@@ -348,7 +349,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     try {
       await apiCloseProject()
       setProject(null)
-      setCurrentApp(null)
+      setCurrentPou(null)
       setSource("")
       setIsRunning(false)
       setLastSnapshot(null)
@@ -358,14 +359,14 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  // ---------------- App / Device actions ----------------
+  // ---------------- POU / Device actions ----------------
 
-  const selectApp = useCallback(async (name: string) => {
+  const selectPou = useCallback(async (path: string) => {
     setError(null)
     try {
-      const app = await fetchApplication(name)
-      setCurrentApp(app)
-      setSource(app.source)
+      const pou = await fetchPou(path)
+      setCurrentPou(pou)
+      setSource(pou.source)
       setView("app")
     } catch (e) {
       setError(String(e))
@@ -469,24 +470,24 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     }
   }, [refreshProject])
 
-  const saveCurrentApp = useCallback(async () => {
-    if (!currentApp) return
+  const saveCurrentPou = useCallback(async () => {
+    if (!currentPou) return
     try {
-      await saveApplication(currentApp.name, source)
-      setCurrentApp({ ...currentApp, source })
+      await savePou(currentPou.path, source)
+      setCurrentPou({ ...currentPou, source })
     } catch (e) {
       setError(String(e))
     }
-  }, [currentApp, source])
+  }, [currentPou, source])
 
-  const createApp = useCallback(
-    async (name: string, kind: ApplicationKind) => {
+  const createPou = useCallback(
+    async (path: string, type_: PouType, language: PouLanguage = "st") => {
       setError(null)
       try {
-        const app = await apiCreateApplication(name, kind)
+        const pou = await apiCreatePou(path, type_, language)
         await refreshProject()
-        setCurrentApp(app)
-        setSource(app.source)
+        setCurrentPou(pou)
+        setSource(pou.source)
       } catch (e) {
         setError(String(e))
       }
@@ -494,13 +495,13 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     [refreshProject],
   )
 
-  const deleteApp = useCallback(
-    async (name: string) => {
+  const deletePou = useCallback(
+    async (path: string) => {
       setError(null)
       try {
-        await apiDeleteApplication(name)
-        if (currentApp?.name === name) {
-          setCurrentApp(null)
+        await apiDeletePou(path)
+        if (currentPou?.path === path) {
+          setCurrentPou(null)
           setSource("")
         }
         await refreshProject()
@@ -508,7 +509,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         setError(String(e))
       }
     },
-    [currentApp, refreshProject],
+    [currentPou, refreshProject],
   )
 
   const createDevice = useCallback(
@@ -537,11 +538,11 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     [refreshProject],
   )
 
-  const createAppFolder = useCallback(
+  const createPouFolder = useCallback(
     async (path: string) => {
       setError(null)
       try {
-        await apiCreateApplicationFolder(path)
+        await apiCreatePouFolder(path)
         await refreshProject()
       } catch (e) {
         setError(String(e))
@@ -651,15 +652,15 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       // Save the currently-open POU first if it's dirty; the runtime
       // re-reads the project from disk on compile, so unsaved edits would
       // otherwise be silently ignored.
-      if (currentApp && source !== currentApp.source) {
-        await saveApplication(currentApp.name, source)
-        setCurrentApp({ ...currentApp, source })
+      if (currentPou && source !== currentPou.source) {
+        await savePou(currentPou.path, source)
+        setCurrentPou({ ...currentPou, source })
       }
       await runProgram()
     } catch (e) {
       setError(String(e))
     }
-  }, [currentApp, source])
+  }, [currentPou, source])
 
   const stop = useCallback(async () => {
     try {
@@ -669,7 +670,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
-  const isDirty = !!currentApp && currentApp.source !== source
+  const isDirty = !!currentPou && currentPou.source !== source
 
   return (
     <Ctx.Provider
@@ -678,7 +679,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         projectLoading,
         availableProjects,
         view,
-        currentApp,
+        currentPou,
         source,
         setSource,
         isDirty,
@@ -697,17 +698,17 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         closeProject,
         refreshProjects,
         refreshProject,
-        selectApp,
+        selectPou,
         selectDevice,
         selectEdge,
         openIoMap,
         openTasks,
-        saveCurrentApp,
-        createApp,
-        deleteApp,
+        saveCurrentPou,
+        createPou,
+        deletePou,
         createDevice,
         deleteDevice,
-        createAppFolder,
+        createPouFolder,
         createDeviceFolder: createDeviceFolderCb,
         createEdge: createEdgeAction,
         deleteEdge: deleteEdgeAction,

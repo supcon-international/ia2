@@ -1,7 +1,7 @@
 import { ArrowLeftRight, ArrowRight, Link2Off } from "lucide-react"
 import { useEffect, useState } from "react"
 
-import { fetchApplicationVariables } from "@/lib/api"
+import { fetchPouVariables } from "@/lib/api"
 import { useRuntime } from "@/state/runtime"
 import type { Mapping } from "@/types/generated/Mapping"
 import type { VariableInfo } from "@/types/generated/VariableInfo"
@@ -16,20 +16,20 @@ import type { VariableInfo } from "@/types/generated/VariableInfo"
  * Device editor's "Linked to" column.
  */
 export function VariablesPanel() {
-  const { currentApp, iomap, project, selectDevice } = useRuntime()
+  const { currentPou, iomap, project, selectDevice } = useRuntime()
   const [vars, setVars] = useState<VariableInfo[]>([])
   const [loading, setLoading] = useState(false)
 
   // Refetch whenever the POU changes — variable lists are cheap to recompute
   // and source-typed (so an edit-in-progress changes the list).
   useEffect(() => {
-    if (!currentApp) {
+    if (!currentPou) {
       setVars([])
       return
     }
     let cancelled = false
     setLoading(true)
-    fetchApplicationVariables(currentApp.name)
+    fetchPouVariables(currentPou.path)
       .then((vs) => {
         if (!cancelled) setVars(vs)
       })
@@ -42,13 +42,13 @@ export function VariablesPanel() {
     return () => {
       cancelled = true
     }
-  }, [currentApp])
+  }, [currentPou])
 
   // Build a map: variable name → mappings within the current POU.
   const bindingsByVar = new Map<string, Mapping[]>()
-  if (currentApp) {
+  if (currentPou) {
     for (const m of iomap.mappings) {
-      if (m.application !== currentApp.name) continue
+      if (m.application !== currentPou.path) continue
       const arr = bindingsByVar.get(m.variable) ?? []
       arr.push(m)
       bindingsByVar.set(m.variable, arr)
@@ -68,7 +68,7 @@ export function VariablesPanel() {
         </span>
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
-        {!currentApp ? (
+        {!currentPou ? (
           <Empty>Select a POU.</Empty>
         ) : loading && vars.length === 0 ? (
           <Empty>Loading…</Empty>

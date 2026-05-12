@@ -28,8 +28,8 @@ import {
 import { cn } from "@/lib/utils"
 import { buildTree, type TreeNode } from "@/lib/project-tree"
 import { useRuntime } from "@/state/runtime"
-import type { ApplicationKind } from "@/types/generated/ApplicationKind"
-import type { ApplicationSummary } from "@/types/generated/ApplicationSummary"
+import type { PouType } from "@/types/generated/PouType"
+import type { PouFile } from "@/types/generated/PouFile"
 import type { Device } from "@/types/generated/Device"
 import type { Edge } from "@/types/generated/Edge"
 import type { Protocol } from "@/types/generated/Protocol"
@@ -38,16 +38,16 @@ export function ProjectTree() {
   const {
     project,
     view,
-    currentApp,
+    currentPou,
     currentDevice,
     currentEdge,
     attached,
-    selectApp,
+    selectPou,
     selectDevice,
     selectEdge,
     openIoMap,
     openTasks,
-    deleteApp,
+    deletePou,
     deleteDevice,
     deleteEdge,
   } = useRuntime()
@@ -75,12 +75,13 @@ export function ProjectTree() {
   )
   const [edgeDialog, setEdgeDialog] = useState<{ parent: string } | null>(null)
 
-  const appTree = useMemo(
+  const pouTree = useMemo(
     () =>
       project
-        ? buildTree<ApplicationSummary>(
-            project.applications,
-            project.app_folders,
+        ? buildTree<PouFile>(
+            project.pous,
+            project.pou_folders,
+            (p) => p.path,
           )
         : [],
     [project],
@@ -89,14 +90,16 @@ export function ProjectTree() {
   const deviceTree = useMemo(
     () =>
       project
-        ? buildTree<Device>(project.devices, project.device_folders)
+        ? buildTree<Device>(project.devices, project.device_folders, (d) => d.name)
         : [],
     [project],
   )
 
   const edgeTree = useMemo(
     () =>
-      project ? buildTree<Edge>(project.edges, project.edge_folders) : [],
+      project
+        ? buildTree<Edge>(project.edges, project.edge_folders, (e) => e.name)
+        : [],
     [project],
   )
 
@@ -107,7 +110,7 @@ export function ProjectTree() {
       <SectionHeader
         label="Applications"
         open={appsOpen}
-        count={project.applications.length}
+        count={project.pous.length}
         onToggle={() => setAppsOpen(!appsOpen)}
         action={
           <SectionActions
@@ -122,16 +125,16 @@ export function ProjectTree() {
       />
       {appsOpen && (
         <TreeChildren
-          nodes={appTree}
+          nodes={pouTree}
           depth={0}
           renderItem={(node) => (
-            <AppItem
+            <PouItem
               node={node}
-              active={view === "app" && currentApp?.name === node.path}
-              onOpen={() => selectApp(node.path)}
+              active={view === "app" && currentPou?.path === node.path}
+              onOpen={() => selectPou(node.path)}
               onDelete={() => {
-                if (confirm(`Delete POU "${node.path}"?`)) {
-                  void deleteApp(node.path)
+                if (confirm(`Delete POU file "${node.path}.st"?`)) {
+                  void deletePou(node.path)
                 }
               }}
             />
@@ -159,8 +162,8 @@ export function ProjectTree() {
           toggleFolder={toggleFolder}
           section="apps"
           emptyHint={
-            project.applications.length === 0 &&
-            project.app_folders.length === 0
+            project.pous.length === 0 &&
+            project.pou_folders.length === 0
               ? "No POUs yet — click + to create one."
               : null
           }
@@ -542,41 +545,77 @@ function SectionActions({
   )
 }
 
-function AppItem({
+/// A POU file in the tree. Renders as one row if the file declares
+/// exactly one POU and that POU's IEC name matches the file's leaf
+/// segment (the typical 1-POU-per-file case); otherwise renders the
+/// file as a header row plus one child per declaration. The icon
+/// reflects the IEC POU type (PRG / FB / FUN), and a small badge
+/// shows the language ("st" for now). All variants click-to-open the
+/// same file in the editor.
+function PouItem({
   node,
   active,
   onOpen,
   onDelete,
 }: {
-  node: { name: string; path: string; item: ApplicationSummary }
+  node: { name: string; path: string; item: PouFile }
   active: boolean
   onOpen: () => void
   onDelete: () => void
 }) {
+  const decls = node.item.declarations
+  const simple =
+    decls.length === 1 && decls[0].name === node.name
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
-        <button
-          type="button"
-          onClick={onOpen}
-          className={cn(
-            "flex w-full items-center gap-1.5 py-1 pl-3 pr-2 text-left transition-colors hover:bg-accent/40",
-            active && "bg-accent/60",
-          )}
-        >
-          <FileCode2
+        <div>
+          <button
+            type="button"
+            onClick={onOpen}
             className={cn(
-              "size-3.5 shrink-0",
-              node.item.kind === "function_block"
-                ? "text-violet-600 dark:text-violet-400"
-                : "text-sky-600 dark:text-sky-400",
+              "flex w-full items-center gap-1.5 py-1 pl-3 pr-2 text-left transition-colors hover:bg-accent/40",
+              active && "bg-accent/60",
             )}
-          />
-          <span className="flex-1 truncate">{node.name}</span>
-          <span className="font-mono text-[9px] uppercase text-muted-foreground">
-            {kindAbbrev(node.item.kind)}
-          </span>
-        </button>
+          >
+            {simple ? (
+              <PouTypeIcon type={decls[0].type} />
+            ) : (
+              <FileCode2 className="size-3.5 shrink-0 text-muted-foreground" />
+            )}
+            <span className="flex-1 truncate">{node.name}</span>
+            {simple ? (
+              <PouTypeBadge type={decls[0].type} language={decls[0].language} />
+            ) : decls.length === 0 ? (
+              <span className="font-mono text-[9px] uppercase text-amber-700 dark:text-amber-400">
+                empty
+              </span>
+            ) : (
+              <span className="font-mono text-[9px] uppercase text-muted-foreground">
+                {decls.length} POUs
+              </span>
+            )}
+          </button>
+          {/* Multi-POU file: each declaration as a sibling sub-row.
+              Indented so it's obvious they live inside the file above. */}
+          {!simple && decls.length > 0 && (
+            <ul>
+              {decls.map((d) => (
+                <li key={d.name}>
+                  <button
+                    type="button"
+                    onClick={onOpen}
+                    className="flex w-full items-center gap-1.5 py-0.5 pl-9 pr-2 text-left text-[12px] text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground"
+                  >
+                    <PouTypeIcon type={d.type} />
+                    <span className="flex-1 truncate">{d.name}</span>
+                    <PouTypeBadge type={d.type} language={d.language} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       </ContextMenuTrigger>
       <ContextMenuContent>
         <ContextMenuItem onSelect={onOpen}>Open</ContextMenuItem>
@@ -586,6 +625,40 @@ function AppItem({
         </ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>
+  )
+}
+
+function PouTypeIcon({ type }: { type: PouType }) {
+  return (
+    <FileCode2
+      className={cn(
+        "size-3.5 shrink-0",
+        type === "function_block"
+          ? "text-violet-600 dark:text-violet-400"
+          : type === "function"
+            ? "text-amber-600 dark:text-amber-400"
+            : "text-sky-600 dark:text-sky-400",
+      )}
+    />
+  )
+}
+
+function PouTypeBadge({
+  type,
+  language,
+}: {
+  type: PouType
+  language: string
+}) {
+  const label =
+    type === "function_block" ? "fb" : type === "function" ? "fn" : "prg"
+  return (
+    <span className="flex items-center gap-1 font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+      <span>{label}</span>
+      <span className="rounded bg-muted/60 px-1 text-[8px] uppercase">
+        {language}
+      </span>
+    </span>
   )
 }
 
@@ -690,6 +763,3 @@ function ProtocolIcon({ protocol }: { protocol: Protocol }) {
   )
 }
 
-function kindAbbrev(k: ApplicationKind): string {
-  return k === "function_block" ? "fb" : "prg"
-}

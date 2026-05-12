@@ -11,7 +11,7 @@ serves a smaller subset on its own port — see `docs/edge-deploy.md`.
 - Resources are plural nouns under `/api/<resource>`.
 - Names with `/` (folder-nested POUs, devices, edges) are URL-encoded — the
   `%2F`-encoded form decodes back to `/` inside the path param. E.g.,
-  `GET /api/applications/pid_loops%2Ftemperature`.
+  `GET /api/pous/pid_loops%2Ftemperature`.
 - All bodies are JSON unless noted. POU sources are `text/plain`.
 - Errors are HTTP status + a human-readable body. 4xx for client errors,
   5xx for server bugs.
@@ -34,17 +34,23 @@ serves a smaller subset on its own port — see `docs/edge-deploy.md`.
 | `POST` | `/api/project/migrate-tasks` | One-shot migrate inline-CONFIGURATION blocks in POU files into `tasks.toml`. Idempotent. Returns `MigrationResponse`. | Legacy projects only |
 | `POST` | `/api/project/validate` | Run `compile_project` and return diagnostics without spawning. Returns `Vec<CheckDiagnostic>` (empty = ok). | Pre-flight check before Run/Deploy |
 
-## Applications (POUs)
+## POUs
+
+A POU is one IEC declaration (PROGRAM / FUNCTION_BLOCK / FUNCTION). A
+single `.st` file may declare multiple POUs; the file is the unit on
+disk, and the tree (in `/api/project`) shows each declaration as its
+own node. The URL identifier in these routes is the **file path** —
+slash-separated under `pous/`, no `.st` extension.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/api/applications` | Create a POU. Body: `CreateApplicationRequest { name, kind }`. `name` may be a slash-separated path for nested folders. |
-| `POST` | `/api/applications/folders` | Create a folder under `applications/`. Body: `CreateFolderRequest { path }`. |
-| `DELETE` | `/api/applications/folders/{path}` | Delete an empty folder. |
-| `GET` | `/api/applications/{name}` | Read a POU. Returns `Application { name, kind, source }`. |
-| `PUT` | `/api/applications/{name}` | Write POU source. Body is raw `text/plain`. |
-| `DELETE` | `/api/applications/{name}` | Delete a POU. |
-| `GET` | `/api/applications/{name}/variables` | List declared variables. Returns `VariableInfo[]`. |
+| `POST` | `/api/pous` | Create a POU file. Body: `CreatePouRequest { path, type, language }`. `type` is `program` / `function_block` / `function`; `language` currently must be `st`. |
+| `POST` | `/api/pous/folders` | Create a folder under `pous/`. Body: `CreateFolderRequest { path }`. |
+| `DELETE` | `/api/pous/folders/{path}` | Delete an empty folder. |
+| `GET` | `/api/pous/{path}` | Read a POU file. Returns `Pou { path, source, declarations: PouDecl[] }`. |
+| `PUT` | `/api/pous/{path}` | Write POU source. Body is raw `text/plain`. |
+| `DELETE` | `/api/pous/{path}` | Delete a POU file (and every declaration inside it). |
+| `GET` | `/api/pous/{path}/variables` | Variables declared in the file. Returns `VariableInfo[]`. |
 
 ## Devices
 

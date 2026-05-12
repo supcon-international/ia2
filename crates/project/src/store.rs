@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use crate::errors::StoreError;
 use crate::types::{
-    Application, ApplicationKind, ApplicationSummary, Device, Edge, IoMap, ModbusConfig,
-    ProgramInstance, ProjectManifest, ProjectTree, Protocol, ProtocolConfig, Task, Tasks,
+    Device, Edge, IoMap, ModbusConfig, PouFileSource, PouLanguage, PouType, ProgramInstance,
+    ProjectManifest, ProjectTreeSkeleton, Protocol, ProtocolConfig, Task, Tasks,
 };
 
 const SAMPLE_MAIN_ST: &str = include_str!("../templates/main.st");
@@ -16,6 +16,12 @@ pub struct ProjectStore {
 
 impl ProjectStore {
     /// Open an existing project at `root`. Fails if `project.toml` is missing.
+    ///
+    /// Auto-migrates legacy projects: if `applications/` exists and `pous/`
+    /// doesn't, the directory is renamed. The old name was a misnomer
+    /// (Codesys uses "Application" for a deployment bundle of POUs+tasks+IO;
+    /// here it just held POU source files) and the rename brings the
+    /// on-disk layout into line with the rest of the model.
     pub fn open(root: PathBuf) -> Result<Self, StoreError> {
         let manifest_path = root.join("project.toml");
         if !manifest_path.exists() {
@@ -23,7 +29,23 @@ impl ProjectStore {
         }
         let text = fs::read_to_string(&manifest_path)?;
         let manifest: ProjectManifest = toml::from_str(&text)?;
-        Ok(Self { root, manifest })
+        let store = Self { root, manifest };
+        store.migrate_applications_to_pous()?;
+        Ok(store)
+    }
+
+    /// Rename `applications/` → `pous/` if needed. Idempotent.
+    fn migrate_applications_to_pous(&self) -> Result<(), StoreError> {
+        let old = self.root.join("applications");
+        let new = self.root.join("pous");
+        if old.exists() && !new.exists() {
+            fs::rename(&old, &new)?;
+            tracing::info!(
+                project = %self.manifest.name,
+                "migrated applications/ → pous/"
+            );
+        }
+        Ok(())
     }
 
     /// Create a fresh project at `root`. Fails if `root` already contains a
@@ -37,7 +59,7 @@ impl ProjectStore {
         }
 
         fs::create_dir_all(&root)?;
-        fs::create_dir_all(root.join("applications"))?;
+        fs::create_dir_all(root.join("pous"))?;
         fs::create_dir_all(root.join("devices"))?;
         fs::create_dir_all(root.join("edges"))?;
 
@@ -50,7 +72,7 @@ impl ProjectStore {
             root.join("iomap.toml"),
             toml::to_string_pretty(&IoMap::default())?,
         )?;
-        fs::write(root.join("applications/main.st"), SAMPLE_MAIN_ST)?;
+        fs::write(root.join("pous/main.st"), SAMPLE_MAIN_ST)?;
         // Seed tasks.toml with a single 100 ms task running `main`. Users
         // edit this via the Tasks pane.
         let seed_tasks = Tasks {
@@ -81,113 +103,117 @@ impl ProjectStore {
         &self.manifest.name
     }
 
-    /// Full snapshot for the frontend project tree.
-    pub fn tree(&self) -> Result<ProjectTree, StoreError> {
-        let apps = self.list_applications()?;
+    /// Project tree without parsed declarations — the server fills those
+    /// in by calling `ironplc_bridge::extract_pou_declarations` on each
+    /// source. Doing it this way keeps the project crate parser-free
+    /// (no dependency on the bridge / ironplc).
+    pub fn tree_skeleton(&self) -> Result<ProjectTreeSkeleton, StoreError> {
+        let pou_paths = self.list_pou_paths()?;
+        let mut pous = Vec::with_capacity(pou_paths.len());
+        for path in pou_paths {
+            let source = self.read_pou_source(&path)?;
+            pous.push(PouFileSource { path, source });
+        }
         let devices = self.list_devices()?;
         let edges = self.list_edges()?;
-        let app_folders = self.list_folders("applications")?;
+        let pou_folders = self.list_folders("pous")?;
         let device_folders = self.list_folders("devices")?;
         let edge_folders = self.list_folders("edges")?;
         let iomap = self.read_iomap()?;
         let tasks = self.read_tasks()?.unwrap_or_default();
-        Ok(ProjectTree {
+        Ok(ProjectTreeSkeleton {
             name: self.manifest.name.clone(),
             path: self.root.display().to_string(),
-            applications: apps
-                .into_iter()
-                .map(|a| ApplicationSummary {
-                    name: a.name,
-                    kind: a.kind,
-                })
-                .collect(),
-            app_folders,
+            pous,
+            pou_folders,
             devices,
             device_folders,
-            iomap,
             edges,
             edge_folders,
+            iomap,
             tasks,
         })
     }
 
-    // ---------------- Applications (POUs) ----------------
+    // ---------------- POU files ----------------
+    //
+    // The store deals in *files* — `pous/<path>.st`. POU *declarations*
+    // (PROGRAM / FUNCTION_BLOCK / FUNCTION) inside each file are parser-
+    // driven and exposed via the bridge in the server layer; the store
+    // stays parser-free.
 
-    pub fn list_applications(&self) -> Result<Vec<Application>, StoreError> {
-        let root = self.root.join("applications");
+    pub fn list_pou_paths(&self) -> Result<Vec<String>, StoreError> {
+        let root = self.root.join("pous");
         if !root.exists() {
             return Ok(vec![]);
         }
         let mut out = Vec::new();
-        walk_files(&root, "", "st", &mut |rel, source| {
-            out.push(Application {
-                kind: detect_kind(&source),
-                name: rel.to_string(),
-                source,
-            });
+        walk_files(&root, "", "st", &mut |rel, _source| {
+            out.push(rel.to_string());
             Ok(())
         })?;
-        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out.sort();
         Ok(out)
     }
 
-    pub fn read_application(&self, name: &str) -> Result<Application, StoreError> {
-        validate_path(name)?;
-        let path = self.root.join("applications").join(format!("{name}.st"));
-        if !path.exists() {
-            return Err(StoreError::AppNotFound(name.into()));
+    pub fn read_pou_source(&self, path: &str) -> Result<String, StoreError> {
+        validate_path(path)?;
+        let file = self.root.join("pous").join(format!("{path}.st"));
+        if !file.exists() {
+            return Err(StoreError::PouNotFound(path.into()));
         }
-        let source = fs::read_to_string(&path)?;
-        Ok(Application {
-            name: name.into(),
-            kind: detect_kind(&source),
-            source,
-        })
+        Ok(fs::read_to_string(&file)?)
     }
 
-    pub fn write_application(&self, name: &str, source: &str) -> Result<(), StoreError> {
-        validate_path(name)?;
-        let path = self.root.join("applications").join(format!("{name}.st"));
-        if let Some(parent) = path.parent() {
+    pub fn write_pou_source(&self, path: &str, source: &str) -> Result<(), StoreError> {
+        validate_path(path)?;
+        let file = self.root.join("pous").join(format!("{path}.st"));
+        if let Some(parent) = file.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(path, source)?;
+        fs::write(file, source)?;
         Ok(())
     }
 
-    pub fn create_application(
+    /// Create a new POU file with a single declaration of `type_` in
+    /// `language` (only `St` supported for now). Returns the new source.
+    pub fn create_pou_file(
         &self,
-        name: &str,
-        kind: ApplicationKind,
-    ) -> Result<Application, StoreError> {
-        validate_path(name)?;
-        let path = self.root.join("applications").join(format!("{name}.st"));
-        if path.exists() {
-            return Err(StoreError::AlreadyExists(name.into()));
+        path: &str,
+        type_: PouType,
+        language: PouLanguage,
+    ) -> Result<String, StoreError> {
+        validate_path(path)?;
+        let file = self.root.join("pous").join(format!("{path}.st"));
+        if file.exists() {
+            return Err(StoreError::AlreadyExists(path.into()));
         }
-        let leaf = leaf_segment(name);
-        let source = template_for(leaf, kind);
-        fs::create_dir_all(path.parent().unwrap())?;
-        fs::write(&path, &source)?;
-        Ok(Application {
-            name: name.into(),
-            kind,
-            source,
-        })
+        if language != PouLanguage::St {
+            return Err(StoreError::UnsupportedLanguage(format!("{language:?}")));
+        }
+        let leaf = leaf_segment(path);
+        let source = template_for(leaf, type_);
+        fs::create_dir_all(file.parent().unwrap())?;
+        fs::write(&file, &source)?;
+        Ok(source)
     }
 
-    pub fn delete_application(&self, name: &str) -> Result<(), StoreError> {
-        validate_path(name)?;
-        let path = self.root.join("applications").join(format!("{name}.st"));
-        if !path.exists() {
-            return Err(StoreError::AppNotFound(name.into()));
+    pub fn delete_pou_file(&self, path: &str) -> Result<(), StoreError> {
+        validate_path(path)?;
+        let file = self.root.join("pous").join(format!("{path}.st"));
+        if !file.exists() {
+            return Err(StoreError::PouNotFound(path.into()));
         }
-        fs::remove_file(path)?;
+        fs::remove_file(file)?;
         Ok(())
     }
 
-    pub fn create_application_folder(&self, path: &str) -> Result<(), StoreError> {
-        self.create_folder("applications", path)
+    pub fn create_pou_folder(&self, path: &str) -> Result<(), StoreError> {
+        self.create_folder("pous", path)
+    }
+
+    pub fn delete_pou_folder(&self, path: &str) -> Result<(), StoreError> {
+        self.delete_folder("pous", path)
     }
 
     // ---------------- Devices ----------------
@@ -383,10 +409,6 @@ impl ProjectStore {
         Ok(())
     }
 
-    pub fn delete_application_folder(&self, path: &str) -> Result<(), StoreError> {
-        self.delete_folder("applications", path)
-    }
-
     pub fn delete_device_folder(&self, path: &str) -> Result<(), StoreError> {
         self.delete_folder("devices", path)
     }
@@ -463,22 +485,23 @@ impl ProjectStore {
         if self.read_tasks()?.is_some() {
             return Ok(MigrationReport::Skipped);
         }
-        let apps = self.list_applications()?;
+        let pou_paths = self.list_pou_paths()?;
         let mut tasks: Vec<Task> = Vec::new();
         let mut programs: Vec<ProgramInstance> = Vec::new();
         let mut stripped: Vec<String> = Vec::new();
         let mut seen_task_names = std::collections::HashSet::<String>::new();
         let mut seen_instance_names = std::collections::HashSet::<String>::new();
 
-        for app in &apps {
-            let extracted = extract_inline_configuration(&app.source);
+        for path in &pou_paths {
+            let source = self.read_pou_source(path)?;
+            let extracted = extract_inline_configuration(&source);
             if extracted.is_empty() {
                 continue;
             }
             // Strip every CONFIGURATION block from this POU.
-            let stripped_source = strip_inline_configuration(&app.source);
-            self.write_application(&app.name, &stripped_source)?;
-            stripped.push(app.name.clone());
+            let stripped_source = strip_inline_configuration(&source);
+            self.write_pou_source(path, &stripped_source)?;
+            stripped.push(path.clone());
 
             for inline in extracted {
                 for t in inline.tasks {
@@ -825,43 +848,26 @@ fn walk_dirs(
     Ok(())
 }
 
-/// Best-effort classifier for the tree icon. A POU file may legally
-/// contain multiple declarations (PROGRAM + FUNCTION_BLOCK + FUNCTION
-/// side by side); when that happens we bias toward `Program` because
-/// that's the runnable thing the user almost always cares about. Pure-FB
-/// files (no PROGRAM declared anywhere) stay `FunctionBlock`. The actual
-/// list of schedulable PROGRAMs is exposed accurately via
-/// `GET /api/project/pous` (parser-driven, not this heuristic).
-fn detect_kind(source: &str) -> ApplicationKind {
-    let has_program = source
-        .lines()
-        .any(|l| l.trim_start().starts_with("PROGRAM "));
-    if has_program {
-        return ApplicationKind::Program;
-    }
-    let has_fb = source
-        .lines()
-        .any(|l| l.trim_start().starts_with("FUNCTION_BLOCK"));
-    if has_fb {
-        return ApplicationKind::FunctionBlock;
-    }
-    ApplicationKind::Program
-}
-
-fn template_for(name: &str, kind: ApplicationKind) -> String {
-    // POU sources no longer include CONFIGURATION blocks — scheduling lives
-    // in the project-level tasks.toml instead, and the runtime synthesizes
-    // the CONFIGURATION at compile time. POUs are pure code.
-    match kind {
-        ApplicationKind::Program => format!(
+/// Source template for a new single-POU file. We bake the IEC POU
+/// header + an empty VAR block; the runtime's compile path enables
+/// `allow_empty_var_blocks` so this is valid input.
+fn template_for(name: &str, type_: PouType) -> String {
+    match type_ {
+        PouType::Program => format!(
             "PROGRAM {name}\n    VAR\n    END_VAR\n\n    \
              (* Add your program logic here. Bind this PROGRAM to a task\n       \
              in the Tasks pane to actually run it. *)\n\nEND_PROGRAM\n"
         ),
-        ApplicationKind::FunctionBlock => format!(
+        PouType::FunctionBlock => format!(
             "FUNCTION_BLOCK {name}\n    VAR_INPUT\n    END_VAR\n    \
              VAR_OUTPUT\n    END_VAR\n    VAR\n    END_VAR\n\n    \
              (* Add your FB logic here *)\n\nEND_FUNCTION_BLOCK\n"
+        ),
+        PouType::Function => format!(
+            "FUNCTION {name} : INT\n    VAR_INPUT\n    END_VAR\n    \
+             VAR\n    END_VAR\n\n    \
+             (* Return a value via the function name: {name} := ... *)\n\
+             \nEND_FUNCTION\n"
         ),
     }
 }

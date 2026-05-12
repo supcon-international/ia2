@@ -7,8 +7,6 @@ mod runtime;
 
 pub use errors::BridgeError;
 pub use runtime::{DeviceSpec, ProgramHandle, RuntimeWriteError, VarSnapshot, VarValue, spawn};
-// `PouDeclaration` is declared in this lib.rs (alongside `extract_pou_declarations`);
-// re-exported here for symmetry with the runtime types.
 
 
 use ironplc_container::Container;
@@ -57,9 +55,9 @@ pub fn compile(source: &str) -> Result<Container, BridgeError> {
 /// any survive (e.g. user pasted one in by hand), they're stripped here
 /// so the synthesized one wins without conflict.
 pub fn compile_project(store: &project::ProjectStore) -> Result<Container, BridgeError> {
-    let apps = store
-        .list_applications()
-        .map_err(|e| BridgeError::Parse(format!("listing applications: {e}")))?;
+    let pou_paths = store
+        .list_pou_paths()
+        .map_err(|e| BridgeError::Parse(format!("listing pous: {e}")))?;
     let tasks = store
         .read_tasks()
         .map_err(|e| BridgeError::Parse(format!("reading tasks.toml: {e}")))?
@@ -74,8 +72,11 @@ pub fn compile_project(store: &project::ProjectStore) -> Result<Container, Bridg
     }
 
     let mut combined = String::new();
-    for app in &apps {
-        let cleaned = strip_any_configuration(&app.source);
+    for path in &pou_paths {
+        let source = store
+            .read_pou_source(path)
+            .map_err(|e| BridgeError::Parse(format!("reading pou '{path}': {e}")))?;
+        let cleaned = strip_any_configuration(&source);
         combined.push_str(&cleaned);
         if !combined.ends_with('\n') {
             combined.push('\n');
@@ -201,26 +202,18 @@ pub struct VariableInfo {
     pub direction: String,
 }
 
-/// One IEC-level POU declaration found inside a source file. A single
-/// `.st` file may legally contain multiple POUs (`PROGRAM` + `FUNCTION_BLOCK`
-/// + `FUNCTION`) side by side, so file-level metadata (the on-disk name,
-/// the heuristic `kind`) isn't sufficient to know what's actually
-/// schedulable — agents and the Tasks pane need the parser-level list.
-#[derive(Debug, Clone, Serialize, TS)]
-#[ts(export)]
-pub struct PouDeclaration {
-    /// IEC POU name (the identifier after `PROGRAM` / `FUNCTION_BLOCK` /
-    /// `FUNCTION`). This is what `PROGRAM <inst> WITH <task> : <name>`
-    /// references in a CONFIGURATION block.
-    pub name: String,
-    /// "program" | "function_block" | "function".
-    pub kind: String,
-}
-
-/// Parse an ST source and return every POU declaration found in it.
-/// Returns an empty list if parsing fails (we don't surface partial state —
-/// the LSP diagnostics endpoint is the right path for that).
-pub fn extract_pou_declarations(source: &str) -> Vec<PouDeclaration> {
+/// Parse an ST source and return every POU declaration found in it,
+/// using the canonical `project::PouDecl` shape (name + type + language).
+/// Returns an empty list if parsing fails — partial state isn't useful
+/// to surface here; the LSP diagnostics endpoint is the right path for
+/// "what's wrong with this source".
+///
+/// Language is hard-coded to `St` for now (the only language ironplc
+/// supports). When other languages land upstream, this function will
+/// either get an explicit `language` parameter or peek at the file
+/// extension; the caller doesn't change.
+pub fn extract_pou_declarations(source: &str) -> Vec<project::PouDecl> {
+    use project::{PouDecl, PouLanguage, PouType};
     let file_id = FileId::default();
     let mut options = CompilerOptions::default();
     options.allow_empty_var_blocks = true;
@@ -229,21 +222,23 @@ pub fn extract_pou_declarations(source: &str) -> Vec<PouDeclaration> {
     };
     let mut out = Vec::new();
     for element in &library.elements {
-        match element {
-            LibraryElementKind::ProgramDeclaration(p) => out.push(PouDeclaration {
-                name: p.name.to_string(),
-                kind: "program".into(),
-            }),
-            LibraryElementKind::FunctionBlockDeclaration(fb) => out.push(PouDeclaration {
-                name: fb.name.to_string(),
-                kind: "function_block".into(),
-            }),
-            LibraryElementKind::FunctionDeclaration(f) => out.push(PouDeclaration {
-                name: f.name.to_string(),
-                kind: "function".into(),
-            }),
-            _ => {}
-        }
+        let (name, type_) = match element {
+            LibraryElementKind::ProgramDeclaration(p) => {
+                (p.name.to_string(), PouType::Program)
+            }
+            LibraryElementKind::FunctionBlockDeclaration(fb) => {
+                (fb.name.to_string(), PouType::FunctionBlock)
+            }
+            LibraryElementKind::FunctionDeclaration(f) => {
+                (f.name.to_string(), PouType::Function)
+            }
+            _ => continue,
+        };
+        out.push(PouDecl {
+            name,
+            type_,
+            language: PouLanguage::St,
+        });
     }
     out
 }

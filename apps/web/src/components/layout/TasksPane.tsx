@@ -85,7 +85,7 @@ export function TasksPane() {
   // multi-POU files like cascade_pid.st (which declares BOTH a FB and a
   // PROGRAM named cascade_pid) correctly show their PROGRAM here.
   const programOptions = pous
-    .filter((p) => p.kind === "program")
+    .filter((p) => p.type === "program")
     .map((p) => p.name)
   // Dedup just in case two files declare a PROGRAM with the same name —
   // the lib would reject it at compile, but the dropdown should still
@@ -219,7 +219,7 @@ export function TasksPane() {
   }
 
   const offerMigration =
-    (project?.applications.length ?? 0) > 0 && draft.tasks.length === 0
+    (project?.pous.length ?? 0) > 0 && draft.tasks.length === 0
 
   return (
     <main className="flex h-full min-h-0 min-w-0 flex-col">

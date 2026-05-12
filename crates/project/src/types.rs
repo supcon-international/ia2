@@ -14,29 +14,103 @@ fn default_version() -> String {
     "0.1".into()
 }
 
-// ---------------- Applications (POUs) ----------------
+// ---------------- POUs (Program Organization Units) ----------------
+//
+// A POU is one IEC declaration (a single `PROGRAM`, `FUNCTION_BLOCK`,
+// or `FUNCTION` block). The file is just the storage medium — one
+// `.st` file may declare multiple POUs side by side.
+//
+// The tree shows POU declarations; the editor reads/writes by file
+// path. `PouFile` carries both: the on-disk identifier + the parser-
+// derived declaration list inside it.
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[ts(export)]
 #[serde(rename_all = "snake_case")]
-pub enum ApplicationKind {
+pub enum PouType {
     Program,
     FunctionBlock,
+    Function,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum PouLanguage {
+    /// Structured Text. Only one supported today; the others reserve
+    /// the schema slot so adding LD / FBD / IL / SFC later is non-
+    /// breaking for stored projects.
+    St,
+    Ld,
+    Fbd,
+    Il,
+    Sfc,
+}
+
+/// One IEC POU declaration parsed out of a `.st` file. Surfaced in the
+/// tree as a separate node — a multi-POU file (e.g. a FB next to a
+/// PROGRAM) renders as multiple sibling nodes sharing a file path.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PouDecl {
+    /// IEC identifier — what `PROGRAM <inst> WITH <task> : <name>`
+    /// references in tasks.toml.
+    pub name: String,
+    #[serde(rename = "type")]
+    pub type_: PouType,
+    pub language: PouLanguage,
+}
+
+/// A `.st` file on disk and the POU declarations parsed from it.
+/// The tree section's children are `PouFile`s; the editor opens by
+/// `path`.
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
-pub struct Application {
-    pub name: String,
-    pub kind: ApplicationKind,
+pub struct PouFile {
+    /// Project-relative slash-path under `pous/`, without `.st`
+    /// extension (same identifier system the old `Application.name`
+    /// used — keeps the URL pattern `/api/pous/{path}` predictable).
+    pub path: String,
+    /// Declarations in source order. Empty when the file fails to
+    /// parse — the tree still shows the file so the user can fix it.
+    pub declarations: Vec<PouDecl>,
+}
+
+/// Full read response: same as `PouFile` plus the raw source.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct Pou {
+    pub path: String,
+    pub source: String,
+    pub declarations: Vec<PouDecl>,
+}
+
+/// Intermediate type used by `ProjectStore::tree_skeleton` — carries
+/// each `.st` file's raw source. The server's `/api/project` handler
+/// pairs this with `ironplc_bridge::extract_pou_declarations` to build
+/// the final `ProjectTree` with parsed POU declarations. Not exported
+/// to TS because the frontend never sees this shape directly.
+#[derive(Debug, Clone, Serialize)]
+pub struct PouFileSource {
+    pub path: String,
     pub source: String,
 }
 
-#[derive(Debug, Clone, Serialize, TS)]
-#[ts(export)]
-pub struct ApplicationSummary {
+/// As `ProjectTree`, but with each POU file represented as raw source
+/// rather than parsed declarations. The server fills in declarations
+/// at the API layer.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectTreeSkeleton {
     pub name: String,
-    pub kind: ApplicationKind,
+    pub path: String,
+    pub pous: Vec<PouFileSource>,
+    pub pou_folders: Vec<String>,
+    pub devices: Vec<Device>,
+    pub device_folders: Vec<String>,
+    pub edges: Vec<Edge>,
+    pub edge_folders: Vec<String>,
+    pub iomap: IoMap,
+    pub tasks: Tasks,
 }
 
 // ---------------- Devices ----------------
@@ -333,11 +407,14 @@ pub struct Tasks {
 pub struct ProjectTree {
     pub name: String,
     pub path: String,
-    pub applications: Vec<ApplicationSummary>,
-    /// All folder paths under `applications/` (relative, with `/` separator).
-    /// Includes empty folders — the UI needs them to render the tree before
-    /// any POUs are placed inside. Folders that contain POUs are listed too.
-    pub app_folders: Vec<String>,
+    /// Every `.st` file under `pous/` with its parsed declarations.
+    /// The tree renders each declaration as a node; multi-POU files
+    /// (FB + PROGRAM in one .st) show up as sibling nodes that share
+    /// a `path`.
+    pub pous: Vec<PouFile>,
+    /// All folder paths under `pous/` (slash-separated, relative).
+    /// Includes empty folders.
+    pub pou_folders: Vec<String>,
     /// Full Device records (config inline) so the IO Mapping UI can
     /// resolve channel kind/address without per-device fetches.
     pub devices: Vec<Device>,

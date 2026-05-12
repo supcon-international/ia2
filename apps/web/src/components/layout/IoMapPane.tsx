@@ -10,7 +10,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { fetchApplicationVariables, fetchDemoSlaveSnapshot } from "@/lib/api"
+import { fetchPouVariables, fetchDemoSlaveSnapshot } from "@/lib/api"
 import { useRuntime } from "@/state/runtime"
 import type { DemoSlaveSnapshot } from "@/types/generated/DemoSlaveSnapshot"
 import type { Direction } from "@/types/generated/Direction"
@@ -34,10 +34,10 @@ export function IoMapPane() {
     if (!project) return
     let cancelled = false
     Promise.all(
-      project.applications.map((a) =>
-        fetchApplicationVariables(a.name)
-          .then((vs) => [a.name, vs] as const)
-          .catch(() => [a.name, [] as VariableInfo[]] as const),
+      project.pous.map((p) =>
+        fetchPouVariables(p.path)
+          .then((vs) => [p.path, vs] as const)
+          .catch(() => [p.path, [] as VariableInfo[]] as const),
       ),
     ).then((entries) => {
       if (!cancelled) setVars(Object.fromEntries(entries))
@@ -83,7 +83,7 @@ export function IoMapPane() {
       mappings: [
         ...draft.mappings,
         {
-          application: project?.applications[0]?.name ?? "",
+          application: project?.pous[0]?.path ?? "",
           variable: "",
           direction: "output",
           device: project?.devices[0]?.name ?? "",
@@ -151,7 +151,7 @@ export function IoMapPane() {
                   appVars={vars[m.application] ?? []}
                   channelNames={channelsOf(project, m.device)}
                   liveValue={currentValue(m, project, slave)}
-                  applications={project?.applications.map((a) => a.name) ?? []}
+                  applications={project?.pous.map((p) => p.path) ?? []}
                   devices={project?.devices.map((d) => d.name) ?? []}
                   isRunning={isRunning}
                   onChange={(patch) => set(i, patch)}

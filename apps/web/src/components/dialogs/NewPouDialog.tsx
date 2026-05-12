@@ -19,7 +19,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { useRuntime } from "@/state/runtime"
-import type { ApplicationKind } from "@/types/generated/ApplicationKind"
+import type { PouType } from "@/types/generated/PouType"
 
 type ControlledProps = {
   trigger?: undefined
@@ -39,13 +39,13 @@ type UncontrolledProps = {
 type Props = ControlledProps | UncontrolledProps
 
 export function NewPouDialog(props: Props) {
-  const { createApp } = useRuntime()
+  const { createPou } = useRuntime()
   const [internalOpen, setInternalOpen] = useState(false)
   const open = props.open ?? internalOpen
   const setOpen = props.onOpenChange ?? setInternalOpen
   const parent = props.parent ?? ""
   const [name, setName] = useState("")
-  const [kind, setKind] = useState<ApplicationKind>("program")
+  const [kind, setKind] = useState<PouType>("program")
   const [submitting, setSubmitting] = useState(false)
 
   // Clear inputs each time the dialog opens, so re-opening for a
@@ -63,7 +63,7 @@ export function NewPouDialog(props: Props) {
   const submit = async () => {
     if (!trimmed) return
     setSubmitting(true)
-    await createApp(fullPath, kind)
+    await createPou(fullPath, kind)
     setSubmitting(false)
     setOpen(false)
   }
@@ -105,7 +105,7 @@ export function NewPouDialog(props: Props) {
             <Label>Type</Label>
             <Select
               value={kind}
-              onValueChange={(v) => setKind(v as ApplicationKind)}
+              onValueChange={(v) => setKind(v as PouType)}
             >
               <SelectTrigger>
                 <SelectValue />

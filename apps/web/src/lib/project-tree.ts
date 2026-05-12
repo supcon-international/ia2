@@ -30,21 +30,22 @@ export type ItemNode<T> = {
 
 export type TreeNode<T> = FolderNode<T> | ItemNode<T>
 
-export type WithName = { name: string }
-
 /**
  * Group items + folders into a tree.
  *
- * - `items[].name` is the slash-separated path (e.g. "pid_loops/temp_pid").
+ * - `getPath(item)` returns the slash-separated location of the item
+ *   (e.g. "pid_loops/temp_pid"). This is the on-disk identifier
+ *   (file path without extension for POU files; the `.name` field for
+ *   Devices and Edges).
  * - `folders` are folder paths (e.g. ["pid_loops", "pid_loops/inner"]).
  *
- * Both lists may overlap (a folder path can match a name prefix); we
- * deduplicate so an empty folder still renders even when no items live
- * inside it yet.
+ * Both lists may overlap; we dedup so an empty folder still renders
+ * even when no items live inside it yet.
  */
-export function buildTree<T extends WithName>(
+export function buildTree<T>(
   items: T[],
   folders: string[],
+  getPath: (item: T) => string,
 ): TreeNode<T>[] {
   // Root node carrying the section's children.
   const root: FolderNode<T> = {
@@ -80,13 +81,14 @@ export function buildTree<T extends WithName>(
 
   // Place each item under the folder its path parts imply.
   for (const item of items) {
-    const parts = item.name.split("/")
+    const fullPath = getPath(item)
+    const parts = fullPath.split("/")
     const leaf = parts.pop()!
     const parent = folderAt(parts)
     parent.children.push({
       kind: "item",
       name: leaf,
-      path: item.name,
+      path: fullPath,
       item,
     })
   }

@@ -78,7 +78,11 @@ export function TrendChart({ series, height = 110 }: Props) {
         points={points.join(" ")}
         fill="none"
         stroke={s.color}
-        strokeWidth={1.25}
+        // 1px screen-pixel stroke regardless of viewBox stretch — the SVG
+        // is preserveAspectRatio=none so without this the horizontal scale
+        // would visually thicken vertical edges on stair-step BOOL lines.
+        strokeWidth={1}
+        vectorEffect="non-scaling-stroke"
         strokeLinejoin={s.binary ? "miter" : "round"}
         strokeLinecap="round"
         opacity={0.95}

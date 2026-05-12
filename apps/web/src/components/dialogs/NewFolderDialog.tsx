@@ -26,7 +26,7 @@ type Props = {
 }
 
 export function NewFolderDialog({ open, onOpenChange, section, parent }: Props) {
-  const { createAppFolder, createDeviceFolder, createEdgeFolder } = useRuntime()
+  const { createPouFolder, createDeviceFolder, createEdgeFolder } = useRuntime()
   const [leaf, setLeaf] = useState("")
   const [submitting, setSubmitting] = useState(false)
 
@@ -42,7 +42,7 @@ export function NewFolderDialog({ open, onOpenChange, section, parent }: Props) 
     if (!trimmed) return
     setSubmitting(true)
     if (section === "applications") {
-      await createAppFolder(fullPath)
+      await createPouFolder(fullPath)
     } else if (section === "devices") {
       await createDeviceFolder(fullPath)
     } else {

@@ -20,7 +20,10 @@ impl From<StoreError> for ApiError {
             StoreError::NotFound(p) => Self::NotFound(format!("project not found: {p}")),
             StoreError::AlreadyExists(p) => Self::Conflict(format!("already exists: {p}")),
             StoreError::InvalidName(n) => Self::BadRequest(format!("invalid name: {n}")),
-            StoreError::AppNotFound(n) => Self::NotFound(format!("application '{n}' not found")),
+            StoreError::PouNotFound(n) => Self::NotFound(format!("POU '{n}' not found")),
+            StoreError::UnsupportedLanguage(n) => {
+                Self::BadRequest(format!("POU language not yet supported: {n}"))
+            }
             StoreError::DeviceNotFound(n) => Self::NotFound(format!("device '{n}' not found")),
             StoreError::EdgeNotFound(n) => Self::NotFound(format!("edge '{n}' not found")),
             StoreError::FolderNotFound(n) => Self::NotFound(format!("folder '{n}' not found")),

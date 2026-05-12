@@ -1,5 +1,3 @@
-import type { Application } from "@/types/generated/Application"
-import type { ApplicationKind } from "@/types/generated/ApplicationKind"
 import type { AttachInfo } from "@/types/generated/AttachInfo"
 import type { AttachmentStatus } from "@/types/generated/AttachmentStatus"
 import type { CheckDiagnostic } from "@/types/generated/CheckDiagnostic"
@@ -11,6 +9,9 @@ import type { EdgeProbe } from "@/types/generated/EdgeProbe"
 import type { IoMap } from "@/types/generated/IoMap"
 import type { ProjectInfo } from "@/types/generated/ProjectInfo"
 import type { MigrationResponse } from "@/types/generated/MigrationResponse"
+import type { Pou } from "@/types/generated/Pou"
+import type { PouLanguage } from "@/types/generated/PouLanguage"
+import type { PouType } from "@/types/generated/PouType"
 import type { ProjectListing } from "@/types/generated/ProjectListing"
 import type { ProjectPous } from "@/types/generated/ProjectPous"
 import type { ProjectTree } from "@/types/generated/ProjectTree"
@@ -69,71 +70,68 @@ export async function closeProject(): Promise<RunResponse> {
   )
 }
 
-// ---------- Applications (POUs) ----------
+// ---------- POUs (`.st` files holding 1+ IEC declarations) ----------
 
-export async function fetchApplication(name: string): Promise<Application> {
+export async function fetchPou(path: string): Promise<Pou> {
   return jsonOrThrow(
-    await fetch(`/api/applications/${encodeURIComponent(name)}`),
-    `GET /api/applications/${name}`,
+    await fetch(`/api/pous/${encodeURIComponent(path)}`),
+    `GET /api/pous/${path}`,
   )
 }
 
-export async function createApplication(
-  name: string,
-  kind: ApplicationKind,
-): Promise<Application> {
+export async function createPou(
+  path: string,
+  type_: PouType,
+  language: PouLanguage = "st",
+): Promise<Pou> {
   return jsonOrThrow(
-    await fetch(`/api/applications`, {
+    await fetch(`/api/pous`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, kind }),
+      body: JSON.stringify({ path, type: type_, language }),
     }),
-    "POST /api/applications",
+    "POST /api/pous",
   )
 }
 
-export async function saveApplication(
-  name: string,
+export async function savePou(
+  path: string,
   source: string,
 ): Promise<RunResponse> {
   return jsonOrThrow(
-    await fetch(`/api/applications/${encodeURIComponent(name)}`, {
+    await fetch(`/api/pous/${encodeURIComponent(path)}`, {
       method: "PUT",
       headers: { "Content-Type": "text/plain" },
       body: source,
     }),
-    `PUT /api/applications/${name}`,
+    `PUT /api/pous/${path}`,
   )
 }
 
-export async function deleteApplication(name: string): Promise<RunResponse> {
+export async function deletePou(path: string): Promise<RunResponse> {
   return jsonOrThrow(
-    await fetch(`/api/applications/${encodeURIComponent(name)}`, {
+    await fetch(`/api/pous/${encodeURIComponent(path)}`, {
       method: "DELETE",
     }),
-    `DELETE /api/applications/${name}`,
+    `DELETE /api/pous/${path}`,
   )
 }
 
-export async function createApplicationFolder(
-  path: string,
-): Promise<RunResponse> {
+export async function createPouFolder(path: string): Promise<RunResponse> {
   return jsonOrThrow(
-    await fetch(`/api/applications/folders`, {
+    await fetch(`/api/pous/folders`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path }),
     }),
-    "POST /api/applications/folders",
+    "POST /api/pous/folders",
   )
 }
 
-export async function fetchApplicationVariables(
-  name: string,
-): Promise<VariableInfo[]> {
+export async function fetchPouVariables(path: string): Promise<VariableInfo[]> {
   return jsonOrThrow(
-    await fetch(`/api/applications/${encodeURIComponent(name)}/variables`),
-    `GET /api/applications/${name}/variables`,
+    await fetch(`/api/pous/${encodeURIComponent(path)}/variables`),
+    `GET /api/pous/${path}/variables`,
   )
 }
 

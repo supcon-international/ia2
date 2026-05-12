@@ -28,7 +28,7 @@ use ironplc_bridge::{
     CheckDiagnostic, DeviceSpec, ProgramHandle, RuntimeWriteError, VarSnapshot, VariableInfo,
 };
 use project::{
-    Application, ApplicationKind, Device, Edge, IoMap, MigrationReport, ProjectListing,
+    Device, Edge, IoMap, MigrationReport, Pou, PouFile, PouLanguage, PouType, ProjectListing,
     ProjectManifest, ProjectStore, ProjectTree, Protocol, Tasks, default_projects_dir,
     load_last_opened, save_last_opened,
 };
@@ -94,9 +94,13 @@ pub struct OpenProjectRequest {
 
 #[derive(Debug, Deserialize, TS)]
 #[ts(export)]
-pub struct CreateApplicationRequest {
-    pub name: String,
-    pub kind: ApplicationKind,
+pub struct CreatePouRequest {
+    /// Project-relative slash-path under `pous/`, without `.st`. The
+    /// leaf is also used as the IEC POU identifier in the seeded source.
+    pub path: String,
+    #[serde(rename = "type")]
+    pub type_: PouType,
+    pub language: PouLanguage,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -208,74 +212,124 @@ pub async fn close_project(State(state): State<AppState>) -> Json<RunResponse> {
 pub async fn project_tree(
     State(state): State<AppState>,
 ) -> Result<Json<ProjectTree>, ApiError> {
-    with_project(&state, |store| store.tree().map_err(Into::into)).map(Json)
-}
-
-// ============================================================
-//  Applications (POUs)
-// ============================================================
-
-pub async fn get_application(
-    State(state): State<AppState>,
-    AxumPath(name): AxumPath<String>,
-) -> Result<Json<Application>, ApiError> {
-    with_project(&state, |store| store.read_application(&name).map_err(Into::into)).map(Json)
-}
-
-pub async fn create_application(
-    State(state): State<AppState>,
-    Json(req): Json<CreateApplicationRequest>,
-) -> Result<Json<Application>, ApiError> {
     with_project(&state, |store| {
-        store
-            .create_application(&req.name, req.kind)
-            .map_err(Into::into)
+        // The skeleton has each POU file's raw source. We parse each here
+        // to surface declarations to the frontend (the store stays parser-
+        // free; the bridge owns the parser).
+        let skel = store.tree_skeleton()?;
+        let pous: Vec<PouFile> = skel
+            .pous
+            .into_iter()
+            .map(|f| PouFile {
+                path: f.path,
+                declarations: ironplc_bridge::extract_pou_declarations(&f.source),
+            })
+            .collect();
+        Ok(ProjectTree {
+            name: skel.name,
+            path: skel.path,
+            pous,
+            pou_folders: skel.pou_folders,
+            devices: skel.devices,
+            device_folders: skel.device_folders,
+            edges: skel.edges,
+            edge_folders: skel.edge_folders,
+            iomap: skel.iomap,
+            tasks: skel.tasks,
+        })
     })
     .map(Json)
 }
 
-pub async fn save_application(
+// ============================================================
+//  POUs (files holding 1+ IEC POU declarations)
+// ============================================================
+//
+// Identifier convention: `path` = slash-separated location under
+// `pous/`, no `.st` extension. Same shape as the old
+// `/api/applications/{name}` route — only the noun changes.
+
+/// Read a POU file: raw source + parsed declarations (PROGRAM/FB/FN found
+/// inside). The IDE editor uses the source verbatim; agents and the Tasks
+/// pane use the declaration list to drive scheduling.
+pub async fn get_pou(
     State(state): State<AppState>,
-    AxumPath(name): AxumPath<String>,
+    AxumPath(path): AxumPath<String>,
+) -> Result<Json<Pou>, ApiError> {
+    with_project(&state, |store| {
+        let source = store.read_pou_source(&path)?;
+        Ok(Pou {
+            path: path.clone(),
+            declarations: ironplc_bridge::extract_pou_declarations(&source),
+            source,
+        })
+    })
+    .map(Json)
+}
+
+pub async fn create_pou(
+    State(state): State<AppState>,
+    Json(req): Json<CreatePouRequest>,
+) -> Result<Json<Pou>, ApiError> {
+    with_project(&state, |store| {
+        let source = store.create_pou_file(&req.path, req.type_, req.language)?;
+        Ok(Pou {
+            path: req.path,
+            declarations: ironplc_bridge::extract_pou_declarations(&source),
+            source,
+        })
+    })
+    .map(Json)
+}
+
+pub async fn save_pou(
+    State(state): State<AppState>,
+    AxumPath(path): AxumPath<String>,
     body: String,
 ) -> Result<Json<RunResponse>, ApiError> {
     with_project(&state, |store| {
-        store.write_application(&name, &body).map_err(Into::into)
+        store.write_pou_source(&path, &body).map_err(Into::into)
     })?;
     Ok(Json(RunResponse { ok: true }))
 }
 
-pub async fn delete_application(
+pub async fn delete_pou(
     State(state): State<AppState>,
-    AxumPath(name): AxumPath<String>,
+    AxumPath(path): AxumPath<String>,
 ) -> Result<Json<RunResponse>, ApiError> {
-    with_project(&state, |store| {
-        store.delete_application(&name).map_err(Into::into)
-    })?;
+    with_project(&state, |store| store.delete_pou_file(&path).map_err(Into::into))?;
     Ok(Json(RunResponse { ok: true }))
 }
 
-pub async fn create_application_folder(
+pub async fn create_pou_folder(
     State(state): State<AppState>,
     Json(req): Json<CreateFolderRequest>,
 ) -> Result<Json<RunResponse>, ApiError> {
     with_project(&state, |store| {
-        store.create_application_folder(&req.path).map_err(Into::into)
+        store.create_pou_folder(&req.path).map_err(Into::into)
     })?;
     Ok(Json(RunResponse { ok: true }))
 }
 
-/// Variables declared inside the named POU. Returns an empty list rather
-/// than an error if the source can't be parsed — useful while the user is
-/// mid-typing.
-pub async fn application_variables(
+pub async fn delete_pou_folder(
     State(state): State<AppState>,
-    AxumPath(name): AxumPath<String>,
+    AxumPath(path): AxumPath<String>,
+) -> Result<Json<RunResponse>, ApiError> {
+    with_project(&state, |store| {
+        store.delete_pou_folder(&path).map_err(Into::into)
+    })?;
+    Ok(Json(RunResponse { ok: true }))
+}
+
+/// Variables declared inside any POU in this file. Empty list if parse
+/// fails — handy for mid-typing editor calls.
+pub async fn pou_variables(
+    State(state): State<AppState>,
+    AxumPath(path): AxumPath<String>,
 ) -> Result<Json<Vec<VariableInfo>>, ApiError> {
     let source = with_project(&state, |store| {
-        store.read_application(&name).map_err(Into::into)
-    })?
-    .source;
+        store.read_pou_source(&path).map_err(Into::into)
+    })?;
     Ok(Json(ironplc_bridge::extract_variables(&source)))
 }
 
@@ -608,14 +662,15 @@ pub async fn validate_project(
 #[derive(Debug, Serialize, TS)]
 #[ts(export)]
 pub struct PouInProject {
-    /// File the declaration was found in — project-relative POU path
+    /// File the declaration lives in — project-relative POU path
     /// (e.g. `pid_loops/temperature_pid`).
-    pub application: String,
+    pub file_path: String,
     /// IEC POU identifier — what `PROGRAM <inst> WITH <task> : <name>`
     /// references in a CONFIGURATION block.
     pub name: String,
-    /// "program" | "function_block" | "function".
-    pub kind: String,
+    #[serde(rename = "type")]
+    pub type_: PouType,
+    pub language: PouLanguage,
 }
 
 #[derive(Debug, Serialize, TS)]
@@ -625,22 +680,24 @@ pub struct ProjectPous {
 }
 
 /// Every IEC POU declared anywhere in the project, parser-driven so it
-/// reflects what's actually schedulable (the file-level `kind` is a
-/// heuristic — multi-POU files mix Program + FunctionBlock + Function
-/// declarations). Agents and the Tasks pane both use this to populate
-/// the "PROGRAM to schedule" dropdown.
+/// reflects what's actually schedulable. A single `.st` file may declare
+/// multiple POUs (FB + PROGRAM + FUNCTION side by side); each appears
+/// as its own entry here. Agents and the Tasks pane both use this to
+/// populate the "PROGRAM to schedule" dropdown.
 pub async fn project_pous(
     State(state): State<AppState>,
 ) -> Result<Json<ProjectPous>, ApiError> {
     with_project(&state, |store| {
-        let apps = store.list_applications()?;
+        let paths = store.list_pou_paths()?;
         let mut out = Vec::new();
-        for app in apps {
-            for d in ironplc_bridge::extract_pou_declarations(&app.source) {
+        for path in paths {
+            let source = store.read_pou_source(&path)?;
+            for d in ironplc_bridge::extract_pou_declarations(&source) {
                 out.push(PouInProject {
-                    application: app.name.clone(),
+                    file_path: path.clone(),
                     name: d.name,
-                    kind: d.kind,
+                    type_: d.type_,
+                    language: d.language,
                 });
             }
         }
@@ -656,7 +713,8 @@ pub async fn project_pous(
 #[derive(Debug, Serialize, TS)]
 #[ts(export)]
 pub struct ProjectVariable {
-    pub application: String,
+    /// POU file the variable was declared in (`pous/<file_path>.st`).
+    pub file_path: String,
     pub name: String,
     pub type_name: String,
     pub direction: String,
@@ -676,12 +734,13 @@ pub async fn project_variables(
     State(state): State<AppState>,
 ) -> Result<Json<ProjectVariables>, ApiError> {
     with_project(&state, |store| {
-        let apps = store.list_applications()?;
+        let paths = store.list_pou_paths()?;
         let mut out = Vec::new();
-        for app in apps {
-            for v in ironplc_bridge::extract_variables(&app.source) {
+        for path in paths {
+            let source = store.read_pou_source(&path)?;
+            for v in ironplc_bridge::extract_variables(&source) {
                 out.push(ProjectVariable {
-                    application: app.name.clone(),
+                    file_path: path.clone(),
                     name: v.name,
                     type_name: v.type_name,
                     direction: v.direction,
@@ -905,18 +964,9 @@ pub async fn write_runtime_variable(
 }
 
 // ============================================================
-//  Folder deletion (applications / devices / edges)
+//  Folder deletion (devices / edges) — POU folder delete lives with
+//  the rest of the POU handlers above.
 // ============================================================
-
-pub async fn delete_application_folder(
-    State(state): State<AppState>,
-    AxumPath(path): AxumPath<String>,
-) -> Result<Json<RunResponse>, ApiError> {
-    with_project(&state, |store| {
-        store.delete_application_folder(&path).map_err(Into::into)
-    })?;
-    Ok(Json(RunResponse { ok: true }))
-}
 
 pub async fn delete_device_folder(
     State(state): State<AppState>,

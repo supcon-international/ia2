@@ -88,19 +88,30 @@ export function Sparkline({
   return (
     <svg
       viewBox={`0 0 ${width} ${height}`}
-      className="block"
+      // Stretch to fill — height is set by parent — without the auto-axis
+      // preservation. `vectorEffect=non-scaling-stroke` on the polyline
+      // pins the stroke to screen-pixel units regardless of how the SVG
+      // is scaled, so lines don't look chunkier in wider rows.
+      preserveAspectRatio="none"
+      className="block h-full w-full"
       style={{ color: color ?? "currentColor" }}
     >
       {areaPath && (
-        <path d={areaPath} fill="currentColor" fillOpacity={0.12} />
+        <path
+          d={areaPath}
+          fill="currentColor"
+          fillOpacity={0.1}
+          vectorEffect="non-scaling-stroke"
+        />
       )}
       <polyline
         points={polylinePoints}
         fill="none"
         stroke="currentColor"
-        strokeWidth={binary ? 1.25 : 1}
+        strokeWidth={1}
         strokeLinejoin={binary ? "miter" : "round"}
         strokeLinecap="round"
+        vectorEffect="non-scaling-stroke"
       />
     </svg>
   )

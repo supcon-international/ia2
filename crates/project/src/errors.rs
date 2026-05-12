@@ -32,8 +32,11 @@ pub enum StoreError {
     #[error("folder '{0}' is not empty — remove its contents first")]
     FolderNotEmpty(String),
 
-    #[error("application '{0}' not found")]
-    AppNotFound(String),
+    #[error("POU '{0}' not found")]
+    PouNotFound(String),
+
+    #[error("POU language not yet supported: {0}")]
+    UnsupportedLanguage(String),
 
     #[error("device '{0}' not found")]
     DeviceNotFound(String),

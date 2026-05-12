@@ -13,7 +13,7 @@ import {
 import { useRuntime } from "@/state/runtime"
 
 export function MonitorPane() {
-  const { lastSnapshot, isRunning, currentApp } = useRuntime()
+  const { lastSnapshot, isRunning, currentPou } = useRuntime()
 
   // History buffers (mutated in place; re-rendered via a tick counter).
   const historyRef = useRef<Map<string, number[]>>(new Map())
@@ -28,7 +28,7 @@ export function MonitorPane() {
     typeRef.current.clear()
     setPinned(new Set())
     setTick((t) => t + 1)
-  }, [currentApp?.name])
+  }, [currentPou?.path])
 
   // Ingest every snapshot into the per-variable history.
   useEffect(() => {
@@ -118,7 +118,9 @@ export function MonitorPane() {
                 <li
                   key={`${i}:${v.name}`}
                   className={cn(
-                    "flex items-center gap-2 px-2 py-1",
+                    // Compact row: 4px vertical gap, mono-font value column.
+                    // Density matters — many rows on long programs.
+                    "flex items-center gap-2 px-2 py-0.5",
                     stale && "opacity-60",
                   )}
                 >
@@ -144,7 +146,13 @@ export function MonitorPane() {
                     {v.name}
                   </span>
                   <span
-                    className={cn("flex-1 min-w-0", !sparkColor && defaultColor)}
+                    // Constrain sparkline height explicitly — without h-4
+                    // the SVG would otherwise expand to whatever vertical
+                    // space the row gives it, making strokes look chunky.
+                    className={cn(
+                      "block h-4 flex-1 min-w-0",
+                      !sparkColor && defaultColor,
+                    )}
                     style={sparkColor ? { color: sparkColor } : undefined}
                   >
                     <Sparkline
