@@ -46,8 +46,7 @@ function saveLayout(key: string, layout: Layout) {
   }
 }
 
-/** A useState-backed Layout that mirrors itself to localStorage on every
- * change. Initial value loads from storage; falls back to `fallback`. */
+/** useState-backed Layout that mirrors itself to localStorage. */
 function usePersistedLayout(
   key: string,
   fallback: Layout,
@@ -55,15 +54,13 @@ function usePersistedLayout(
   const [layout, setLayout] = useState<Layout>(
     () => loadLayout(key) ?? fallback,
   )
-  // Persist on every change. The Group's onLayoutChange fires per-drag
-  // (not on every animation frame), so this isn't write-heavy.
   useEffect(() => {
     saveLayout(key, layout)
   }, [key, layout])
   return [layout, setLayout]
 }
 
-// Stable IDs — these double as React keys and as layout dict keys.
+// Stable IDs — used as React keys and as layout dict keys.
 const PANEL_PROJECT = "project"
 const PANEL_CENTER = "center"
 const PANEL_AGENTS = "agents"
@@ -73,14 +70,15 @@ const PANEL_MONITOR = "monitor"
 function Shell() {
   const { project, projectLoading, view } = useRuntime()
 
-  // Default sizes are percentages of the parent group. Picked to roughly
-  // match the previous fixed layout (260 / 1fr / 320 → ~18 / 60 / 22).
-  const [hLayout, setHLayout] = usePersistedLayout("cs.shell.h", {
+  // Storage keys are versioned (v2) so anyone with a borked layout from
+  // the prior bug (number minSize was interpreted as px → side panels
+  // clamped to 40 / 45 px) starts fresh on next reload.
+  const [hLayout, setHLayout] = usePersistedLayout("cs.shell.h.v2", {
     [PANEL_PROJECT]: 18,
     [PANEL_CENTER]: 60,
     [PANEL_AGENTS]: 22,
   })
-  const [vLayout, setVLayout] = usePersistedLayout("cs.shell.v", {
+  const [vLayout, setVLayout] = usePersistedLayout("cs.shell.v.v2", {
     [PANEL_EDITOR]: 68,
     [PANEL_MONITOR]: 32,
   })
@@ -110,8 +108,16 @@ function Shell() {
       <ProgramPane />
     )
 
+  // Note: Monitor used to auto-hide when no run had happened yet, but
+  // adding/removing the Panel mid-session made the lib redistribute the
+  // vertical space to an equal split instead of restoring defaultLayout.
+  // It's also more honest to always show Monitor (with its "click Run
+  // to start" placeholder) so the user knows where live data appears.
+  // For users who want it gone, the bottom gutter drags down to
+  // `collapsedSize` (3% — a tiny stub).
+
   return (
-    <div className="h-screen bg-background text-foreground">
+    <div className="h-screen w-screen overflow-hidden bg-background text-foreground">
       <Group
         orientation="horizontal"
         defaultLayout={hLayout}
@@ -120,37 +126,42 @@ function Shell() {
       >
         <Panel
           id={PANEL_PROJECT}
-          minSize={10}
-          maxSize={40}
+          minSize="10%"
+          maxSize="40%"
           collapsible
-          collapsedSize={0}
+          collapsedSize="0%"
         >
           <ProjectPane />
         </Panel>
-        <Separator className={separatorClass("vertical")} />
-        <Panel id={PANEL_CENTER} minSize={30}>
+        <Gutter orientation="vertical" />
+        <Panel id={PANEL_CENTER} minSize="30%">
           <Group
             orientation="vertical"
             defaultLayout={vLayout}
             onLayoutChange={setVLayout}
-            className="h-full w-full border-x border-border"
+            className="h-full w-full"
           >
-            <Panel id={PANEL_EDITOR} minSize={20}>
+            <Panel id={PANEL_EDITOR} minSize="20%">
               {center}
             </Panel>
-            <Separator className={separatorClass("horizontal")} />
-            <Panel id={PANEL_MONITOR} minSize={5} collapsible collapsedSize={3}>
+            <Gutter orientation="horizontal" />
+            <Panel
+              id={PANEL_MONITOR}
+              minSize="5%"
+              collapsible
+              collapsedSize="3%"
+            >
               <MonitorPane />
             </Panel>
           </Group>
         </Panel>
-        <Separator className={separatorClass("vertical")} />
+        <Gutter orientation="vertical" />
         <Panel
           id={PANEL_AGENTS}
-          minSize={10}
-          maxSize={45}
+          minSize="10%"
+          maxSize="45%"
           collapsible
-          collapsedSize={0}
+          collapsedSize="0%"
         >
           <AgentsPane />
         </Panel>
@@ -159,12 +170,45 @@ function Shell() {
   )
 }
 
-/** Thin gutter line that thickens to 3px + highlights on hover/drag.
- * Vertical separators sit between horizontal panels (so they're
- * themselves vertical lines); naming matches the orientation of the
- * LINE, not the group. */
-function separatorClass(orient: "vertical" | "horizontal"): string {
-  return orient === "vertical"
-    ? "w-px bg-border transition-colors hover:bg-accent data-[separator-state=drag]:bg-accent cursor-col-resize"
-    : "h-px bg-border transition-colors hover:bg-accent data-[separator-state=drag]:bg-accent cursor-row-resize"
+/**
+ * Drag handle between two panels.
+ *
+ * Visually: a 4-px-wide (or tall) hit-area centered on a 1-px border line.
+ * The hit area is transparent at rest and turns into a 2-px accent strip
+ * when hovered or being dragged. This gives a generous grab target without
+ * a fat permanent gutter eating screen real estate.
+ */
+function Gutter({ orientation }: { orientation: "vertical" | "horizontal" }) {
+  // `orientation === "vertical"` means the SEPARATOR LINE is vertical, i.e.
+  // it sits between two horizontally-arranged panels (left/right).
+  const vertical = orientation === "vertical"
+  const classes = [
+    "group relative shrink-0",
+    vertical
+      ? "w-1 cursor-col-resize"
+      : "h-1 cursor-row-resize",
+  ].join(" ")
+  return (
+    <Separator className={classes}>
+      {/* Always-visible 1px hairline */}
+      <span
+        aria-hidden
+        className={
+          vertical
+            ? "pointer-events-none absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-border"
+            : "pointer-events-none absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-border"
+        }
+      />
+      {/* Hover / drag highlight on top */}
+      <span
+        aria-hidden
+        className={
+          (vertical
+            ? "pointer-events-none absolute inset-y-0 left-1/2 w-[2px] -translate-x-1/2 "
+            : "pointer-events-none absolute inset-x-0 top-1/2 h-[2px] -translate-y-1/2 ") +
+          "bg-accent opacity-0 transition-opacity group-hover:opacity-100 group-data-[separator-state=drag]:opacity-100"
+        }
+      />
+    </Separator>
+  )
 }
