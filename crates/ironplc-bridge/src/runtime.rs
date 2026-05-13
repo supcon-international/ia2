@@ -27,6 +27,7 @@ use ironplc_container::debug_format::{build_var_debug_map, format_variable_value
 use ironplc_container::debug_section::iec_type_tag;
 use ironplc_container::Container;
 use ironplc_container::VarIndex;
+use ironplc_container::STRING_HEADER_BYTES;
 use ironplc_vm::{Vm, VmBuffers, VmRunning};
 use project::{Direction, Mapping, ProtocolConfig};
 use serde::Serialize;
@@ -889,6 +890,12 @@ async fn run_loop_async(
         .iter()
         .map(|u| build_var_debug_map(&u.container))
         .collect();
+    // Parallel to debug_maps: per-unit `var_index -> data_offset` for STRING
+    // vars, whose bytes live in the VM data region rather than the slot.
+    let string_layouts: Vec<HashMap<u16, u32>> = units
+        .iter()
+        .map(|u| build_string_layout_map(&u.container))
+        .collect();
     let var_index_by_name: Vec<HashMap<String, u16>> = debug_maps
         .iter()
         .map(|dm| {
@@ -1178,6 +1185,7 @@ async fn run_loop_async(
                 let snapshot = build_snapshot(
                     &runnings,
                     &debug_maps,
+                    &string_layouts,
                     &instances,
                     &shared_names,
                     &clocks,
@@ -1353,6 +1361,7 @@ async fn run_loop_async(
             let snapshot = build_snapshot(
                 &runnings,
                 &debug_maps,
+                &string_layouts,
                 &instances,
                 &shared_names,
                 &clocks,
@@ -1474,6 +1483,7 @@ fn persist_retain_values(
 fn build_snapshot(
     runnings: &[VmRunning],
     debug_maps: &[HashMap<u16, VarDebugInfo>],
+    string_layouts: &[HashMap<u16, u32>],
     instances: &[String],
     shared_names: &std::collections::HashSet<String>,
     clocks: &[UnitClock],
@@ -1483,6 +1493,10 @@ fn build_snapshot(
     for (u, running) in runnings.iter().enumerate() {
         let num_vars = running.num_variables();
         vars.reserve(num_vars as usize);
+        // STRING bytes live in this unit's data region, not the var slot;
+        // read from the SAME unit `u` we're iterating so multi-PROGRAM
+        // instances never cross-read each other's strings.
+        let data_region = running.data_region();
         // Skip slots that have no debug-map entry (unnamed VM scratch
         // storage for FB internals / non-instantiated POUs) and dedup
         // names that collide within the unit — a unit's source carries
@@ -1511,7 +1525,7 @@ fn build_snapshot(
             vars.push(VarValue {
                 name,
                 type_name: info.type_name.clone(),
-                value: format_variable_value(raw, info.iec_type_tag),
+                value: format_value(raw, info, string_layouts[u].get(&i).copied(), data_region),
             });
         }
     }
@@ -1520,6 +1534,100 @@ fn build_snapshot(
         scan_count: max_scan_count(clocks),
         vars,
     }
+}
+
+/// Render a variable's slot value. STRING vars don't live in the slot —
+/// their bytes are at `data_offset` in the VM's data region with layout
+/// `[max_len: u16][cur_len: u16][bytes…]`; we read them out and format
+/// as a single-quoted IEC literal. WSTRING isn't yet populated by
+/// ironplc's codegen (literal encoding `unreachable!`s on char_width=2),
+/// so we surface a placeholder rather than fake content. Everything else
+/// delegates to ironplc's standard formatter.
+fn format_value(
+    raw: u64,
+    info: &VarDebugInfo,
+    string_offset: Option<u32>,
+    data_region: &[u8],
+) -> String {
+    match info.iec_type_tag {
+        iec_type_tag::STRING => {
+            match string_offset.and_then(|off| read_string_value(data_region, off)) {
+                Some(text) => text,
+                // No layout entry, or the offset is bogus — show that we
+                // know it's a string but couldn't decode it, not a lie.
+                None => "'<invalid>'".into(),
+            }
+        }
+        // ironplc's codegen doesn't yet emit WSTRING data; see
+        // `compiler/codegen/src/compile.rs` `unreachable!("WSTRING literal
+        // encoding is not yet supported")`. Until upstream lands it, we
+        // surface a placeholder so operators know what's missing.
+        iec_type_tag::WSTRING => "'<wstring>'".into(),
+        _ => format_variable_value(raw, info.iec_type_tag),
+    }
+}
+
+/// Reads a STRING value at `data_offset` in the VM's data region and
+/// renders it as an IEC 61131-3 single-quoted literal (e.g. `'STARTUP'`).
+///
+/// Wire format: `[max_len: u16][cur_len: u16][cur_len bytes of UTF-8]`,
+/// little-endian, as written by ironplc's codegen (see
+/// `compiler/codegen/src/compile_setup.rs` `string_region_size`).
+/// Non-printable bytes, `$`, and `'` are escaped per IEC string-literal
+/// rules so the resulting text is a valid round-trippable literal.
+///
+/// Returns `None` when the layout offset is past the end of the data
+/// region or the recorded `cur_len` would read off the end (e.g. a stale
+/// debug section). Bridging a `None` to a placeholder is the caller's job.
+fn read_string_value(data_region: &[u8], data_offset: u32) -> Option<String> {
+    let off = data_offset as usize;
+    if off + STRING_HEADER_BYTES > data_region.len() {
+        return None;
+    }
+    let cur_len = u16::from_le_bytes([data_region[off + 2], data_region[off + 3]]) as usize;
+    let start = off + STRING_HEADER_BYTES;
+    let end = start + cur_len;
+    if end > data_region.len() {
+        return None;
+    }
+    Some(format_iec_string_literal(&data_region[start..end]))
+}
+
+/// Renders raw STRING bytes as an IEC 61131-3 single-quoted string literal.
+/// Each byte is either passed through as printable ASCII, replaced with one
+/// of the named `$`-escapes (`$T`, `$L`, `$P`, `$R`, `$$`, `$'`), or emitted
+/// as a `$XX` two-digit hex escape. Mirrors the format ironplc uses in its
+/// playground variable dump.
+fn format_iec_string_literal(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() + 2);
+    out.push('\'');
+    for &b in bytes {
+        match b {
+            b'$' => out.push_str("$$"),
+            b'\'' => out.push_str("$'"),
+            0x09 => out.push_str("$T"),
+            0x0A => out.push_str("$L"),
+            0x0C => out.push_str("$P"),
+            0x0D => out.push_str("$R"),
+            0x20..=0x7E => out.push(b as char),
+            _ => out.push_str(&format!("${b:02X}")),
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Build a `var_index → data_offset` map from the container's STRING
+/// layout sub-table (debug section Tag 4). Empty when no STRING vars
+/// were declared.
+fn build_string_layout_map(container: &Container) -> HashMap<u16, u32> {
+    let mut map = HashMap::new();
+    if let Some(debug) = &container.debug_section {
+        for entry in &debug.string_layouts {
+            map.insert(entry.var_index.raw(), entry.data_offset);
+        }
+    }
+    map
 }
 
 #[cfg(test)]
@@ -1915,5 +2023,34 @@ mod tests {
         // The program logic of the routed unit also saw the value.
         assert_eq!(var_value(&snap, "a.mirror"), "42");
         assert_eq!(var_value(&snap, "b.mirror"), "0");
+    }
+
+    /// A STRING var initialised to a literal must surface as the quoted
+    /// IEC value in the snapshot. Exercises the data-region read path
+    /// (`[max_len][cur_len][bytes…]` at the layout-table offset) end to
+    /// end through the live scan loop, not just the formatter — and the
+    /// per-unit `string_layouts[u]` / `runnings[u].data_region()` wiring.
+    #[tokio::test]
+    async fn snapshot_renders_string_var_as_quoted_iec_literal() {
+        let prog = crate::compile(
+            "PROGRAM string_smoke\n\
+                VAR operating_mode : STRING := 'STARTUP'; END_VAR\n\
+            END_PROGRAM",
+        )
+        .expect("string program compiles");
+
+        let handle = spawn_units_inner(
+            vec![single_unit(prog, 10)],
+            DeviceSource::Prebuilt(Vec::new()),
+            Vec::new(),
+            None,
+        );
+        let mut rx = handle.subscribe();
+        let snap = last_snapshot_within(&mut rx, Duration::from_millis(250)).await;
+        tokio::time::timeout(Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("shutdown joins");
+
+        assert_eq!(var_value(&snap, "operating_mode"), "'STARTUP'");
     }
 }
