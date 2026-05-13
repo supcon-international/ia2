@@ -5,12 +5,17 @@ import { Sparkline } from "@/components/charts/Sparkline"
 import { TrendChart } from "@/components/charts/TrendChart"
 import { cn } from "@/lib/utils"
 import {
+  classifyType,
   colorFor,
   isBoolType,
   parseVarValue,
+  prettyTime,
   pushHistory,
+  stripHexPrefix,
+  type VarCategory,
 } from "@/lib/var-history"
 import { useRuntime } from "@/state/runtime"
+import type { VarValue } from "@/types/generated/VarValue"
 
 export function MonitorPane() {
   const { lastSnapshot, isRunning, currentPou } = useRuntime()
@@ -106,77 +111,203 @@ export function MonitorPane() {
           </div>
         ) : (
           <ul className="divide-y divide-border/60">
-            {vars.map((v, i) => {
-              const history = historyRef.current.get(v.name) ?? []
-              const binary = isBoolType(v.type_name)
-              const isPinned = pinned.has(v.name)
-              const sparkColor = colorByName[v.name]
-              const defaultColor = binary
-                ? "text-emerald-600 dark:text-emerald-400"
-                : "text-sky-600 dark:text-sky-400"
-              return (
-                <li
-                  key={`${i}:${v.name}`}
-                  className={cn(
-                    // Compact row: 4px vertical gap, mono-font value column.
-                    // Density matters — many rows on long programs.
-                    "flex items-center gap-2 px-2 py-0.5",
-                    stale && "opacity-60",
-                  )}
-                >
-                  <button
-                    type="button"
-                    onClick={() => togglePin(v.name)}
-                    className={cn(
-                      "shrink-0 rounded p-0.5 transition-colors",
-                      isPinned
-                        ? "text-foreground"
-                        : "text-muted-foreground/30 hover:text-muted-foreground",
-                    )}
-                    title={isPinned ? "Unpin from trend" : "Pin to trend"}
-                  >
-                    <Pin
-                      className={cn(
-                        "size-3",
-                        isPinned && "fill-current rotate-45",
-                      )}
-                    />
-                  </button>
-                  <span className="w-24 shrink-0 truncate font-mono text-xs">
-                    {v.name}
-                  </span>
-                  <span
-                    // Constrain sparkline height explicitly — without h-4
-                    // the SVG would otherwise expand to whatever vertical
-                    // space the row gives it, making strokes look chunky.
-                    className={cn(
-                      "block h-4 flex-1 min-w-0",
-                      !sparkColor && defaultColor,
-                    )}
-                    style={sparkColor ? { color: sparkColor } : undefined}
-                  >
-                    <Sparkline
-                      values={history}
-                      binary={binary}
-                      width={120}
-                      height={18}
-                      filled={!binary}
-                    />
-                  </span>
-                  {v.type_name && (
-                    <span className="hidden font-mono text-[9px] text-muted-foreground sm:inline">
-                      {v.type_name}
-                    </span>
-                  )}
-                  <span className="w-20 shrink-0 text-right font-mono text-xs tabular-nums">
-                    {v.value}
-                  </span>
-                </li>
-              )
-            })}
+            {vars.map((v, i) => (
+              <VarRow
+                key={`${i}:${v.name}`}
+                v={v}
+                history={historyRef.current.get(v.name) ?? []}
+                isPinned={pinned.has(v.name)}
+                sparkColor={colorByName[v.name]}
+                onPin={togglePin}
+                stale={stale}
+              />
+            ))}
           </ul>
         )}
       </div>
     </section>
   )
+}
+
+// ============================================================
+//   Per-variable row — branches on the type category so each
+//   IEC 61131-3 family gets a renderer that fits how an operator
+//   actually reads it. Numerics trend, booleans flip, time scales
+//   to seconds, bit masks render hex. FB instances (PID, etc.)
+//   are scratch storage so we collapse them to a quiet "instance"
+//   label rather than showing meaningless byte offsets.
+// ============================================================
+
+interface VarRowProps {
+  v: VarValue
+  history: number[]
+  isPinned: boolean
+  sparkColor: string | undefined
+  onPin: (name: string) => void
+  stale: boolean
+}
+
+function VarRow({ v, history, isPinned, sparkColor, onPin, stale }: VarRowProps) {
+  const cat: VarCategory = classifyType(v.type_name)
+  const trendable = cat === "numeric" || cat === "bool" || cat === "bits"
+
+  return (
+    <li
+      className={cn(
+        "flex items-center gap-2 px-2 py-0.5",
+        stale && "opacity-60",
+      )}
+    >
+      {trendable ? (
+        <button
+          type="button"
+          onClick={() => onPin(v.name)}
+          className={cn(
+            "shrink-0 rounded p-0.5 transition-colors",
+            isPinned
+              ? "text-foreground"
+              : "text-muted-foreground/30 hover:text-muted-foreground",
+          )}
+          title={isPinned ? "Unpin from trend" : "Pin to trend"}
+        >
+          <Pin
+            className={cn("size-3", isPinned && "fill-current rotate-45")}
+          />
+        </button>
+      ) : (
+        // Reserve the same width so name columns line up across categories.
+        <span className="size-4 shrink-0" />
+      )}
+
+      <span className="w-24 shrink-0 truncate font-mono text-xs">{v.name}</span>
+
+      <span className="block h-4 flex-1 min-w-0">
+        <CategoryVisual cat={cat} v={v} history={history} sparkColor={sparkColor} />
+      </span>
+
+      {v.type_name && (
+        <span className="hidden font-mono text-[9px] text-muted-foreground sm:inline">
+          {v.type_name}
+        </span>
+      )}
+
+      <span
+        className={cn(
+          "w-20 shrink-0 text-right font-mono text-xs tabular-nums",
+          cat === "fb" && "text-muted-foreground/50",
+        )}
+      >
+        {renderValue(cat, v)}
+      </span>
+    </li>
+  )
+}
+
+/** The middle column — the visual that conveys "what's happening
+ *  with this variable over time, at a glance". Different per category. */
+function CategoryVisual({
+  cat,
+  v,
+  history,
+  sparkColor,
+}: {
+  cat: VarCategory
+  v: VarValue
+  history: number[]
+  sparkColor: string | undefined
+}) {
+  switch (cat) {
+    case "numeric": {
+      const defaultColor = "text-sky-600 dark:text-sky-400"
+      return (
+        <span
+          className={cn("block h-4 w-full", !sparkColor && defaultColor)}
+          style={sparkColor ? { color: sparkColor } : undefined}
+        >
+          <Sparkline values={history} width={120} height={18} filled />
+        </span>
+      )
+    }
+    case "bool":
+      return <BoolStrip history={history} sparkColor={sparkColor} />
+    case "bits":
+      return <BitsVisual hex={v.value} />
+    case "time":
+    case "text":
+    case "fb":
+    case "other":
+      // Nothing to chart — leave the middle column empty so the value
+      // column on the right does the talking.
+      return <span className="block h-4 w-full" />
+  }
+}
+
+/** Compact strip of segments showing the last ~80 BOOL transitions —
+ *  green when true, muted when false. Faster to read at a glance than
+ *  a 0/1 step-trace sparkline. */
+function BoolStrip({
+  history,
+  sparkColor,
+}: {
+  history: number[]
+  sparkColor: string | undefined
+}) {
+  // Take the last 80 ticks (the strip is 120 px wide → 1.5 px per cell).
+  const last = history.slice(-80)
+  return (
+    <span className="flex h-4 w-full items-center gap-px overflow-hidden">
+      {last.length === 0 ? (
+        <span className="text-[10px] text-muted-foreground/60">—</span>
+      ) : (
+        last.map((v, i) => (
+          <span
+            key={i}
+            className={cn(
+              "h-2.5 flex-1 rounded-[1px]",
+              v > 0.5
+                ? sparkColor
+                  ? ""
+                  : "bg-highlight/80"
+                : "bg-muted-foreground/20",
+            )}
+            style={v > 0.5 && sparkColor ? { backgroundColor: sparkColor } : undefined}
+          />
+        ))
+      )}
+    </span>
+  )
+}
+
+/** Bits — render the value as monospace hex pill so each nibble lines
+ *  up; useful for visually spotting which bits are set in an alarm
+ *  register (`16#0013` jumps out as different from `16#0010`). */
+function BitsVisual({ hex }: { hex: string }) {
+  const digits = stripHexPrefix(hex)
+  return (
+    <span className="flex h-4 items-center">
+      <span className="rounded border border-border bg-muted/40 px-1.5 font-mono text-[10px] tracking-wider text-foreground">
+        {digits}
+      </span>
+    </span>
+  )
+}
+
+/** Right-hand value column: tweak per category so each looks "right"
+ *  rather than uniformly using the raw bridge string. */
+function renderValue(cat: VarCategory, v: VarValue): string {
+  switch (cat) {
+    case "time":
+      return prettyTime(v.value)
+    case "bool":
+      return v.value === "TRUE" ? "on" : "off"
+    case "fb":
+      return "instance"
+    case "text":
+      // ironplc currently puts a numeric slot value here (the body lives
+      // in a separate layout table). Surface that we know it's a string
+      // but can't show contents — beats lying.
+      return "(string)"
+    default:
+      return v.value
+  }
 }
