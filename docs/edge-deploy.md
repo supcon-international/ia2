@@ -9,7 +9,7 @@ The IDE has three top-level concepts:
 
 | | What it represents |
 | --- | --- |
-| **Applications** | POUs — your ST / FB source files |
+| **POUs** | Your ST source files. One `.st` file can hold one or more PROGRAM / FUNCTION_BLOCK / FUNCTION declarations. |
 | **Devices** | Fieldbus things your program talks to (Modbus, EtherCAT) |
 | **Edges** | Linux boxes where the program runs in production |
 
@@ -94,7 +94,7 @@ After deploy, an edge box looks like:
 ├── versions/
 │   ├── 2026-05-12T08-30-00Z/       latest
 │   │   ├── runtime                  binary
-│   │   └── project/                 project.toml + applications/ + devices/ + iomap.toml
+│   │   └── project/                 project.toml + pous/ + devices/ + tasks.toml + iomap.toml
 │   ├── 2026-05-12T07-15-00Z/       previous (kept for rollback)
 │   └── _initial/                   install.sh stub
 └── (state for retained variables would go here)
@@ -128,12 +128,27 @@ rollback is just "point `current` at an older version and restart".
   If you find a legitimate access blocked, loosen carefully — these are
   there to limit what a misbehaving runtime can touch.
 
+## EtherCAT mode selection
+
+`iomap-ethercat` picks between two implementations based on the device
+config's `nic` field:
+
+| `nic` value | Behaviour |
+| --- | --- |
+| `"_sim"` (or empty) | In-memory PDO buffer. Output channels echo what the program writes; inputs start at zero. Used for macOS dev, CI, and demo. |
+| anything else (e.g. `"eth0"`) | Real `ethercrab::MainDevice` on that NIC. Walks the bus, transitions to OP, runs a cyclic exchange on its own thread. Requires Linux + `CAP_NET_RAW` (already set in `controlsoftware.service`). |
+
+For real-mode channels, you must fill in `pdi_byte_offset` (and
+`pdi_bit_offset` for sub-byte digital I/O) — the byte/bit position of
+this PDO entry within the SubDevice's input or output PDI region. The
+device editor surfaces these alongside the CoE `pdo_index` / `sub_index`
+fields. They default to 0 for back-compat with sim-only configs.
+
 ## Caveats
 
-- **EtherCAT** is currently in simulation mode — the IDE will let you
-  configure PDOs and the runtime will accept the config, but no real
-  fieldbus traffic happens until `iomap-ethercat` is wired to the
-  `ethercrab` MainDevice. Modbus TCP works end-to-end today.
+- **No EtherCAT hardware on the dev machine**: leave `nic = "_sim"`. The
+  IDE will let you configure PDOs and the bridge will respond in sim
+  mode. On the edge, configure the real NIC.
 - **Retained / persistent variables** aren't yet preserved across
   deploys. Each new `current` starts fresh.
 - **Hot patch / online change** (Codesys-style in-place code update) is
@@ -141,3 +156,7 @@ rollback is just "point `current` at an older version and restart".
 - **Real-time**: stock Linux gives soft-RT only; scan jitter is in the
   millisecond range. Acceptable for 10–100 ms cycles, not for sub-ms
   hard real-time control.
+- **DC sync / ESI auto-mapping**: not implemented yet. The cyclic loop
+  uses ethercrab's free-running exchange, and PDO byte offsets must be
+  hand-authored. Adequate for digital I/O and slow analog; not for
+  motion control. Future work.

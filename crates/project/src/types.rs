@@ -235,13 +235,27 @@ pub struct EthercatChannel {
     pub direction: EthercatPdoDirection,
     /// CoE object dictionary index (e.g. 0x6000 for the first TxPDO entry
     /// on a typical digital input slave). Stored as a plain u16 — the UI
-    /// renders it as hex.
+    /// renders it as hex. Informational in real mode (the cyclic exchange
+    /// uses `pdi_byte_offset` + `pdi_bit_offset` for fast lookup), but
+    /// kept on the channel so users can document the source PDO entry.
     pub pdo_index: u16,
     /// Sub-index inside the PDO object.
     pub sub_index: u8,
     /// Bit length of the PDO entry. Usually 1, 8, 16, or 32.
     pub bit_length: u8,
     pub data_type: EthercatDataType,
+    /// Byte offset of this PDO entry inside the SubDevice's input (TxPDO)
+    /// or output (RxPDO) PDI region. Required in real mode — the cyclic
+    /// task pulls bytes from `[pdi_byte_offset .. pdi_byte_offset +
+    /// ceil(bit_length / 8)]` of the SubDevice's PDI buffer. Defaults to
+    /// 0 for back-compat with existing sim-only configs (those ignore it).
+    #[serde(default)]
+    pub pdi_byte_offset: u16,
+    /// Bit offset *within* the byte at `pdi_byte_offset`. 0 is the LSB.
+    /// Only meaningful for `bit_length < 8` channels (e.g. digital I/O
+    /// where 8 channels share one byte). Defaults to 0.
+    #[serde(default)]
+    pub pdi_bit_offset: u8,
 }
 
 /// PDO direction from the MainDevice's perspective.

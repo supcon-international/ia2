@@ -161,11 +161,23 @@ async fn main() -> Result<()> {
         })
         .collect();
     for spec in &device_specs {
-        if matches!(spec.config, ProtocolConfig::Ethercat(_)) {
-            tracing::warn!(
-                device = %spec.name,
-                "ethercat device is in simulation mode — no real fieldbus traffic"
-            );
+        if let ProtocolConfig::Ethercat(cfg) = &spec.config {
+            // iomap-ethercat treats nic="_sim" (or empty) as sim mode and
+            // anything else as a real NIC name. We only warn for sim —
+            // a real NIC means we'll attempt real fieldbus traffic, and
+            // errors there will surface naturally as connect failures.
+            if cfg.nic == "_sim" || cfg.nic.is_empty() {
+                tracing::warn!(
+                    device = %spec.name,
+                    "ethercat device is in simulation mode (nic=\"_sim\") — no real fieldbus traffic"
+                );
+            } else {
+                tracing::info!(
+                    device = %spec.name,
+                    nic = %cfg.nic,
+                    "ethercat device configured for real bus"
+                );
+            }
         }
     }
 

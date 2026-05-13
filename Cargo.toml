@@ -39,6 +39,9 @@ ts-rs = { version = "10", features = ["serde-compat", "no-serde-warnings"] }
 # I/O
 tokio-modbus = { version = "0.17", features = ["rtu", "tcp", "rtu-server", "tcp-server"] }
 ethercrab = "0.7"
+# Drives ethercrab's async-io-based tx_rx_task on a dedicated thread; we
+# don't impose smol on the rest of the codebase (everything else is tokio).
+smol = "2"
 
 # errors
 anyhow = "1"

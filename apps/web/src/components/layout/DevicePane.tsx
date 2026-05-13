@@ -448,6 +448,11 @@ function EthercatDeviceEditor({
           sub_index: 1,
           bit_length: 16,
           data_type: "u16",
+          // Default to (0, 0): correct for the first PDO entry on a
+          // single-channel slave. Multi-channel slaves need real
+          // numbers from the slave's ESI / vendor docs.
+          pdi_byte_offset: 0,
+          pdi_bit_offset: 0,
         },
       ],
     })
@@ -482,19 +487,39 @@ function EthercatDeviceEditor({
       </div>
 
       <div className="flex-1 space-y-6 overflow-auto p-5">
-        <div className="flex items-start gap-2 rounded-md border border-sky-500/30 bg-sky-500/5 px-3 py-2 text-[12px] text-sky-900 dark:text-sky-200">
-          <Info className="mt-0.5 size-3.5 shrink-0" />
-          <div>
-            <div className="font-medium">Simulation mode</div>
-            <div className="text-[11px] text-sky-900/80 dark:text-sky-200/80">
-              ethercrab MainDevice needs raw L2 socket privileges and connected
-              SubDevices, neither of which are available in this environment.
-              Channels round-trip through an in-memory PDO buffer so IO mappings
-              can be verified end-to-end. Configuration here is persisted as-is
-              and reused when real hardware is wired up later.
+        {draft.nic === "_sim" || draft.nic.trim() === "" ? (
+          <div className="flex items-start gap-2 rounded-md border border-sky-500/30 bg-sky-500/5 px-3 py-2 text-[12px] text-sky-900 dark:text-sky-200">
+            <Info className="mt-0.5 size-3.5 shrink-0" />
+            <div>
+              <div className="font-medium">Simulation mode</div>
+              <div className="text-[11px] text-sky-900/80 dark:text-sky-200/80">
+                <span className="font-mono">nic = "_sim"</span> selects an
+                in-memory PDO buffer. Output channels echo what the program
+                writes; inputs start at zero. Set <span className="font-mono">nic</span>{" "}
+                to a real interface name (e.g. <span className="font-mono">eth0</span>)
+                to drive an actual EtherCAT bus via{" "}
+                <span className="font-mono">ethercrab</span>. Real mode requires
+                Linux + <span className="font-mono">CAP_NET_RAW</span>.
+              </div>
             </div>
           </div>
-        </div>
+        ) : (
+          <div className="flex items-start gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-[12px] text-emerald-900 dark:text-emerald-200">
+            <Info className="mt-0.5 size-3.5 shrink-0" />
+            <div>
+              <div className="font-medium">Real-bus mode</div>
+              <div className="text-[11px] text-emerald-900/80 dark:text-emerald-200/80">
+                The runtime will open a raw socket on{" "}
+                <span className="font-mono">{draft.nic}</span> and walk the
+                EtherCAT bus on startup. Each channel needs an accurate{" "}
+                <span className="font-mono">Byte off</span> /{" "}
+                <span className="font-mono">Bit off</span> within the
+                SubDevice's PDI region — pull these from the slave's ESI / vendor
+                docs. To go back to simulation, set <span className="font-mono">nic = "_sim"</span>.
+              </div>
+            </div>
+          </div>
+        )}
 
         <section>
           <div className="mb-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
@@ -646,6 +671,18 @@ function EthercatDeviceEditor({
                   <th className="px-2 py-1.5 text-left">Sub</th>
                   <th className="px-2 py-1.5 text-left">Type</th>
                   <th className="px-2 py-1.5 text-left">Bits</th>
+                  <th
+                    className="px-2 py-1.5 text-left"
+                    title="Byte offset within the SubDevice's PDI region for this direction. Required when running against real hardware; ignored in sim mode."
+                  >
+                    Byte&nbsp;off
+                  </th>
+                  <th
+                    className="px-2 py-1.5 text-left"
+                    title="Bit offset within the byte at Byte off. Only meaningful for sub-byte (1-bit) channels like digital I/O. 0 = LSB."
+                  >
+                    Bit&nbsp;off
+                  </th>
                   <th className="px-2 py-1.5 text-left">Linked to</th>
                   <th className="px-2 py-1.5"></th>
                 </tr>
@@ -770,6 +807,40 @@ function EthercatDeviceEditor({
                           })
                         }
                         className="h-8 w-16"
+                      />
+                    </td>
+                    <td className="px-2 py-1.5">
+                      <Input
+                        type="number"
+                        min={0}
+                        max={65535}
+                        value={ch.pdi_byte_offset}
+                        onChange={(e) =>
+                          setChannel(i, {
+                            pdi_byte_offset: Math.max(
+                              0,
+                              Math.min(65535, Number(e.target.value) || 0),
+                            ),
+                          })
+                        }
+                        className="h-8 w-16"
+                      />
+                    </td>
+                    <td className="px-2 py-1.5">
+                      <Input
+                        type="number"
+                        min={0}
+                        max={7}
+                        value={ch.pdi_bit_offset}
+                        onChange={(e) =>
+                          setChannel(i, {
+                            pdi_bit_offset: Math.max(
+                              0,
+                              Math.min(7, Number(e.target.value) || 0),
+                            ),
+                          })
+                        }
+                        className="h-8 w-14"
                       />
                     </td>
                     <td className="px-2 py-1.5">

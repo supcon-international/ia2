@@ -39,7 +39,7 @@ fi
 
 echo "==> creating layout at $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR/versions/_initial"
-mkdir -p "$INSTALL_DIR/versions/_initial/project/applications"
+mkdir -p "$INSTALL_DIR/versions/_initial/project/pous"
 mkdir -p "$INSTALL_DIR/versions/_initial/project/devices"
 mkdir -p "$INSTALL_DIR/versions/_initial/project/edges"
 
@@ -49,7 +49,7 @@ cat > "$INSTALL_DIR/versions/_initial/project/project.toml" <<'EOF'
 name = "edge_stub"
 version = "0.0"
 EOF
-cat > "$INSTALL_DIR/versions/_initial/project/applications/main.st" <<'EOF'
+cat > "$INSTALL_DIR/versions/_initial/project/pous/main.st" <<'EOF'
 PROGRAM main
     VAR
         counter : INT;
@@ -82,8 +82,8 @@ EOF
 # The stub main.st here doesn't have an inline CONFIGURATION — tasks.toml
 # above is the project-level scheduling source of truth.
 sed -i.bak '/^CONFIGURATION/,/^END_CONFIGURATION/d' \
-  "$INSTALL_DIR/versions/_initial/project/applications/main.st" 2>/dev/null \
-  && rm -f "$INSTALL_DIR/versions/_initial/project/applications/main.st.bak" || true
+  "$INSTALL_DIR/versions/_initial/project/pous/main.st" 2>/dev/null \
+  && rm -f "$INSTALL_DIR/versions/_initial/project/pous/main.st.bak" || true
 
 echo "==> installing runtime binary"
 install -m 0755 "$RUNTIME_BIN" "$INSTALL_DIR/versions/_initial/runtime"
