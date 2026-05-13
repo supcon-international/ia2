@@ -93,15 +93,17 @@ export function MonitorPane() {
 
       <div className="flex-1 overflow-auto">
         {!lastSnapshot ? (
-          <div className="grid h-full place-items-center p-4 text-center text-xs text-muted-foreground">
-            Click&nbsp;
-            <span className="font-mono text-emerald-700 dark:text-emerald-400">
-              Run
+          <div className="flex h-full items-center justify-center p-4 text-xs text-muted-foreground">
+            <span>
+              Click{" "}
+              <span className="font-mono text-emerald-700 dark:text-emerald-400">
+                Run
+              </span>{" "}
+              to start the program.
             </span>
-            &nbsp;to start the program.
           </div>
         ) : vars.length === 0 ? (
-          <div className="grid h-full place-items-center p-4 text-xs text-muted-foreground">
+          <div className="flex h-full items-center justify-center p-4 text-xs text-muted-foreground">
             Waiting for first snapshot…
           </div>
         ) : (

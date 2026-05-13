@@ -154,7 +154,7 @@ function Editor({
       <div className="flex h-9 items-center justify-between border-b border-border pl-3 pr-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
         <span className="flex items-center gap-2 truncate normal-case tracking-normal text-foreground">
           <span className="truncate font-mono">{edge.name}</span>
-          <span className="rounded bg-rose-500/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-rose-700 dark:text-rose-400">
+          <span className="rounded border border-border bg-muted/50 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
             edge
           </span>
           {dirty && (

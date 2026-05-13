@@ -108,7 +108,7 @@ export function ProjectTree() {
   return (
     <div className="py-1 text-sm">
       <SectionHeader
-        label="Applications"
+        label="POUs"
         open={appsOpen}
         count={project.pous.length}
         onToggle={() => setAppsOpen(!appsOpen)}
@@ -303,7 +303,7 @@ export function ProjectTree() {
         )}
         style={{ paddingLeft: 12 }}
       >
-        <Clock className="size-3.5 shrink-0 text-violet-600 dark:text-violet-400" />
+        <Clock className="size-3.5 shrink-0 text-muted-foreground" />
         <span className="flex-1 truncate font-medium">Tasks</span>
         <span className="font-mono text-[9px] uppercase text-muted-foreground">
           {project.tasks.tasks.length}/{project.tasks.programs.length}
@@ -319,7 +319,7 @@ export function ProjectTree() {
         )}
         style={{ paddingLeft: 12 }}
       >
-        <Cable className="size-3.5 shrink-0 text-fuchsia-600 dark:text-fuchsia-400" />
+        <Cable className="size-3.5 shrink-0 text-muted-foreground" />
         <span className="flex-1 truncate font-medium">IO Mapping</span>
         <span className="font-mono text-[9px] uppercase text-muted-foreground">
           {project.iomap.mappings.length}
@@ -426,9 +426,9 @@ function TreeChildren<T>({
                       <ChevronRight className="size-3 shrink-0" />
                     )}
                     {isOpen ? (
-                      <FolderOpen className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+                      <FolderOpen className="size-3.5 shrink-0 text-muted-foreground" />
                     ) : (
-                      <Folder className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+                      <Folder className="size-3.5 shrink-0 text-muted-foreground" />
                     )}
                     <span className="flex-1 truncate text-foreground">
                       {node.name}
@@ -587,7 +587,7 @@ function PouItem({
             {simple ? (
               <PouTypeBadge type={decls[0].type} language={decls[0].language} />
             ) : decls.length === 0 ? (
-              <span className="font-mono text-[9px] uppercase text-amber-700 dark:text-amber-400">
+              <span className="font-mono text-[9px] uppercase text-muted-foreground">
                 empty
               </span>
             ) : (
@@ -628,19 +628,14 @@ function PouItem({
   )
 }
 
-function PouTypeIcon({ type }: { type: PouType }) {
-  return (
-    <FileCode2
-      className={cn(
-        "size-3.5 shrink-0",
-        type === "function_block"
-          ? "text-violet-600 dark:text-violet-400"
-          : type === "function"
-            ? "text-amber-600 dark:text-amber-400"
-            : "text-sky-600 dark:text-sky-400",
-      )}
-    />
-  )
+function PouTypeIcon({ type: _type }: { type: PouType }) {
+  // We used to colour the icon by POU type (PRG sky / FB violet / FN
+  // amber) so users could scan the tree. The little `prg` / `fb` / `fn`
+  // text badge from `PouTypeBadge` carries the same signal, so the
+  // colour was redundant — and per the workspace design language we
+  // try to keep category labels in the muted tier, reserving colour for
+  // state (running / modified / error).
+  return <FileCode2 className="size-3.5 shrink-0 text-muted-foreground" />
 }
 
 function PouTypeBadge({
@@ -726,7 +721,7 @@ function EdgeItem({
             active && "bg-accent/60",
           )}
         >
-          <Server className="size-3.5 shrink-0 text-rose-600 dark:text-rose-400" />
+          <Server className="size-3.5 shrink-0 text-muted-foreground" />
           <span className="flex-1 truncate">{node.name}</span>
           {attached && (
             <span
@@ -755,11 +750,11 @@ function EdgeItem({
 function ProtocolIcon({ protocol }: { protocol: Protocol }) {
   if (protocol === "modbus") {
     return (
-      <Network className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+      <Network className="size-3.5 shrink-0 text-muted-foreground" />
     )
   }
   return (
-    <Cpu className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+    <Cpu className="size-3.5 shrink-0 text-muted-foreground" />
   )
 }
 

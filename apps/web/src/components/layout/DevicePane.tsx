@@ -170,7 +170,7 @@ function ModbusDeviceEditor({
       <div className="flex h-9 items-center justify-between border-b border-border pl-3 pr-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
         <span className="flex items-center gap-2 truncate normal-case tracking-normal text-foreground">
           <span className="truncate font-mono">{device.name}</span>
-          <span className="rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-amber-700 dark:text-amber-400">
+          <span className="rounded border border-border bg-muted/50 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
             modbus
           </span>
           {dirty && (
@@ -466,7 +466,7 @@ function EthercatDeviceEditor({
       <div className="flex h-9 items-center justify-between border-b border-border pl-3 pr-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
         <span className="flex items-center gap-2 truncate normal-case tracking-normal text-foreground">
           <span className="truncate font-mono">{device.name}</span>
-          <span className="rounded bg-sky-500/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-sky-700 dark:text-sky-400">
+          <span className="rounded border border-border bg-muted/50 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
             ethercat
           </span>
           {dirty && (
