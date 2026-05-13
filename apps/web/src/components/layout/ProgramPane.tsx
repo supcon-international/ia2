@@ -129,7 +129,7 @@ export function ProgramPane() {
             <button
               type="button"
               onClick={stop}
-              className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium tracking-normal text-red-700 normal-case hover:bg-red-100 dark:text-red-400 dark:hover:bg-red-950/50"
+              className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium tracking-normal text-destructive normal-case hover:bg-destructive/10"
             >
               <Square className="size-3 fill-current" />
               Stop
@@ -149,7 +149,7 @@ export function ProgramPane() {
                   type="button"
                   onClick={() => void run(target.name, currentPou.path)}
                   title={`Compile and run PROGRAM ${target.name} in isolation (just this file's source — Monitor shows only its variables)`}
-                  className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium tracking-normal text-emerald-700 normal-case hover:bg-emerald-100 dark:text-emerald-400 dark:hover:bg-emerald-950/50"
+                  className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium tracking-normal text-highlight normal-case hover:bg-highlight/10"
                 >
                   <Play className="size-3 fill-current" />
                   Run {target.name}
@@ -235,7 +235,7 @@ function ScheduleHint({
   if (unscheduled.length === 0) {
     return (
       <span
-        className="inline-flex items-center gap-1 rounded bg-emerald-500/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-emerald-700 dark:text-emerald-400"
+        className="inline-flex items-center gap-1 rounded bg-highlight/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-highlight"
         title="Every PROGRAM in this file is bound to a task and will run on Run."
       >
         scheduled

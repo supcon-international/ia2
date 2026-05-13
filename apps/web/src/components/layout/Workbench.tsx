@@ -2,7 +2,6 @@ import { useEffect, useState } from "react"
 import { Group, Panel, Separator, type Layout } from "react-resizable-panels"
 
 import { ProjectEmptyState } from "@/components/dialogs/ProjectEmptyState"
-import { useDarkMode } from "@/lib/dark-mode"
 import { RuntimeProvider, useRuntime } from "@/state/runtime"
 import { AgentsPane } from "./AgentsPane"
 import { DevicePane } from "./DevicePane"
@@ -13,8 +12,11 @@ import { ProgramPane } from "./ProgramPane"
 import { ProjectPane } from "./ProjectPane"
 import { TasksPane } from "./TasksPane"
 
+// The .dark class is applied at module load by lib/dark-mode.ts (reads
+// localStorage). Components that care about the current theme subscribe
+// via useDarkMode(); the toggle lives in the header.
+
 export function Workbench() {
-  useDarkMode()
   return (
     <RuntimeProvider>
       <Shell />

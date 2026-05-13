@@ -96,9 +96,7 @@ export function MonitorPane() {
           <div className="flex h-full items-center justify-center p-4 text-xs text-muted-foreground">
             <span>
               Click{" "}
-              <span className="font-mono text-emerald-700 dark:text-emerald-400">
-                Run
-              </span>{" "}
+              <span className="font-mono text-highlight">Run</span>{" "}
               to start the program.
             </span>
           </div>

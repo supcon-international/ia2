@@ -299,7 +299,7 @@ export function ProjectTree() {
         onClick={() => void openTasks()}
         className={cn(
           "mt-1 flex w-full items-center gap-1.5 border-t border-border px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent/40",
-          view === "tasks" && "bg-accent/60",
+          view === "tasks" && "bg-highlight/10",
         )}
         style={{ paddingLeft: 12 }}
       >
@@ -315,7 +315,7 @@ export function ProjectTree() {
         onClick={() => void openIoMap()}
         className={cn(
           "flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent/40",
-          view === "iomap" && "bg-accent/60",
+          view === "iomap" && "bg-highlight/10",
         )}
         style={{ paddingLeft: 12 }}
       >
@@ -575,7 +575,7 @@ function PouItem({
             onClick={onOpen}
             className={cn(
               "flex w-full items-center gap-1.5 py-1 pl-3 pr-2 text-left transition-colors hover:bg-accent/40",
-              active && "bg-accent/60",
+              active && "bg-highlight/10",
             )}
           >
             {simple ? (
@@ -676,7 +676,7 @@ function DeviceItem({
           onClick={onOpen}
           className={cn(
             "flex w-full items-center gap-1.5 py-1 pl-3 pr-2 text-left transition-colors hover:bg-accent/40",
-            active && "bg-accent/60",
+            active && "bg-highlight/10",
           )}
         >
           <ProtocolIcon protocol={node.item.protocol} />
@@ -718,14 +718,14 @@ function EdgeItem({
           onClick={onOpen}
           className={cn(
             "flex w-full items-center gap-1.5 py-1 pl-3 pr-2 text-left transition-colors hover:bg-accent/40",
-            active && "bg-accent/60",
+            active && "bg-highlight/10",
           )}
         >
           <Server className="size-3.5 shrink-0 text-muted-foreground" />
           <span className="flex-1 truncate">{node.name}</span>
           {attached && (
             <span
-              className="font-mono text-[9px] uppercase tracking-wider text-emerald-700 dark:text-emerald-400"
+              className="font-mono text-[9px] uppercase tracking-wider text-highlight"
               title="IDE is attached to this edge"
             >
               attached

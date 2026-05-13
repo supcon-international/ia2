@@ -332,7 +332,7 @@ function Header({
           <button
             type="button"
             onClick={stop}
-            className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium tracking-normal text-red-700 normal-case hover:bg-red-100 dark:text-red-400 dark:hover:bg-red-950/50"
+            className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium tracking-normal text-destructive normal-case hover:bg-destructive/10"
           >
             <Square className="size-3 fill-current" />
             Stop
@@ -343,7 +343,7 @@ function Header({
             onClick={run}
             disabled={dirty}
             title={dirty ? "Save first" : "Compile and run the whole project"}
-            className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium tracking-normal text-emerald-700 normal-case hover:bg-emerald-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-emerald-400 dark:hover:bg-emerald-950/50"
+            className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium tracking-normal text-highlight normal-case hover:bg-highlight/10 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Play className="size-3 fill-current" />
             Run

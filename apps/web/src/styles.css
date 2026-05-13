@@ -22,6 +22,12 @@
   --accent: oklch(0.97 0 0);
   --accent-foreground: oklch(0.205 0 0);
   --destructive: oklch(0.577 0.245 27.325);
+  /* FX Green — the IDE's one brand highlight colour, reserved for
+     "currently active / selected / running / progress" surfaces. NOT a
+     general success colour, and NOT a page background. Roughly tracks
+     Tailwind's emerald-500 in hue but a touch sharper. */
+  --highlight: oklch(0.7 0.17 152);
+  --highlight-foreground: oklch(0.98 0 0);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
@@ -56,6 +62,10 @@
   --accent: oklch(0.269 0 0);
   --accent-foreground: oklch(0.985 0 0);
   --destructive: oklch(0.704 0.191 22.216);
+  /* Slightly brighter / more luminous on dark so it still reads as
+     "the active thing" against the near-black background. */
+  --highlight: oklch(0.76 0.18 152);
+  --highlight-foreground: oklch(0.15 0 0);
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 15%);
   --ring: oklch(0.556 0 0);
@@ -97,6 +107,8 @@
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
+  --color-highlight: var(--highlight);
+  --color-highlight-foreground: var(--highlight-foreground);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
