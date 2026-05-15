@@ -301,6 +301,26 @@ export async function fetchRuntimeStatus(): Promise<RuntimeStatus> {
   )
 }
 
+/** Write a single variable on the running bridge. The runtime's
+ *  variable-write primitive is `write_variable(VarIndex, i32)`, so the
+ *  payload is always an i32 — callers map their domain value to that
+ *  (BOOL → 0/1, numerics → raw i32, REAL → bit-cast not yet supported).
+ *  Throws if the runtime isn't running or the variable doesn't exist.
+ */
+export async function writeVariable(
+  name: string,
+  value: number,
+): Promise<void> {
+  await jsonOrThrow(
+    await fetch(`/api/runtime/variables/${encodeURIComponent(name)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value }),
+    }),
+    `POST /api/runtime/variables/${name}`,
+  )
+}
+
 export async function fetchDemoSlaveSnapshot(): Promise<DemoSlaveSnapshot> {
   return jsonOrThrow(await fetch(`/api/_demo/slave`), "GET /api/_demo/slave")
 }

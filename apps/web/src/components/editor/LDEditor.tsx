@@ -27,9 +27,11 @@ import {
   deleteCoil,
   deleteNode,
   deleteRung,
+  evaluateNode,
   moveRung,
   newContact,
   parseProgram,
+  readBool,
   removeVariable,
   serializeProgram,
   setCoilKind,
@@ -40,6 +42,7 @@ import {
   updateVariable,
   type NodePath,
 } from "@/lib/ld-edit"
+import { useRuntime } from "@/state/runtime"
 import type { LdCoilKind } from "@/types/generated/LdCoilKind"
 import type { LdNode } from "@/types/generated/LdNode"
 import type { LdProgram } from "@/types/generated/LdProgram"
@@ -82,6 +85,20 @@ export function LDEditor({
 }) {
   const parsed = useMemo(() => safeParse(value), [value])
   const [sel, setSel] = useState<Selection>(null)
+
+  // Live BOOL values from the bridge — drives the online-mode "this
+  // contact is conducting / this wire is powered" colouring. Null when
+  // nothing's running or no snapshot has arrived yet; the renderer
+  // falls back to static (uncoloured) glyphs in that case.
+  const { lastSnapshot, isRunning } = useRuntime()
+  const liveValues = useMemo<Record<string, boolean> | null>(() => {
+    if (!isRunning || !lastSnapshot) return null
+    const out: Record<string, boolean> = {}
+    for (const v of lastSnapshot.vars) {
+      if (v.type_name === "BOOL") out[v.name] = v.value === "TRUE"
+    }
+    return out
+  }, [lastSnapshot, isRunning])
 
   // Drop selection when the source changes externally (revert, POU
   // switch). React's referential-equality check on `value` is what
@@ -139,6 +156,7 @@ export function LDEditor({
               totalRungs={prog.rungs.length}
               selection={sel}
               readOnly={readOnly}
+              liveValues={liveValues}
               onSelect={setSel}
               onCommit={commit}
             />
@@ -428,6 +446,7 @@ function RungEditor({
   totalRungs,
   selection,
   readOnly,
+  liveValues,
   onSelect,
   onCommit,
 }: {
@@ -437,9 +456,17 @@ function RungEditor({
   totalRungs: number
   selection: Selection
   readOnly: boolean
+  liveValues: Record<string, boolean> | null
   onSelect: (s: Selection) => void
   onCommit: (next: LdProgram) => void
 }) {
+  // Network output power: when running, this is `evaluateNode(root,
+  // values)` — drives wire colouring AND coil "energised" state.
+  // Null when not running; renderers treat null as "no online data,
+  // render uncoloured static".
+  const networkPowered = liveValues
+    ? evaluateNode(rung.logic, liveValues)
+    : null
   const layoutBox = measure(rung.logic)
   const cols = layoutBox.cols
   const networkRows = layoutBox.rows
@@ -540,6 +567,7 @@ function RungEditor({
           rungIdx={rungIdx}
           selection={selection}
           readOnly={readOnly}
+          liveValues={liveValues}
           onSelect={onSelect}
           onCommit={(transform) => onCommit(transform(prog))}
         />
@@ -547,19 +575,11 @@ function RungEditor({
         {/* Coil column: vertical stack of parallel loads driven by the
             network output. Standard IEC 61131-3 LD: one horizontal wire
             from network out to a vertical merge column, then one
-            horizontal wire from each coil to the right rail. */}
+            horizontal wire from each coil to the right rail.
+            In online mode, the wires + merge column light up FX Green
+            when the network output is conducting (= coil energised). */}
         {coilCount >= 1 && (
           <>
-            {/* Horizontal wire from the network output to the coil column. */}
-            <line
-              x1={coilColX}
-              y1={networkOutY}
-              x2={coilColX}
-              y2={networkOutY}
-              className="stroke-foreground"
-              strokeWidth={1}
-              vectorEffect="non-scaling-stroke"
-            />
             {/* Vertical merge wire only when more than one coil — single
                 coil rungs use a flat horizontal connection (classical
                 single-coil look). */}
@@ -569,7 +589,7 @@ function RungEditor({
                 y1={Math.min(networkOutY, coilYs[0])}
                 x2={coilColX}
                 y2={Math.max(networkOutY, coilYs[coilYs.length - 1])}
-                className="stroke-foreground"
+                className={powerClass(networkPowered)}
                 strokeWidth={1}
                 vectorEffect="non-scaling-stroke"
               />
@@ -580,6 +600,16 @@ function RungEditor({
                 selection?.kind === "coil" &&
                 selection.rungIdx === rungIdx &&
                 selection.coilIdx === ci
+              // A coil's effective drive state — set / reset latches
+              // hold their var across scans, so the "energised" visual
+              // for those should reflect the var's value, not the
+              // network's instantaneous output. Standard coils mirror
+              // the network output. Either way we colour the wire by
+              // the NETWORK output (that's what's actually carrying
+              // power right now), and the COIL by its var's live value.
+              const coilEnergised = liveValues
+                ? readBool(liveValues, coil.var)
+                : null
               return (
                 <g key={ci}>
                   {/* horizontal wire: merge column → coil glyph */}
@@ -588,7 +618,7 @@ function RungEditor({
                     y1={cy}
                     x2={coilGlyphX}
                     y2={cy}
-                    className="stroke-foreground"
+                    className={powerClass(networkPowered)}
                     strokeWidth={1}
                     vectorEffect="non-scaling-stroke"
                   />
@@ -598,7 +628,7 @@ function RungEditor({
                     y1={cy}
                     x2={width - RAIL_PAD}
                     y2={cy}
-                    className="stroke-foreground"
+                    className={powerClass(networkPowered)}
                     strokeWidth={1}
                     vectorEffect="non-scaling-stroke"
                   />
@@ -607,6 +637,7 @@ function RungEditor({
                     x={coilGlyphX}
                     y={cy}
                     selected={sel}
+                    energised={coilEnergised}
                     onClick={() =>
                       onSelect(
                         sel ? null : { kind: "coil", rungIdx, coilIdx: ci },
@@ -793,17 +824,37 @@ interface NodeRenderProps {
   rungIdx: number
   selection: Selection
   readOnly: boolean
+  liveValues: Record<string, boolean> | null
   onSelect: (s: Selection) => void
   onCommit: (transform: (prog: LdProgram) => LdProgram) => void
 }
 
+// =================================================================
+//   Online-mode colour helper.
+//
+//   `powered === null`  → static rendering (program not running),
+//                         neutral foreground stroke.
+//   `powered === true`  → wire / glyph is conducting, FX-Green stroke.
+//   `powered === false` → wire / glyph is NOT conducting, muted.
+//
+//   We use stroke-current + a CSS text-* class so dark / light themes
+//   both inherit the right colour automatically.
+// =================================================================
+function powerClass(powered: boolean | null): string {
+  if (powered === null) return "stroke-foreground"
+  return powered ? "stroke-highlight" : "stroke-muted-foreground/40"
+}
+
 function RenderNode(props: NodeRenderProps) {
-  const { node, path, x, y, cols, rows, rungIdx, selection, onSelect } = props
+  const { node, path, x, y, cols, rows, rungIdx, selection, liveValues, onSelect } = props
   const midY = y + ((rows - 1) * CELL_H) / 2 + CELL_H / 2
   const selected =
     selection?.kind === "node" &&
     selection.rungIdx === rungIdx &&
     pathsEqual(selection.path, path)
+  // Power state of this whole sub-tree. Drives glyph colouring; child
+  // recursions compute their own. Null means "not running" → static.
+  const powered = liveValues ? evaluateNode(node, liveValues) : null
 
   const click = () => onSelect(selected ? null : { kind: "node", rungIdx, path })
 
@@ -817,6 +868,7 @@ function RenderNode(props: NodeRenderProps) {
           name={node.var}
           negated={node.negated}
           selected={selected}
+          powered={powered}
           onClick={click}
         />
       )
@@ -828,6 +880,7 @@ function RenderNode(props: NodeRenderProps) {
           width={CELL_W}
           value={node.value}
           selected={selected}
+          powered={powered}
           onClick={click}
         />
       )
@@ -841,6 +894,7 @@ function RenderNode(props: NodeRenderProps) {
             name={node.arg.var}
             negated={!node.arg.negated}
             selected={selected}
+            powered={powered}
             onClick={click}
           />
         )
@@ -887,12 +941,20 @@ function RenderNode(props: NodeRenderProps) {
             width={CELL_W}
             value={true}
             selected={selected}
+            powered={powered}
             onClick={click}
           />
         )
       }
       let cursor = x
       const elems: React.ReactNode[] = []
+      // For an AND series, the wire BETWEEN args[k-1] and args[k] is
+      // powered only if every arg up to and including k-1 conducts.
+      // Children render their own glyphs with their own power state;
+      // adjacent contact glyphs already cover the wire pixels via
+      // their internal stroke. So we don't need to inject extra wires
+      // here — the contact's own "lead-in" and "lead-out" sub-lines
+      // already pick up that arg's power state.
       node.args.forEach((child, i) => {
         const m = measure(child)
         elems.push(
@@ -919,6 +981,7 @@ function RenderNode(props: NodeRenderProps) {
             width={CELL_W}
             value={false}
             selected={selected}
+            powered={powered}
             onClick={click}
           />
         )
@@ -931,6 +994,10 @@ function RenderNode(props: NodeRenderProps) {
         const m = measure(child)
         const laneY = y + rowCursor * CELL_H
         const laneMidY = laneY + ((m.rows - 1) * CELL_H) / 2 + CELL_H / 2
+        // The per-branch padding wire is powered iff that branch
+        // itself conducts — it's the branch's "tail" extending out
+        // to align with longer siblings.
+        const branchPowered = liveValues ? evaluateNode(child, liveValues) : null
         elems.push(
           <RenderNode
             key={i}
@@ -951,7 +1018,7 @@ function RenderNode(props: NodeRenderProps) {
               y1={laneMidY}
               x2={outX}
               y2={laneMidY}
-              className="stroke-foreground"
+              className={powerClass(branchPowered)}
               strokeWidth={1}
               vectorEffect="non-scaling-stroke"
             />,
@@ -963,6 +1030,8 @@ function RenderNode(props: NodeRenderProps) {
       const lastChildRows = measure(node.args[node.args.length - 1]).rows
       const lastY =
         y + (rowCursor - lastChildRows) * CELL_H + lastChildRows * CELL_H - CELL_H / 2
+      // Merge bars: powered if ANY branch is conducting, since the
+      // OR's output is the disjunction.
       elems.push(
         <line
           key="merge-in"
@@ -970,7 +1039,7 @@ function RenderNode(props: NodeRenderProps) {
           y1={firstY}
           x2={inX}
           y2={lastY}
-          className="stroke-foreground"
+          className={powerClass(powered)}
           strokeWidth={1}
           vectorEffect="non-scaling-stroke"
         />,
@@ -980,7 +1049,7 @@ function RenderNode(props: NodeRenderProps) {
           y1={firstY}
           x2={outX}
           y2={lastY}
-          className="stroke-foreground"
+          className={powerClass(powered)}
           strokeWidth={1}
           vectorEffect="non-scaling-stroke"
         />,
@@ -1001,6 +1070,7 @@ function ContactGlyph({
   name,
   negated,
   selected,
+  powered,
   onClick,
 }: {
   x: number
@@ -1009,10 +1079,13 @@ function ContactGlyph({
   name: string
   negated: boolean
   selected: boolean
+  powered: boolean | null
   onClick: () => void
 }) {
   const cx = x + width / 2
   const half = 10
+  const wireClass = powerClass(powered)
+  const barClass = powerClass(powered)
   return (
     <g onClick={onClick} className="cursor-pointer">
       {/* Wider invisible hit target so small contact glyphs are easy
@@ -1029,7 +1102,7 @@ function ContactGlyph({
         y1={y}
         x2={cx - half}
         y2={y}
-        className="stroke-foreground"
+        className={wireClass}
         strokeWidth={1}
         vectorEffect="non-scaling-stroke"
       />
@@ -1038,7 +1111,7 @@ function ContactGlyph({
         y1={y}
         x2={x + width}
         y2={y}
-        className="stroke-foreground"
+        className={wireClass}
         strokeWidth={1}
         vectorEffect="non-scaling-stroke"
       />
@@ -1047,7 +1120,7 @@ function ContactGlyph({
         y1={y - 9}
         x2={cx - half}
         y2={y + 9}
-        className="stroke-foreground"
+        className={barClass}
         strokeWidth={1.5}
         vectorEffect="non-scaling-stroke"
       />
@@ -1056,7 +1129,7 @@ function ContactGlyph({
         y1={y - 9}
         x2={cx + half}
         y2={y + 9}
-        className="stroke-foreground"
+        className={barClass}
         strokeWidth={1.5}
         vectorEffect="non-scaling-stroke"
       />
@@ -1066,7 +1139,7 @@ function ContactGlyph({
           y1={y + 9}
           x2={cx + half}
           y2={y - 9}
-          className="stroke-foreground"
+          className={barClass}
           strokeWidth={1.5}
           vectorEffect="non-scaling-stroke"
         />
@@ -1104,6 +1177,7 @@ function ConstGlyph({
   width,
   value,
   selected,
+  powered,
   onClick,
 }: {
   x: number
@@ -1111,8 +1185,13 @@ function ConstGlyph({
   width: number
   value: boolean
   selected: boolean
+  powered: boolean | null
   onClick: () => void
 }) {
+  // When live, a const node's "wire-powered" state is its declared
+  // value (TRUE = always conducting, FALSE = never). When not live,
+  // fall back to the static representation (solid vs dashed).
+  const effectivePowered = powered === null ? null : value
   return (
     <g onClick={onClick} className="cursor-pointer">
       <rect
@@ -1127,7 +1206,13 @@ function ConstGlyph({
         y1={y}
         x2={x + width}
         y2={y}
-        className={value ? "stroke-foreground" : "stroke-muted-foreground"}
+        className={
+          effectivePowered === null
+            ? value
+              ? "stroke-foreground"
+              : "stroke-muted-foreground"
+            : powerClass(effectivePowered)
+        }
         strokeWidth={1}
         strokeDasharray={value ? undefined : "4 3"}
         vectorEffect="non-scaling-stroke"
@@ -1164,12 +1249,14 @@ function CoilGlyph({
   x,
   y,
   selected,
+  energised,
   onClick,
 }: {
   coil: LdProgram["rungs"][number]["coils"][number]
   x: number
   y: number
   selected: boolean
+  energised: boolean | null
   onClick: () => void
 }) {
   const w = 36
@@ -1177,6 +1264,23 @@ function CoilGlyph({
   const cx = x + w / 2
   const inner =
     coil.kind === "set" ? "S" : coil.kind === "reset" ? "R" : null
+  // Coil "energised" colour reflects the coil's variable value, not
+  // the network's output — set/reset latches hold their state across
+  // scans even when the network goes back to 0, and a glowing coil
+  // means "this output is currently driven HIGH", which is what
+  // operators care about. For null (not live) use neutral.
+  const arcClass =
+    energised === null
+      ? "stroke-foreground"
+      : energised
+        ? "stroke-highlight"
+        : "stroke-muted-foreground/60"
+  const innerClass =
+    energised === null
+      ? "fill-foreground"
+      : energised
+        ? "fill-highlight"
+        : "fill-muted-foreground/60"
   return (
     <g onClick={onClick} className="cursor-pointer">
       <rect
@@ -1199,14 +1303,14 @@ function CoilGlyph({
       <path
         d={`M ${cx - r} ${y - r} A ${r * 1.2} ${r * 1.2} 0 0 0 ${cx - r} ${y + r}`}
         fill="none"
-        className="stroke-foreground"
+        className={arcClass}
         strokeWidth={1.5}
         vectorEffect="non-scaling-stroke"
       />
       <path
         d={`M ${cx + r} ${y - r} A ${r * 1.2} ${r * 1.2} 0 0 1 ${cx + r} ${y + r}`}
         fill="none"
-        className="stroke-foreground"
+        className={arcClass}
         strokeWidth={1.5}
         vectorEffect="non-scaling-stroke"
       />
@@ -1215,7 +1319,7 @@ function CoilGlyph({
           x={cx}
           y={y + 4}
           textAnchor="middle"
-          className="fill-foreground"
+          className={innerClass}
           fontSize="11"
           fontFamily="ui-monospace, monospace"
           fontWeight={600}

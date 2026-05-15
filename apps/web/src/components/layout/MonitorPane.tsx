@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import { Sparkline } from "@/components/charts/Sparkline"
 import { TrendChart } from "@/components/charts/TrendChart"
 import { cn } from "@/lib/utils"
+import { writeVariable } from "@/lib/api"
 import {
   classifyType,
   colorFor,
@@ -18,7 +19,11 @@ import { useRuntime, type RunningInfo } from "@/state/runtime"
 import type { VarValue } from "@/types/generated/VarValue"
 
 export function MonitorPane() {
-  const { lastSnapshot, isRunning, currentPou, running } = useRuntime()
+  const { lastSnapshot, isRunning, currentPou, running, attached } = useRuntime()
+  // Variable writes go through the local bridge. When attached to a
+  // remote edge runtime we don't (yet) proxy writes — disable the
+  // controls in that case to avoid silently losing the user's input.
+  const canWrite = isRunning && !attached
 
   // History buffers (mutated in place; re-rendered via a tick counter).
   const historyRef = useRef<Map<string, number[]>>(new Map())
@@ -123,6 +128,7 @@ export function MonitorPane() {
                 sparkColor={colorByName[v.name]}
                 onPin={togglePin}
                 stale={stale}
+                canWrite={canWrite}
               />
             ))}
           </ul>
@@ -237,9 +243,18 @@ interface VarRowProps {
   sparkColor: string | undefined
   onPin: (name: string) => void
   stale: boolean
+  canWrite: boolean
 }
 
-function VarRow({ v, history, isPinned, sparkColor, onPin, stale }: VarRowProps) {
+function VarRow({
+  v,
+  history,
+  isPinned,
+  sparkColor,
+  onPin,
+  stale,
+  canWrite,
+}: VarRowProps) {
   const cat: VarCategory = classifyType(v.type_name)
   const trendable = cat === "numeric" || cat === "bool" || cat === "bits"
 
@@ -283,15 +298,111 @@ function VarRow({ v, history, isPinned, sparkColor, onPin, stale }: VarRowProps)
         </span>
       )}
 
-      <span
-        className={cn(
-          "w-20 shrink-0 text-right font-mono text-xs tabular-nums",
-          cat === "fb" && "text-muted-foreground/50",
-        )}
-      >
-        {renderValue(cat, v)}
-      </span>
+      <ValueCell v={v} cat={cat} canWrite={canWrite} />
     </li>
+  )
+}
+
+/** Right-hand value cell. Interactive when the program is running
+ *  (clickable BOOL toggle / inline numeric input that writes via
+ *  `/api/runtime/variables`). Falls back to plain text otherwise.
+ *  This is what turns the Monitor into a no-code HMI for driving an
+ *  LD POU during dev — without a real plant simulator, the operator
+ *  IS the simulator. */
+function ValueCell({
+  v,
+  cat,
+  canWrite,
+}: {
+  v: VarValue
+  cat: VarCategory
+  canWrite: boolean
+}) {
+  if (canWrite && cat === "bool") {
+    const on = v.value === "TRUE"
+    return (
+      <button
+        type="button"
+        onClick={() => {
+          void writeVariable(v.name, on ? 0 : 1).catch(() => {
+            /* swallow — UI will refresh from next SSE snapshot */
+          })
+        }}
+        className={cn(
+          "w-20 shrink-0 rounded px-1 text-right font-mono text-xs tabular-nums transition-colors",
+          on
+            ? "bg-highlight/15 text-highlight hover:bg-highlight/25"
+            : "text-muted-foreground hover:bg-accent/40 hover:text-foreground",
+        )}
+        title="Click to toggle"
+      >
+        {on ? "on" : "off"}
+      </button>
+    )
+  }
+  if (canWrite && cat === "numeric") {
+    return <NumericEditor name={v.name} value={v.value} />
+  }
+  return (
+    <span
+      className={cn(
+        "w-20 shrink-0 text-right font-mono text-xs tabular-nums",
+        cat === "fb" && "text-muted-foreground/50",
+      )}
+    >
+      {renderValue(cat, v)}
+    </span>
+  )
+}
+
+/** Numeric editor — committed on blur or Enter, reverts on Escape.
+ *  Holds a local draft so the SSE snapshots arriving between
+ *  keystrokes don't blow away mid-typed values. */
+function NumericEditor({ name, value }: { name: string; value: string }) {
+  const [draft, setDraft] = useState(value)
+  const [editing, setEditing] = useState(false)
+  useEffect(() => {
+    if (!editing) setDraft(value)
+  }, [value, editing])
+  const commit = () => {
+    setEditing(false)
+    const parsed = parseFloat(draft)
+    if (!Number.isFinite(parsed)) {
+      setDraft(value)
+      return
+    }
+    // The runtime's write primitive is i32. For REAL/LREAL this
+    // truncates; flag the caveat in the future when we add a typed
+    // write endpoint. INT/DINT/USINT/etc. pass through faithfully.
+    void writeVariable(name, Math.trunc(parsed)).catch(() => {
+      setDraft(value)
+    })
+  }
+  return (
+    <input
+      type="text"
+      value={draft}
+      onChange={(e) => {
+        setDraft(e.target.value)
+        setEditing(true)
+      }}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") commit()
+        else if (e.key === "Escape") {
+          setDraft(value)
+          setEditing(false)
+          ;(e.target as HTMLInputElement).blur()
+        }
+      }}
+      className={cn(
+        "w-20 shrink-0 rounded bg-transparent px-1 text-right font-mono text-xs tabular-nums",
+        editing
+          ? "ring-1 ring-highlight bg-highlight/5"
+          : "hover:bg-accent/40",
+      )}
+      title="Click to edit; Enter to commit"
+    />
   )
 }
 

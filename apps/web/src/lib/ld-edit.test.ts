@@ -296,3 +296,110 @@ describe("round-trip", () => {
     expect(back).toEqual(p)
   })
 })
+
+// =================================================================
+//   evaluateNode — online-mode evaluator
+// =================================================================
+import { evaluateNode } from "./ld-edit"
+
+describe("evaluateNode", () => {
+  it("contact conducts when var is true and not negated", () => {
+    expect(
+      evaluateNode({ op: "contact", var: "a", negated: false }, { a: true }),
+    ).toBe(true)
+    expect(
+      evaluateNode({ op: "contact", var: "a", negated: false }, { a: false }),
+    ).toBe(false)
+  })
+
+  it("negated contact inverts", () => {
+    expect(
+      evaluateNode({ op: "contact", var: "a", negated: true }, { a: true }),
+    ).toBe(false)
+    expect(
+      evaluateNode({ op: "contact", var: "a", negated: true }, { a: false }),
+    ).toBe(true)
+  })
+
+  it("missing variable reads as false", () => {
+    expect(
+      evaluateNode({ op: "contact", var: "missing", negated: false }, {}),
+    ).toBe(false)
+    expect(
+      evaluateNode({ op: "contact", var: "missing", negated: true }, {}),
+    ).toBe(true)
+  })
+
+  it("AND requires all children", () => {
+    const tree: LdNode = {
+      op: "and",
+      args: [
+        { op: "contact", var: "a", negated: false },
+        { op: "contact", var: "b", negated: false },
+      ],
+    }
+    expect(evaluateNode(tree, { a: true, b: true })).toBe(true)
+    expect(evaluateNode(tree, { a: true, b: false })).toBe(false)
+    expect(evaluateNode(tree, { a: false, b: true })).toBe(false)
+  })
+
+  it("OR fires when any child fires", () => {
+    const tree: LdNode = {
+      op: "or",
+      args: [
+        { op: "contact", var: "a", negated: false },
+        { op: "contact", var: "b", negated: false },
+      ],
+    }
+    expect(evaluateNode(tree, { a: false, b: false })).toBe(false)
+    expect(evaluateNode(tree, { a: true, b: false })).toBe(true)
+    expect(evaluateNode(tree, { a: false, b: true })).toBe(true)
+  })
+
+  it("evaluates the seal-in pattern correctly", () => {
+    // network: start OR (motor_run AND NOT stop)
+    const tree: LdNode = {
+      op: "or",
+      args: [
+        { op: "contact", var: "start", negated: false },
+        {
+          op: "and",
+          args: [
+            { op: "contact", var: "motor_run", negated: false },
+            { op: "contact", var: "stop", negated: true },
+          ],
+        },
+      ],
+    }
+    // not yet started
+    expect(evaluateNode(tree, {})).toBe(false)
+    // press start
+    expect(evaluateNode(tree, { start: true })).toBe(true)
+    // start released, motor running, stop not pressed -> sealed in
+    expect(evaluateNode(tree, { motor_run: true })).toBe(true)
+    // stop pressed releases
+    expect(evaluateNode(tree, { motor_run: true, stop: true })).toBe(false)
+  })
+
+  it("empty AND/OR collapse to identity", () => {
+    expect(evaluateNode({ op: "and", args: [] }, {})).toBe(true)
+    expect(evaluateNode({ op: "or", args: [] }, {})).toBe(false)
+  })
+
+  it("treats omitted `negated` field as false (serde-default round-trip)", () => {
+    // Real .ld.json files often omit `negated: false`, relying on
+    // serde's #[default]. On the TS side this comes through as
+    // undefined, and a naïve `var !== undefined` would always be
+    // true. Regression test for that exact bug.
+    const node = { op: "contact", var: "x" } as unknown as LdNode
+    expect(evaluateNode(node, { x: false })).toBe(false)
+    expect(evaluateNode(node, { x: true })).toBe(true)
+    // explicit-false should match the omitted case
+    expect(
+      evaluateNode(
+        { op: "contact", var: "x", negated: false } as LdNode,
+        { x: false },
+      ),
+    ).toBe(false)
+  })
+})

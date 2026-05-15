@@ -518,3 +518,54 @@ export function parseProgram(source: string): LdProgram {
 export function serializeProgram(prog: LdProgram): string {
   return JSON.stringify(prog, null, 2) + "\n"
 }
+
+// =================================================================
+//   Online-mode evaluator
+//
+//   Given a snapshot of live BOOL values, compute whether each node in
+//   the rung's logic tree is "conducting" — i.e. would carry power if
+//   we projected its sub-expression onto a real ladder. The renderer
+//   uses this to colour glyphs and wires in real time while the
+//   program runs on the bridge.
+//
+//   This is a *pure* function over the tree; it doesn't know about
+//   wires or rendering. The renderer recursively asks "is THIS node
+//   conducting?" — same recursion shape as drawing the node.
+// =================================================================
+
+/** Look up a variable in a live snapshot, coerce to BOOL. Falsy by
+ *  default (undeclared / missing variable reads FALSE) so a partially-
+ *  hydrated snapshot doesn't crash the evaluator. */
+export function readBool(values: Readonly<Record<string, boolean>>, name: string): boolean {
+  return values[name] === true
+}
+
+/** Recursively evaluate an LD node against live BOOL values.
+ *
+ *  Important: `negated` on the wire format is `#[serde(default)]` in
+ *  Rust, so a JSON file with `{op:"contact", var:"x"}` (no `negated`)
+ *  is valid input. On the TS side `negated` then arrives as
+ *  `undefined`, and `false !== undefined` evaluates to `true` — which
+ *  would silently mark every non-negated FALSE contact as conducting.
+ *  Coerce to a real boolean here. Same for `LdRung.label`-style
+ *  optional fields anywhere we compare.
+ */
+export function evaluateNode(
+  node: LdNode,
+  values: Readonly<Record<string, boolean>>,
+): boolean {
+  switch (node.op) {
+    case "contact":
+      return readBool(values, node.var) !== (node.negated === true)
+    case "const":
+      return node.value === true
+    case "not":
+      return !evaluateNode(node.arg, values)
+    case "and":
+      if (node.args.length === 0) return true
+      return node.args.every((a) => evaluateNode(a, values))
+    case "or":
+      if (node.args.length === 0) return false
+      return node.args.some((a) => evaluateNode(a, values))
+  }
+}
