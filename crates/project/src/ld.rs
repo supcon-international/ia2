@@ -133,6 +133,52 @@ pub enum LdNode {
     /// unconditional outputs. `value: false` is rare but exposed for
     /// completeness.
     Const { value: bool },
+    /// Comparison block — the IEC 61131-3 way to bridge a numeric
+    /// variable into a boolean network. Renders as a small rectangle
+    /// containing "left CMP right" (e.g. `temperature < 50.0`). The
+    /// block conducts when the comparison evaluates TRUE.
+    ///
+    /// `left` and `right` are LD operands; the typical use is one
+    /// variable + one literal, but two variables is allowed too. The
+    /// transpiler emits `(left CMP right)` as a parenthesised ST
+    /// boolean sub-expression that drops straight into the network.
+    ///
+    /// (Field is named `cmp` rather than `op` because serde's enum
+    /// tag is already `op`.)
+    Compare {
+        left: LdOperand,
+        cmp: LdComparator,
+        right: LdOperand,
+    },
+}
+
+/// One operand of a comparison. Either a variable reference (string
+/// name resolved at compile time) or an inline literal (passed
+/// verbatim through to ST — `42`, `3.14`, `T#100ms`, etc.).
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LdOperand {
+    Var { name: String },
+    Literal { value: String },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum LdComparator {
+    /// `=` — equality.
+    Eq,
+    /// `<>` — inequality.
+    Ne,
+    /// `<`.
+    Lt,
+    /// `<=`.
+    Le,
+    /// `>`.
+    Gt,
+    /// `>=`.
+    Ge,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

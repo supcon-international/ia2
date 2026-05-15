@@ -22,7 +22,9 @@
  */
 
 import type { LdCoilKind } from "@/types/generated/LdCoilKind"
+import type { LdComparator } from "@/types/generated/LdComparator"
 import type { LdNode } from "@/types/generated/LdNode"
+import type { LdOperand } from "@/types/generated/LdOperand"
 import type { LdProgram } from "@/types/generated/LdProgram"
 import type { LdVarSection } from "@/types/generated/LdVarSection"
 import type { LdVariable } from "@/types/generated/LdVariable"
@@ -219,6 +221,22 @@ export function setContactVar(
     ...r,
     logic: updateNode(r.logic, path, (n) =>
       n.op === "contact" ? { ...n, var: varName } : n,
+    ),
+  }))
+}
+
+/** Patch a Compare block — any subset of its three fields. No-op on
+ *  non-compare nodes. */
+export function updateCompare(
+  prog: LdProgram,
+  rungIdx: number,
+  path: NodePath,
+  patch: Partial<{ left: LdOperand; cmp: LdComparator; right: LdOperand }>,
+): LdProgram {
+  return updateRung(prog, rungIdx, (r) => ({
+    ...r,
+    logic: updateNode(r.logic, path, (n) =>
+      n.op === "compare" ? { ...n, ...patch } : n,
     ),
   }))
 }
@@ -502,6 +520,18 @@ export function newConst(value: boolean): LdNode {
   return { op: "const", value }
 }
 
+/** Default new compare block — placeholder shape the user customises
+ *  via the detail bar. `var < 0.0` is the most universally-applicable
+ *  starter for a process-control feel. */
+export function newCompare(): LdNode {
+  return {
+    op: "compare",
+    left: { kind: "var", name: "x" },
+    cmp: "lt",
+    right: { kind: "literal", value: "0" },
+  }
+}
+
 // =================================================================
 //   JSON round-trip
 // =================================================================
@@ -549,10 +579,14 @@ export function readBool(values: Readonly<Record<string, boolean>>, name: string
  *  would silently mark every non-negated FALSE contact as conducting.
  *  Coerce to a real boolean here. Same for `LdRung.label`-style
  *  optional fields anywhere we compare.
+ *
+ *  Compare nodes also need numeric live values, so the evaluator
+ *  takes a second optional map keyed by variable name.
  */
 export function evaluateNode(
   node: LdNode,
   values: Readonly<Record<string, boolean>>,
+  numerics: Readonly<Record<string, number>> = {},
 ): boolean {
   switch (node.op) {
     case "contact":
@@ -560,12 +594,79 @@ export function evaluateNode(
     case "const":
       return node.value === true
     case "not":
-      return !evaluateNode(node.arg, values)
+      return !evaluateNode(node.arg, values, numerics)
     case "and":
       if (node.args.length === 0) return true
-      return node.args.every((a) => evaluateNode(a, values))
+      return node.args.every((a) => evaluateNode(a, values, numerics))
     case "or":
       if (node.args.length === 0) return false
-      return node.args.some((a) => evaluateNode(a, values))
+      return node.args.some((a) => evaluateNode(a, values, numerics))
+    case "compare":
+      return evaluateCompare(node.left, node.cmp, node.right, numerics)
   }
+}
+
+/** Resolve a Compare operand to a number against live numeric values.
+ *  Variables that aren't in `numerics` (or aren't numeric at all)
+ *  read as 0 — the same forgiving fallback BOOL contacts use. */
+export function readOperand(
+  o: LdOperand,
+  numerics: Readonly<Record<string, number>>,
+): number {
+  if (o.kind === "var") return numerics[o.name] ?? 0
+  // Literal: parse the raw string. TIME literals like "T#100ms" parse
+  // through `parseFloat` (gives 100, the ms — close enough for online
+  // colouring; full TIME semantics are the bridge's job).
+  const m = String(o.value).match(/-?\d+(?:\.\d+)?/)
+  if (!m) return 0
+  const n = parseFloat(m[0])
+  return Number.isFinite(n) ? n : 0
+}
+
+function evaluateCompare(
+  left: LdOperand,
+  cmp: LdComparator,
+  right: LdOperand,
+  numerics: Readonly<Record<string, number>>,
+): boolean {
+  const a = readOperand(left, numerics)
+  const b = readOperand(right, numerics)
+  switch (cmp) {
+    case "eq":
+      return a === b
+    case "ne":
+      return a !== b
+    case "lt":
+      return a < b
+    case "le":
+      return a <= b
+    case "gt":
+      return a > b
+    case "ge":
+      return a >= b
+  }
+}
+
+/** Operator → ST/textual symbol, for renderer labels. */
+export function comparatorSymbol(c: LdComparator): string {
+  switch (c) {
+    case "eq":
+      return "="
+    case "ne":
+      return "≠"
+    case "lt":
+      return "<"
+    case "le":
+      return "≤"
+    case "gt":
+      return ">"
+    case "ge":
+      return "≥"
+  }
+}
+
+/** Compact textual form for an operand — `var` shows the name, `literal`
+ *  shows the value verbatim. Used inside the Compare block glyph. */
+export function operandText(o: LdOperand): string {
+  return o.kind === "var" ? o.name : o.value
 }

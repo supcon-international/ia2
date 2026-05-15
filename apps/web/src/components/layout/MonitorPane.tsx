@@ -324,7 +324,7 @@ function ValueCell({
       <button
         type="button"
         onClick={() => {
-          void writeVariable(v.name, on ? 0 : 1).catch(() => {
+          void writeVariable(v.name, on ? 0 : 1, "BOOL").catch(() => {
             /* swallow — UI will refresh from next SSE snapshot */
           })
         }}
@@ -341,7 +341,7 @@ function ValueCell({
     )
   }
   if (canWrite && cat === "numeric") {
-    return <NumericEditor name={v.name} value={v.value} />
+    return <NumericEditor name={v.name} typeName={v.type_name} value={v.value} />
   }
   return (
     <span
@@ -357,8 +357,18 @@ function ValueCell({
 
 /** Numeric editor — committed on blur or Enter, reverts on Escape.
  *  Holds a local draft so the SSE snapshots arriving between
- *  keystrokes don't blow away mid-typed values. */
-function NumericEditor({ name, value }: { name: string; value: string }) {
+ *  keystrokes don't blow away mid-typed values. The `typeName` is
+ *  threaded so writeVariable() can do the right encoding (REAL → f32
+ *  bit pattern, integers → truncated i32). */
+function NumericEditor({
+  name,
+  typeName,
+  value,
+}: {
+  name: string
+  typeName: string
+  value: string
+}) {
   const [draft, setDraft] = useState(value)
   const [editing, setEditing] = useState(false)
   useEffect(() => {
@@ -371,10 +381,7 @@ function NumericEditor({ name, value }: { name: string; value: string }) {
       setDraft(value)
       return
     }
-    // The runtime's write primitive is i32. For REAL/LREAL this
-    // truncates; flag the caveat in the future when we add a typed
-    // write endpoint. INT/DINT/USINT/etc. pass through faithfully.
-    void writeVariable(name, Math.trunc(parsed)).catch(() => {
+    void writeVariable(name, parsed, typeName).catch(() => {
       setDraft(value)
     })
   }

@@ -23,7 +23,8 @@
 use std::fmt::Write;
 
 use project::{
-    LdCoilKind, LdNode, LdPouType, LdProgram, LdVarSection, LdVariable,
+    LdCoilKind, LdComparator, LdNode, LdOperand, LdPouType, LdProgram, LdVarSection,
+    LdVariable,
 };
 
 use crate::errors::BridgeError;
@@ -194,6 +195,45 @@ fn render_node(node: &LdNode) -> Result<String, BridgeError> {
         LdNode::Or { args } => combine(args, "OR", "FALSE")?,
         LdNode::Not { arg } => format!("(NOT {})", render_node(arg)?),
         LdNode::Const { value } => if *value { "TRUE" } else { "FALSE" }.to_string(),
+        LdNode::Compare { left, cmp, right } => {
+            // Compare block — bridges a numeric var into the boolean
+            // network by emitting `(left CMP right)` as a parenthesised
+            // ST sub-expression. ironplc parses these as normal
+            // comparison operators against any numeric type, so the
+            // user can mix INT, REAL, TIME literals etc. on either side.
+            let lhs = render_operand(left)?;
+            let rhs = render_operand(right)?;
+            let op_str = match cmp {
+                LdComparator::Eq => "=",
+                LdComparator::Ne => "<>",
+                LdComparator::Lt => "<",
+                LdComparator::Le => "<=",
+                LdComparator::Gt => ">",
+                LdComparator::Ge => ">=",
+            };
+            format!("({lhs} {op_str} {rhs})")
+        }
+    })
+}
+
+fn render_operand(o: &LdOperand) -> Result<String, BridgeError> {
+    Ok(match o {
+        LdOperand::Var { name } => {
+            if name.is_empty() {
+                return Err(BridgeError::Parse(
+                    "Compare operand has empty variable name".into(),
+                ));
+            }
+            name.clone()
+        }
+        LdOperand::Literal { value } => {
+            if value.is_empty() {
+                return Err(BridgeError::Parse(
+                    "Compare operand has empty literal".into(),
+                ));
+            }
+            value.clone()
+        }
     })
 }
 
@@ -399,6 +439,107 @@ mod tests {
     fn empty_and_or_collapse_to_identity() {
         assert_eq!(render_node(&LdNode::And { args: vec![] }).unwrap(), "TRUE");
         assert_eq!(render_node(&LdNode::Or { args: vec![] }).unwrap(), "FALSE");
+    }
+
+    #[test]
+    fn compare_block_emits_parenthesised_comparison() {
+        // `temperature < 50.0`: a var on the left, a literal on the right.
+        let node = LdNode::Compare {
+            left: LdOperand::Var {
+                name: "temperature".into(),
+            },
+            cmp: LdComparator::Lt,
+            right: LdOperand::Literal {
+                value: "50.0".into(),
+            },
+        };
+        assert_eq!(render_node(&node).unwrap(), "(temperature < 50.0)");
+
+        // Two-variable compare:
+        let node2 = LdNode::Compare {
+            left: LdOperand::Var { name: "pv".into() },
+            cmp: LdComparator::Ge,
+            right: LdOperand::Var { name: "sp".into() },
+        };
+        assert_eq!(render_node(&node2).unwrap(), "(pv >= sp)");
+
+        // Inequality keyword maps to ST's `<>`:
+        let node3 = LdNode::Compare {
+            left: LdOperand::Var { name: "x".into() },
+            cmp: LdComparator::Ne,
+            right: LdOperand::Literal { value: "0".into() },
+        };
+        assert_eq!(render_node(&node3).unwrap(), "(x <> 0)");
+    }
+
+    #[test]
+    fn compare_block_works_inside_and_chain() {
+        // Real usage: a series AND with a compare block in the middle.
+        //   start_btn AND (temperature < 50.0) AND NOT stop_btn
+        let prog = LdProgram {
+            name: "guard".into(),
+            pou_type: LdPouType::Program,
+            variables: vec![
+                LdVariable {
+                    name: "start_btn".into(),
+                    type_name: "BOOL".into(),
+                    section: LdVarSection::Input,
+                    init: None,
+                },
+                LdVariable {
+                    name: "stop_btn".into(),
+                    type_name: "BOOL".into(),
+                    section: LdVarSection::Input,
+                    init: None,
+                },
+                LdVariable {
+                    name: "temperature".into(),
+                    type_name: "REAL".into(),
+                    section: LdVarSection::Input,
+                    init: None,
+                },
+                LdVariable {
+                    name: "heater".into(),
+                    type_name: "BOOL".into(),
+                    section: LdVarSection::Output,
+                    init: None,
+                },
+            ],
+            rungs: vec![LdRung {
+                id: "guarded_heater".into(),
+                label: None,
+                logic: LdNode::And {
+                    args: vec![
+                        LdNode::Contact {
+                            var: "start_btn".into(),
+                            negated: false,
+                        },
+                        LdNode::Compare {
+                            left: LdOperand::Var {
+                                name: "temperature".into(),
+                            },
+                            cmp: LdComparator::Lt,
+                            right: LdOperand::Literal {
+                                value: "50.0".into(),
+                            },
+                        },
+                        LdNode::Contact {
+                            var: "stop_btn".into(),
+                            negated: true,
+                        },
+                    ],
+                },
+                coils: vec![LdCoil {
+                    var: "heater".into(),
+                    kind: LdCoilKind::Standard,
+                }],
+            }],
+        };
+        let st = transpile_to_st(&prog).unwrap();
+        assert!(
+            st.contains("heater := (start_btn AND (temperature < 50.0) AND NOT stop_btn);"),
+            "unexpected ST:\n{st}"
+        );
     }
 
     #[test]

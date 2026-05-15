@@ -301,24 +301,49 @@ export async function fetchRuntimeStatus(): Promise<RuntimeStatus> {
   )
 }
 
-/** Write a single variable on the running bridge. The runtime's
- *  variable-write primitive is `write_variable(VarIndex, i32)`, so the
- *  payload is always an i32 — callers map their domain value to that
- *  (BOOL → 0/1, numerics → raw i32, REAL → bit-cast not yet supported).
+/** Write a single variable on the running bridge.
+ *
+ *  The runtime's write primitive is `write_variable(VarIndex, i32)`,
+ *  so the payload is always an i32. This helper handles the mapping
+ *  from JS `number` + IEC type name:
+ *
+ *    - BOOL                                     → 0 or 1
+ *    - SINT/INT/DINT/USINT/UINT/UDINT/BYTE/...  → truncated integer
+ *    - REAL (32-bit float)                      → IEEE-754 bit pattern
+ *      (interpret the bytes of the float as an i32 so the VM sees
+ *      the right f32 in the slot)
+ *    - LREAL / 64-bit ints                      → not supported via
+ *      this endpoint yet; caller should warn or skip.
+ *
  *  Throws if the runtime isn't running or the variable doesn't exist.
  */
 export async function writeVariable(
   name: string,
   value: number,
+  typeName: string = "",
 ): Promise<void> {
+  const i32 = encodeForWrite(value, typeName)
   await jsonOrThrow(
     await fetch(`/api/runtime/variables/${encodeURIComponent(name)}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ value }),
+      body: JSON.stringify({ value: i32 }),
     }),
     `POST /api/runtime/variables/${name}`,
   )
+}
+
+function encodeForWrite(value: number, typeName: string): number {
+  const t = typeName.toUpperCase()
+  if (t === "REAL") {
+    // Pack f32 bits into i32. The bridge VM reads slots untyped so
+    // it sees the right f32 when this VarIndex points at a REAL.
+    const buf = new ArrayBuffer(4)
+    new Float32Array(buf)[0] = value
+    return new Int32Array(buf)[0]
+  }
+  // BOOL, integer family, BYTE/WORD/DWORD all pass through as integers.
+  return Math.trunc(value)
 }
 
 export async function fetchDemoSlaveSnapshot(): Promise<DemoSlaveSnapshot> {

@@ -24,12 +24,15 @@ import {
   addInSeries,
   addRung,
   addVariable,
+  comparatorSymbol,
   deleteCoil,
   deleteNode,
   deleteRung,
   evaluateNode,
   moveRung,
+  newCompare,
   newContact,
+  operandText,
   parseProgram,
   readBool,
   removeVariable,
@@ -39,6 +42,7 @@ import {
   setContactVar,
   setRungLabel,
   toggleNegated,
+  updateCompare,
   updateVariable,
   type NodePath,
 } from "@/lib/ld-edit"
@@ -86,18 +90,36 @@ export function LDEditor({
   const parsed = useMemo(() => safeParse(value), [value])
   const [sel, setSel] = useState<Selection>(null)
 
-  // Live BOOL values from the bridge — drives the online-mode "this
-  // contact is conducting / this wire is powered" colouring. Null when
-  // nothing's running or no snapshot has arrived yet; the renderer
-  // falls back to static (uncoloured) glyphs in that case.
+  // Live values from the bridge — drives online-mode coloring.
+  //   bools    → Contact / Coil glyphs
+  //   numerics → Compare-block evaluation
+  // Both null when nothing's running; the renderer falls back to
+  // static (uncoloured) glyphs in that case.
   const { lastSnapshot, isRunning } = useRuntime()
-  const liveValues = useMemo<Record<string, boolean> | null>(() => {
+  const liveValues = useMemo<{
+    bools: Record<string, boolean>
+    numerics: Record<string, number>
+  } | null>(() => {
     if (!isRunning || !lastSnapshot) return null
-    const out: Record<string, boolean> = {}
+    const bools: Record<string, boolean> = {}
+    const numerics: Record<string, number> = {}
     for (const v of lastSnapshot.vars) {
-      if (v.type_name === "BOOL") out[v.name] = v.value === "TRUE"
+      if (v.type_name === "BOOL") {
+        bools[v.name] = v.value === "TRUE"
+      } else {
+        // The bridge ships every numeric / time / bits type as a
+        // string — REAL=3.14, DINT=42, TIME="T#100ms", BYTE="16#FF".
+        // parseFloat handles the first two cleanly; for TIME we strip
+        // the prefix; for BYTE/WORD we'd parse hex. Best-effort here
+        // since Compare blocks are almost always against a numeric.
+        const m = v.value.match(/-?\d+(?:\.\d+)?/)
+        if (m) {
+          const n = parseFloat(m[0])
+          if (Number.isFinite(n)) numerics[v.name] = n
+        }
+      }
     }
-    return out
+    return { bools, numerics }
   }, [lastSnapshot, isRunning])
 
   // Drop selection when the source changes externally (revert, POU
@@ -412,6 +434,11 @@ function measure(node: LdNode): LayoutBox {
     case "contact":
     case "const":
       return { cols: 1, rows: 1 }
+    case "compare":
+      // Compare blocks render as a rectangle wide enough to fit
+      // "left CMP right" (e.g. `temperature < 50.0`). 2 cells fits
+      // most typical labels comfortably; longer labels just clip.
+      return { cols: 2, rows: 1 }
     case "not":
       return measure(node.arg)
     case "and": {
@@ -456,7 +483,7 @@ function RungEditor({
   totalRungs: number
   selection: Selection
   readOnly: boolean
-  liveValues: Record<string, boolean> | null
+  liveValues: { bools: Record<string, boolean>; numerics: Record<string, number> } | null
   onSelect: (s: Selection) => void
   onCommit: (next: LdProgram) => void
 }) {
@@ -465,7 +492,7 @@ function RungEditor({
   // Null when not running; renderers treat null as "no online data,
   // render uncoloured static".
   const networkPowered = liveValues
-    ? evaluateNode(rung.logic, liveValues)
+    ? evaluateNode(rung.logic, liveValues.bools, liveValues.numerics)
     : null
   const layoutBox = measure(rung.logic)
   const cols = layoutBox.cols
@@ -608,7 +635,7 @@ function RungEditor({
               // the NETWORK output (that's what's actually carrying
               // power right now), and the COIL by its var's live value.
               const coilEnergised = liveValues
-                ? readBool(liveValues, coil.var)
+                ? readBool(liveValues.bools, coil.var)
                 : null
               return (
                 <g key={ci}>
@@ -824,7 +851,7 @@ interface NodeRenderProps {
   rungIdx: number
   selection: Selection
   readOnly: boolean
-  liveValues: Record<string, boolean> | null
+  liveValues: { bools: Record<string, boolean>; numerics: Record<string, number> } | null
   onSelect: (s: Selection) => void
   onCommit: (transform: (prog: LdProgram) => LdProgram) => void
 }
@@ -854,7 +881,9 @@ function RenderNode(props: NodeRenderProps) {
     pathsEqual(selection.path, path)
   // Power state of this whole sub-tree. Drives glyph colouring; child
   // recursions compute their own. Null means "not running" → static.
-  const powered = liveValues ? evaluateNode(node, liveValues) : null
+  const powered = liveValues
+    ? evaluateNode(node, liveValues.bools, liveValues.numerics)
+    : null
 
   const click = () => onSelect(selected ? null : { kind: "node", rungIdx, path })
 
@@ -879,6 +908,20 @@ function RenderNode(props: NodeRenderProps) {
           y={midY}
           width={CELL_W}
           value={node.value}
+          selected={selected}
+          powered={powered}
+          onClick={click}
+        />
+      )
+    case "compare":
+      return (
+        <CompareGlyph
+          x={x}
+          y={midY}
+          width={cols * CELL_W}
+          left={operandText(node.left)}
+          cmp={comparatorSymbol(node.cmp)}
+          right={operandText(node.right)}
           selected={selected}
           powered={powered}
           onClick={click}
@@ -997,7 +1040,9 @@ function RenderNode(props: NodeRenderProps) {
         // The per-branch padding wire is powered iff that branch
         // itself conducts — it's the branch's "tail" extending out
         // to align with longer siblings.
-        const branchPowered = liveValues ? evaluateNode(child, liveValues) : null
+        const branchPowered = liveValues
+          ? evaluateNode(child, liveValues.bools, liveValues.numerics)
+          : null
         elems.push(
           <RenderNode
             key={i}
@@ -1244,6 +1289,120 @@ function ConstGlyph({
   )
 }
 
+/** Compare block — rendered as a rectangle in the rung with the
+ *  comparison expression as its label. Same wire-in / wire-out shape
+ *  as a contact, so it slots into series/parallel networks the same
+ *  way. Powered → FX-Green stroke; not powered → muted; static (not
+ *  running) → neutral foreground.
+ *
+ *  This is the IEC 61131-3 mechanism for bridging numeric variables
+ *  into the boolean network — without it, an LD POU has no way to
+ *  react to `temperature > 50` or `level < 0.2`. */
+function CompareGlyph({
+  x,
+  y,
+  width,
+  left,
+  cmp,
+  right,
+  selected,
+  powered,
+  onClick,
+}: {
+  x: number
+  y: number
+  width: number
+  left: string
+  cmp: string
+  right: string
+  selected: boolean
+  powered: boolean | null
+  onClick: () => void
+}) {
+  // The rectangle occupies the middle ~70% of the cell width; short
+  // lead-in / lead-out wires connect it to the surrounding contacts.
+  const pad = 12
+  const boxX = x + pad
+  const boxW = width - pad * 2
+  const boxH = 26
+  const boxY = y - boxH / 2
+  const cls = powerClass(powered)
+  const labelClass =
+    powered === null
+      ? "fill-foreground"
+      : powered
+        ? "fill-highlight"
+        : "fill-muted-foreground"
+  return (
+    <g onClick={onClick} className="cursor-pointer">
+      {/* hit target covers full cell */}
+      <rect
+        x={x + 2}
+        y={y - 18}
+        width={width - 4}
+        height={36}
+        fill="transparent"
+      />
+      {/* lead-in / lead-out wires */}
+      <line
+        x1={x}
+        y1={y}
+        x2={boxX}
+        y2={y}
+        className={cls}
+        strokeWidth={1}
+        vectorEffect="non-scaling-stroke"
+      />
+      <line
+        x1={boxX + boxW}
+        y1={y}
+        x2={x + width}
+        y2={y}
+        className={cls}
+        strokeWidth={1}
+        vectorEffect="non-scaling-stroke"
+      />
+      {/* the rectangle */}
+      <rect
+        x={boxX}
+        y={boxY}
+        width={boxW}
+        height={boxH}
+        rx={3}
+        fill="none"
+        className={cls}
+        strokeWidth={1.5}
+        vectorEffect="non-scaling-stroke"
+      />
+      {/* label — "left CMP right". Centered. Mono so var names and
+          symbols line up consistently. */}
+      <text
+        x={boxX + boxW / 2}
+        y={y + 4}
+        textAnchor="middle"
+        className={labelClass}
+        fontSize="11"
+        fontFamily="ui-monospace, monospace"
+      >
+        {left} {cmp} {right}
+      </text>
+      {selected && (
+        <rect
+          x={boxX - 2}
+          y={boxY - 2}
+          width={boxW + 4}
+          height={boxH + 4}
+          fill="none"
+          className="stroke-highlight"
+          strokeWidth={1.5}
+          vectorEffect="non-scaling-stroke"
+          rx={4}
+        />
+      )}
+    </g>
+  )
+}
+
 function CoilGlyph({
   coil,
   x,
@@ -1449,6 +1608,14 @@ function NodeDetail({
             ¬ negate
           </ToggleBtn>
         </>
+      ) : node.op === "compare" ? (
+        <CompareEditFields
+          prog={prog}
+          rungIdx={rungIdx}
+          path={path}
+          node={node}
+          onCommit={onCommit}
+        />
       ) : node.op === "const" ? (
         <>
           <DetailLabel>const</DetailLabel>
@@ -1477,8 +1644,18 @@ function NodeDetail({
         title="Insert a contact in series to the right"
       >
         <Plus className="size-3" />
-        series
+        contact
       </ActionBtn>
+      <ActionBtn
+        onClick={() =>
+          onCommit(addInSeries(prog, rungIdx, path, "after", newCompare()))
+        }
+        title="Insert a compare block in series to the right"
+      >
+        <Plus className="size-3" />
+        compare
+      </ActionBtn>
+      <Separator />
       <ActionBtn
         onClick={() =>
           onCommit(
@@ -1488,7 +1665,16 @@ function NodeDetail({
         title="Insert a contact in parallel below"
       >
         <Plus className="size-3" />
-        parallel
+        ⫽contact
+      </ActionBtn>
+      <ActionBtn
+        onClick={() =>
+          onCommit(addInParallel(prog, rungIdx, path, "after", newCompare()))
+        }
+        title="Insert a compare block in parallel below"
+      >
+        <Plus className="size-3" />
+        ⫽compare
       </ActionBtn>
       <Separator />
       <ActionBtn
@@ -1503,6 +1689,132 @@ function NodeDetail({
         delete
       </ActionBtn>
     </DetailBar>
+  )
+}
+
+/** Compact editing controls for a Compare block:
+ *  [left-kind ↓] [left-value]  [cmp ↓]  [right-kind ↓] [right-value]
+ *  Each operand chooses between var-reference or inline literal. */
+function CompareEditFields({
+  prog,
+  rungIdx,
+  path,
+  node,
+  onCommit,
+}: {
+  prog: LdProgram
+  rungIdx: number
+  path: NodePath
+  node: Extract<LdNode, { op: "compare" }>
+  onCommit: (next: LdProgram) => void
+}) {
+  const numericVars = prog.variables
+    .filter((v) => v.type !== "BOOL")
+    .map((v) => v.name)
+  return (
+    <>
+      <DetailLabel>compare</DetailLabel>
+      <OperandPicker
+        operand={node.left}
+        options={numericVars}
+        onChange={(left) =>
+          onCommit(updateCompare(prog, rungIdx, path, { left }))
+        }
+      />
+      <Select
+        value={node.cmp}
+        onValueChange={(v) =>
+          onCommit(updateCompare(prog, rungIdx, path, { cmp: v as typeof node.cmp }))
+        }
+      >
+        <SelectTrigger className="h-7 w-16 text-xs">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="eq">=</SelectItem>
+          <SelectItem value="ne">≠</SelectItem>
+          <SelectItem value="lt">&lt;</SelectItem>
+          <SelectItem value="le">≤</SelectItem>
+          <SelectItem value="gt">&gt;</SelectItem>
+          <SelectItem value="ge">≥</SelectItem>
+        </SelectContent>
+      </Select>
+      <OperandPicker
+        operand={node.right}
+        options={numericVars}
+        onChange={(right) =>
+          onCommit(updateCompare(prog, rungIdx, path, { right }))
+        }
+      />
+    </>
+  )
+}
+
+/** A single operand picker: a small select to choose var-vs-literal,
+ *  then a text input for the name / literal value. */
+function OperandPicker({
+  operand,
+  options,
+  onChange,
+}: {
+  operand: { kind: "var"; name: string } | { kind: "literal"; value: string }
+  options: string[]
+  onChange: (next: { kind: "var"; name: string } | { kind: "literal"; value: string }) => void
+}) {
+  const [draft, setDraft] = useState(
+    operand.kind === "var" ? operand.name : operand.value,
+  )
+  useEffect(() => {
+    setDraft(operand.kind === "var" ? operand.name : operand.value)
+  }, [operand])
+  const commit = (next: string) => {
+    if (operand.kind === "var" && next !== operand.name) {
+      onChange({ kind: "var", name: next })
+    } else if (operand.kind === "literal" && next !== operand.value) {
+      onChange({ kind: "literal", value: next })
+    }
+  }
+  return (
+    <span className="inline-flex gap-1">
+      <Select
+        value={operand.kind}
+        onValueChange={(k) =>
+          onChange(
+            k === "var"
+              ? { kind: "var", name: draft || options[0] || "x" }
+              : { kind: "literal", value: draft || "0" },
+          )
+        }
+      >
+        <SelectTrigger className="h-7 w-14 text-xs">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="var">var</SelectItem>
+          <SelectItem value="literal">lit</SelectItem>
+        </SelectContent>
+      </Select>
+      <input
+        type="text"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => commit(draft.trim())}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") commit(draft.trim())
+        }}
+        className="h-7 w-24 rounded border border-input bg-transparent px-2 font-mono text-xs"
+        list={
+          operand.kind === "var" ? "ld-compare-var-options" : undefined
+        }
+      />
+      {operand.kind === "var" && (
+        <datalist id="ld-compare-var-options">
+          {options.map((o) => (
+            <option key={o} value={o} />
+          ))}
+        </datalist>
+      )}
+    </span>
   )
 }
 
