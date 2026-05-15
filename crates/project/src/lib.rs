@@ -20,8 +20,8 @@ mod types;
 
 pub use errors::StoreError;
 pub use ld::{
-    LdCoil, LdCoilKind, LdComparator, LdNode, LdOperand, LdPouType, LdProgram, LdRung,
-    LdVarSection, LdVariable,
+    LdCoil, LdCoilKind, LdComparator, LdFbInput, LdNode, LdOperand, LdPouType, LdProgram,
+    LdRung, LdVarSection, LdVariable,
 };
 pub use paths::{
     default_projects_dir, default_state_path, load_last_opened, save_last_opened,

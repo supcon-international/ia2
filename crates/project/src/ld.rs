@@ -150,6 +150,71 @@ pub enum LdNode {
         cmp: LdComparator,
         right: LdOperand,
     },
+    /// Standard function block call — TON / CTU / R_TRIG / etc.
+    ///
+    /// Renders as a rectangle with named pins. The `instance` is the
+    /// FB instance variable (declared automatically in the internal
+    /// VAR block as `<instance> : <fb_type>;`). The `inputs` bind
+    /// pin names to operands (variables or literals). `output_pin`
+    /// selects which output pin's value feeds the surrounding
+    /// boolean network (typically `"Q"`, but CTUD has `QU` / `QD`).
+    ///
+    /// Transpile semantics: every FbCall in a rung produces
+    /// `<instance>(<pin> := <operand>, ...);` as a statement *before*
+    /// the rung's coil assignment. The node's position in the boolean
+    /// expression is replaced with `<instance>.<output_pin>`. See
+    /// `crates/ironplc-bridge/src/ld_transpile.rs`.
+    ///
+    /// The list of recognised `fb_type` strings (and their pin
+    /// definitions) is fixed on the front-end side in
+    /// `apps/web/src/lib/ld-fbs.ts`. The library itself is
+    /// implemented in ironplc's VM as Rust intrinsics — see
+    /// `MEMORY/graphical-languages.md` § "Standard function block
+    /// library — owned by ironplc".
+    FbCall {
+        /// FB instance variable name. Must be unique across the POU.
+        /// Declared as `<instance> : <fb_type>;` in the internal
+        /// VAR block by the transpiler — users do **not** add it to
+        /// `variables` manually.
+        instance: String,
+        /// IEC type name of the FB — `"TON"`, `"CTU"`, `"R_TRIG"`,
+        /// etc. The transpiler does not validate this string; it's
+        /// passed verbatim to the VAR declaration, so any FB type
+        /// ironplc knows about (intrinsic or user-defined) works.
+        #[serde(rename = "fb_type")]
+        fb_type: String,
+        /// Pin bindings, in the order they appear in the rendered
+        /// block. Ordered (not a map) so the JSON has a stable
+        /// representation and the renderer respects authoring order.
+        /// Missing pins fall back to ironplc's defaults
+        /// (FALSE / 0 / T#0ms depending on type).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        inputs: Vec<LdFbInput>,
+        /// Which output pin's value to read into the surrounding
+        /// boolean network. Most FBs only have one BOOL output
+        /// (`Q`); CTUD has `QU` / `QD`. R_TRIG / F_TRIG / SR / RS
+        /// use `Q1`. Default is `"Q"` if the field is omitted, but
+        /// the editor sets it explicitly.
+        #[serde(default = "default_output_pin")]
+        output_pin: String,
+    },
+}
+
+fn default_output_pin() -> String {
+    "Q".to_string()
+}
+
+/// One pin binding in an `FbCall`. Either a variable reference or an
+/// inline literal — same shape as `LdOperand` so the editor can reuse
+/// its operand picker.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LdFbInput {
+    /// Pin name on the FB — `"IN"`, `"PT"`, `"CU"`, `"R"`, etc. Case
+    /// is preserved verbatim into the generated ST.
+    pub pin: String,
+    /// What's wired to the pin.
+    pub value: LdOperand,
 }
 
 /// One operand of a comparison. Either a variable reference (string

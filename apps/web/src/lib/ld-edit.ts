@@ -23,11 +23,14 @@
 
 import type { LdCoilKind } from "@/types/generated/LdCoilKind"
 import type { LdComparator } from "@/types/generated/LdComparator"
+import type { LdFbInput } from "@/types/generated/LdFbInput"
 import type { LdNode } from "@/types/generated/LdNode"
 import type { LdOperand } from "@/types/generated/LdOperand"
 import type { LdProgram } from "@/types/generated/LdProgram"
 import type { LdVarSection } from "@/types/generated/LdVarSection"
 import type { LdVariable } from "@/types/generated/LdVariable"
+
+import { fbByType, fbInputs, fbBoolOutputs, suggestInstanceName } from "./ld-fbs"
 
 export type NodePath = readonly number[]
 
@@ -239,6 +242,81 @@ export function updateCompare(
       n.op === "compare" ? { ...n, ...patch } : n,
     ),
   }))
+}
+
+/** Patch an FbCall — used for the simple fields (instance, output_pin). */
+export function updateFbCall(
+  prog: LdProgram,
+  rungIdx: number,
+  path: NodePath,
+  patch: Partial<{ instance: string; output_pin: string }>,
+): LdProgram {
+  return updateRung(prog, rungIdx, (r) => ({
+    ...r,
+    logic: updateNode(r.logic, path, (n) =>
+      n.op === "fb_call" ? { ...n, ...patch } : n,
+    ),
+  }))
+}
+
+/** Change an FbCall's FB type. Resets inputs to the new type's pin set
+ *  (preserving existing operand values for pins of the same name) and
+ *  resets `output_pin` to the new type's first BOOL output. This is the
+ *  "swap TON → TOF" operation — they share pin names so it's lossless,
+ *  but swap TON → CTU and the inputs reset since the pin set differs. */
+export function setFbType(
+  prog: LdProgram,
+  rungIdx: number,
+  path: NodePath,
+  newType: string,
+): LdProgram {
+  return updateRung(prog, rungIdx, (r) => ({
+    ...r,
+    logic: updateNode(r.logic, path, (n) => {
+      if (n.op !== "fb_call") return n
+      const newPins = fbInputs(newType)
+      // Preserve operands for pins whose names exist in the new FB.
+      const preserved = new Map(n.inputs.map((i) => [i.pin, i.value]))
+      const inputs: LdFbInput[] = newPins.map((p) => ({
+        pin: p.pin,
+        value: preserved.get(p.pin) ?? defaultOperandFor(p.type),
+      }))
+      const outs = fbBoolOutputs(newType)
+      const output_pin = outs.includes(n.output_pin) ? n.output_pin : outs[0] ?? "Q"
+      return { ...n, fb_type: newType, inputs, output_pin }
+    }),
+  }))
+}
+
+/** Edit one of an FbCall's input pin operands. No-op if the pin name
+ *  isn't in this FB's input list. */
+export function setFbInputValue(
+  prog: LdProgram,
+  rungIdx: number,
+  path: NodePath,
+  pin: string,
+  value: LdOperand,
+): LdProgram {
+  return updateRung(prog, rungIdx, (r) => ({
+    ...r,
+    logic: updateNode(r.logic, path, (n) => {
+      if (n.op !== "fb_call") return n
+      // Replace the matching pin's value, leaving order intact.
+      const inputs = n.inputs.map((i) => (i.pin === pin ? { ...i, value } : i))
+      return { ...n, inputs }
+    }),
+  }))
+}
+
+/** Default operand for a pin of the given IEC type — sensible literal
+ *  so a freshly-inserted FB doesn't have empty inputs (which would
+ *  break the transpiler). */
+function defaultOperandFor(iecType: string): LdOperand {
+  const t = iecType.toUpperCase()
+  if (t === "TIME") return { kind: "literal", value: "T#1s" }
+  if (t === "BOOL") return { kind: "literal", value: "FALSE" }
+  // INT / DINT / REAL etc.
+  return { kind: "literal", value: "0" }
 }
 
 /**
@@ -532,6 +610,51 @@ export function newCompare(): LdNode {
   }
 }
 
+/** Construct a fresh FbCall node for the given FB type. Picks an
+ *  unused instance name (`myT1`, `myT2`, ...), populates each input
+ *  pin with a sensible default literal, and selects the FB's first
+ *  BOOL output pin. Returns the node + the instance name so the
+ *  caller can also auto-add a variable declaration if desired (we
+ *  *don't* add a var entry — the transpiler synthesises the
+ *  `inst : TYPE;` declaration). */
+export function newFbCall(
+  prog: LdProgram,
+  fbType: string,
+): { node: LdNode; instance: string } {
+  const used = new Set<string>()
+  // Collect every existing FbCall instance across the program.
+  for (const r of prog.rungs) collectInstances(r.logic, used)
+  const instance = suggestInstanceName(fbType, used)
+  const def = fbByType(fbType)
+  const inputs: LdFbInput[] = def
+    ? def.pins
+        .filter((p) => p.direction === "input")
+        .map((p) => ({ pin: p.pin, value: defaultOperandFor(p.type) }))
+    : []
+  const output_pin = fbBoolOutputs(fbType)[0] ?? "Q"
+  return {
+    node: { op: "fb_call", instance, fb_type: fbType, inputs, output_pin },
+    instance,
+  }
+}
+
+function collectInstances(node: LdNode, out: Set<string>): void {
+  switch (node.op) {
+    case "fb_call":
+      out.add(node.instance)
+      return
+    case "and":
+    case "or":
+      for (const a of node.args) collectInstances(a, out)
+      return
+    case "not":
+      collectInstances(node.arg, out)
+      return
+    default:
+      return
+  }
+}
+
 // =================================================================
 //   JSON round-trip
 // =================================================================
@@ -603,6 +726,16 @@ export function evaluateNode(
       return node.args.some((a) => evaluateNode(a, values, numerics))
     case "compare":
       return evaluateCompare(node.left, node.cmp, node.right, numerics)
+    case "fb_call": {
+      // The actual FB body runs inside ironplc's VM; we don't simulate
+      // it here. For online colouring we look up the value of the
+      // chosen output pin as a dotted variable name (`myT.Q`). Some
+      // runtimes flatten FB member access at the bytecode layer and
+      // expose only top-level vars — in that case the lookup falls
+      // through to FALSE and the block renders as "unknown", which is
+      // honest: we don't have a value to display.
+      return readBool(values, `${node.instance}.${node.output_pin}`)
+    }
   }
 }
 

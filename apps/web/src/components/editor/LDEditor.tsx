@@ -32,6 +32,7 @@ import {
   moveRung,
   newCompare,
   newContact,
+  newFbCall,
   operandText,
   parseProgram,
   readBool,
@@ -40,12 +41,16 @@ import {
   setCoilKind,
   setCoilVar,
   setContactVar,
+  setFbInputValue,
+  setFbType,
   setRungLabel,
   toggleNegated,
   updateCompare,
+  updateFbCall,
   updateVariable,
   type NodePath,
 } from "@/lib/ld-edit"
+import { fbByType, fbInputs, fbOutputs, STANDARD_FBS } from "@/lib/ld-fbs"
 import { useRuntime } from "@/state/runtime"
 import type { LdCoilKind } from "@/types/generated/LdCoilKind"
 import type { LdNode } from "@/types/generated/LdNode"
@@ -438,6 +443,14 @@ function measure(node: LdNode): LayoutBox {
       // Compare blocks render as a rectangle wide enough to fit
       // "left CMP right" (e.g. `temperature < 50.0`). 2 cells fits
       // most typical labels comfortably; longer labels just clip.
+      return { cols: 2, rows: 1 }
+    case "fb_call":
+      // FB call blocks (TON, CTU, R_TRIG, ...) render the same width
+      // as a Compare block — the rectangle shows `instance.outputPin`
+      // with a small `[TYPE]` tag above. Individual pin bindings
+      // live in the NodeDetail editor, not in the rung itself, so we
+      // don't grow vertically for input/output pin lists. This keeps
+      // mixed contact + FB rungs visually compact and consistent.
       return { cols: 2, rows: 1 }
     case "not":
       return measure(node.arg)
@@ -927,6 +940,20 @@ function RenderNode(props: NodeRenderProps) {
           onClick={click}
         />
       )
+    case "fb_call":
+      return (
+        <FbCallGlyph
+          x={x}
+          y={midY}
+          width={cols * CELL_W}
+          instance={node.instance}
+          fbType={node.fb_type}
+          outputPin={node.output_pin}
+          selected={selected}
+          powered={powered}
+          onClick={click}
+        />
+      )
     case "not": {
       if (node.arg.op === "contact") {
         return (
@@ -1403,6 +1430,126 @@ function CompareGlyph({
   )
 }
 
+function FbCallGlyph({
+  x,
+  y,
+  width,
+  instance,
+  fbType,
+  outputPin,
+  selected,
+  powered,
+  onClick,
+}: {
+  x: number
+  y: number
+  width: number
+  instance: string
+  fbType: string
+  outputPin: string
+  selected: boolean
+  powered: boolean | null
+  onClick: () => void
+}) {
+  // Same geometry as a Compare block — short lead-in / lead-out wires
+  // flanking a central rectangle. The rectangle is stylistically
+  // heavier (thicker border + a small type tag floating above) to
+  // distinguish FB calls from compare blocks at a glance.
+  const pad = 12
+  const boxX = x + pad
+  const boxW = width - pad * 2
+  const boxH = 26
+  const boxY = y - boxH / 2
+  const cls = powerClass(powered)
+  const labelClass =
+    powered === null
+      ? "fill-foreground"
+      : powered
+        ? "fill-highlight"
+        : "fill-muted-foreground"
+  return (
+    <g onClick={onClick} className="cursor-pointer">
+      {/* hit target covers full cell */}
+      <rect
+        x={x + 2}
+        y={y - 22}
+        width={width - 4}
+        height={44}
+        fill="transparent"
+      />
+      {/* FB type tag above the box — small caption so you can read "TON"
+          / "CTU" / "R_TRIG" without opening the detail bar. */}
+      <text
+        x={boxX + boxW / 2}
+        y={boxY - 3}
+        textAnchor="middle"
+        className="fill-muted-foreground"
+        fontSize="9"
+        fontFamily="ui-monospace, monospace"
+      >
+        [{fbType}]
+      </text>
+      {/* lead-in / lead-out wires */}
+      <line
+        x1={x}
+        y1={y}
+        x2={boxX}
+        y2={y}
+        className={cls}
+        strokeWidth={1}
+        vectorEffect="non-scaling-stroke"
+      />
+      <line
+        x1={boxX + boxW}
+        y1={y}
+        x2={x + width}
+        y2={y}
+        className={cls}
+        strokeWidth={1}
+        vectorEffect="non-scaling-stroke"
+      />
+      {/* the rectangle — slightly heavier border than Compare to make
+          FB blocks visually distinct in a mixed network. */}
+      <rect
+        x={boxX}
+        y={boxY}
+        width={boxW}
+        height={boxH}
+        rx={3}
+        fill="none"
+        className={cls}
+        strokeWidth={2}
+        vectorEffect="non-scaling-stroke"
+      />
+      {/* primary label: `instance.outputPin`. This is what the rest of
+          the rung is logically reading, so it deserves the most space. */}
+      <text
+        x={boxX + boxW / 2}
+        y={y + 4}
+        textAnchor="middle"
+        className={labelClass}
+        fontSize="11"
+        fontFamily="ui-monospace, monospace"
+      >
+        {instance}.{outputPin}
+      </text>
+      {selected && (
+        <rect
+          x={boxX - 2}
+          y={boxY - 2}
+          width={boxW + 4}
+          height={boxH + 4}
+          fill="none"
+          className="stroke-highlight"
+          strokeWidth={1.5}
+          vectorEffect="non-scaling-stroke"
+          rx={4}
+        />
+      )}
+    </g>
+  )
+}
+
 function CoilGlyph({
   coil,
   x,
@@ -1616,6 +1763,14 @@ function NodeDetail({
           node={node}
           onCommit={onCommit}
         />
+      ) : node.op === "fb_call" ? (
+        <FbCallEditFields
+          prog={prog}
+          rungIdx={rungIdx}
+          path={path}
+          node={node}
+          onCommit={onCommit}
+        />
       ) : node.op === "const" ? (
         <>
           <DetailLabel>const</DetailLabel>
@@ -1655,6 +1810,14 @@ function NodeDetail({
         <Plus className="size-3" />
         compare
       </ActionBtn>
+      <FbInsertPicker
+        title="Insert a function block in series to the right"
+        onPick={(type) => {
+          const { node: fb } = newFbCall(prog, type)
+          onCommit(addInSeries(prog, rungIdx, path, "after", fb))
+        }}
+        label="fb"
+      />
       <Separator />
       <ActionBtn
         onClick={() =>
@@ -1676,6 +1839,14 @@ function NodeDetail({
         <Plus className="size-3" />
         ⫽compare
       </ActionBtn>
+      <FbInsertPicker
+        title="Insert a function block in parallel below"
+        onPick={(type) => {
+          const { node: fb } = newFbCall(prog, type)
+          onCommit(addInParallel(prog, rungIdx, path, "after", fb))
+        }}
+        label="⫽fb"
+      />
       <Separator />
       <ActionBtn
         onClick={() => {
@@ -1747,6 +1918,205 @@ function CompareEditFields({
         }
       />
     </>
+  )
+}
+
+/**
+ * Editor row for an FbCall node. Three groups of controls:
+ *
+ *   1. Identity:  `[FB type ↓]  instance-name-input  → [output-pin ↓]`
+ *   2. Pins:      one row per input pin, each an OperandPicker preceded
+ *                 by the pin name.
+ *
+ * Layout is horizontal — for an FB with many pins (CTUD has 5 inputs)
+ * the row wraps; that's fine, this bar already breaks for long Compare
+ * blocks. Tight + scannable beats fancy + scrolling for editor work.
+ */
+function FbCallEditFields({
+  prog,
+  rungIdx,
+  path,
+  node,
+  onCommit,
+}: {
+  prog: LdProgram
+  rungIdx: number
+  path: NodePath
+  node: Extract<LdNode, { op: "fb_call" }>
+  onCommit: (next: LdProgram) => void
+}) {
+  const def = fbByType(node.fb_type)
+  const inputs = fbInputs(node.fb_type)
+  // BOOL outputs are the only pins that can feed the surrounding
+  // network. Most FBs only have one, but CTUD has two and we want to
+  // let the user pick.
+  const boolOutputs = fbOutputs(node.fb_type).filter((p) => p.type === "BOOL")
+  // For each input pin's OperandPicker, pre-filter variable options
+  // by IEC type so users only see relevant choices.
+  const varsByType = (iecType: string) =>
+    prog.variables.filter((v) => v.type === iecType).map((v) => v.name)
+  return (
+    <>
+      <DetailLabel>fb</DetailLabel>
+      <Select
+        value={node.fb_type}
+        onValueChange={(v) => onCommit(setFbType(prog, rungIdx, path, v))}
+      >
+        <SelectTrigger className="h-7 w-28 text-xs">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {STANDARD_FBS.map((fb) => (
+            <SelectItem key={fb.type} value={fb.type}>
+              {fb.type}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <InstanceNameInput
+        value={node.instance}
+        onCommit={(v) => onCommit(updateFbCall(prog, rungIdx, path, { instance: v }))}
+      />
+      {boolOutputs.length > 1 ? (
+        <Select
+          value={node.output_pin}
+          onValueChange={(v) =>
+            onCommit(updateFbCall(prog, rungIdx, path, { output_pin: v }))
+          }
+        >
+          <SelectTrigger className="h-7 w-16 text-xs" title="Output pin">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {boolOutputs.map((p) => (
+              <SelectItem key={p.pin} value={p.pin}>
+                .{p.pin}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      ) : (
+        <span
+          className="font-mono text-xs text-muted-foreground"
+          title={def ? def.description : "Custom FB"}
+        >
+          .{node.output_pin}
+        </span>
+      )}
+      {inputs.map((pin) => {
+        const binding = node.inputs.find((i) => i.pin === pin.pin)
+        return (
+          <span key={pin.pin} className="inline-flex items-center gap-1">
+            <span
+              className="font-mono text-[10px] text-muted-foreground"
+              title={`${pin.doc} (${pin.type})`}
+            >
+              {pin.pin}:
+            </span>
+            <OperandPicker
+              operand={
+                binding?.value ?? {
+                  kind: "literal" as const,
+                  value: pin.type === "TIME" ? "T#0ms" : "0",
+                }
+              }
+              options={varsByType(pin.type)}
+              onChange={(v) =>
+                onCommit(setFbInputValue(prog, rungIdx, path, pin.pin, v))
+              }
+            />
+          </span>
+        )
+      })}
+    </>
+  )
+}
+
+/** Compact instance-name editor — same pattern as OperandPicker's text
+ *  input: local draft, commit on blur / Enter. Validation is "must be
+ *  a legal IEC identifier"; non-conforming names get rejected silently
+ *  on commit (the caller's set never lands). */
+function InstanceNameInput({
+  value,
+  onCommit,
+}: {
+  value: string
+  onCommit: (next: string) => void
+}) {
+  const [draft, setDraft] = useState(value)
+  useEffect(() => setDraft(value), [value])
+  const commit = (next: string) => {
+    const trimmed = next.trim()
+    if (!trimmed || trimmed === value) {
+      setDraft(value)
+      return
+    }
+    // Cheap IEC identifier check — letters/digits/underscore, must not
+    // start with a digit. Anything else snaps back to the previous
+    // value rather than committing garbage.
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed)) {
+      setDraft(value)
+      return
+    }
+    onCommit(trimmed)
+  }
+  return (
+    <input
+      type="text"
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={() => commit(draft)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") commit(draft)
+      }}
+      className="h-7 w-24 rounded border border-input bg-transparent px-2 font-mono text-xs"
+      title="FB instance name"
+    />
+  )
+}
+
+/** A button-shaped Select that lets the user pick an FB type and
+ *  inserts a new FbCall when chosen. Used by the NodeDetail action
+ *  row. Renders identical-looking to ActionBtn so it slots in beside
+ *  "+ contact" / "+ compare" without visual jolt. */
+function FbInsertPicker({
+  title,
+  onPick,
+  label,
+}: {
+  title: string
+  onPick: (fbType: string) => void
+  label: string
+}) {
+  return (
+    <Select
+      // Force a remount each time the user picks something so the
+      // select returns to its placeholder state instead of getting
+      // stuck on the last picked type.
+      value=""
+      onValueChange={(v) => {
+        if (v) onPick(v)
+      }}
+    >
+      <SelectTrigger
+        className="h-7 gap-1 px-2 text-xs"
+        title={title}
+        aria-label={title}
+      >
+        <Plus className="size-3" />
+        {label}
+      </SelectTrigger>
+      <SelectContent>
+        {STANDARD_FBS.map((fb) => (
+          <SelectItem key={fb.type} value={fb.type}>
+            <span className="font-mono">{fb.type}</span>
+            <span className="ml-2 text-muted-foreground">
+              {fb.label.replace(`${fb.type} — `, "")}
+            </span>
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
   )
 }
 

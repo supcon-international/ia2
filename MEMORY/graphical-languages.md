@@ -264,6 +264,43 @@ reading the project tree for the target POU's `declarations[].name` +
 `variables` (which the bridge already extracts via
 `extract_pou_declarations`).
 
+## Standard function block library — owned by ironplc
+
+The IEC 61131-3 standard function blocks (TON / TOF / TP / SR / RS /
+CTU / CTD / CTUD / R_TRIG / F_TRIG) are **not our code**. They are
+implemented natively in ironplc's VM as Rust intrinsics:
+
+- ADR: `vendor/ironplc/specs/adrs/0003-plc-standard-function-blocks-as-intrinsics.md`
+- Native impls: `vendor/ironplc/compiler/vm/src/intrinsic.rs`
+  (`ton`, `tof`, `tp`, `sr`, `rs`, `ctu`, `ctd`, `ctud`, `r_trig`, `f_trig`)
+- VM dispatch: `vendor/ironplc/compiler/vm/src/vm.rs` matches on
+  `opcode::fb_type::{TON, TOF, ...}` and routes FB_CALL to the
+  corresponding Rust function.
+- Type signatures (pin names / types) live in
+  `vendor/ironplc/compiler/analyzer/src/stdlib.rs`.
+
+**The library is language-agnostic.** ST calls it via `myT(IN := x, PT := T#1s)`,
+LD calls it by transpiling a graphical block to that same ST call, FBD
+will do the same. We never write `TON`'s timing logic — we only write
+the **per-language front-end that emits the call**.
+
+When adding new graphical front-end support for the standard FB set:
+
+1. Front-end node: a graphical element with `(instance_name, fb_type,
+   input bindings, output pin selection)`.
+2. Transpiler: emit `instance_name : fb_type;` in VAR; emit
+   `instance_name(IN := ..., ...);` as a statement before the rung's
+   coil assignment; substitute the node's position in any boolean
+   expression with `instance_name.output_pin`.
+3. Editor metadata: hard-coded table of `{fb_type → [inputs], [outputs]}`
+   (mirroring `stdlib.rs`) so the UI knows which pins to render.
+
+The metadata table **duplicates** what's in ironplc — a deliberate
+tradeoff: the UI needs synchronous pin info without round-tripping
+through the compiler. If the standard FB set ever grows, both sides
+need updating; the duplication is small enough (~10 FBs × ~4 pins
+each) to maintain by hand.
+
 ## Source map for diagnostics
 
 ironplc emits errors keyed to line/col in the ST it received. After

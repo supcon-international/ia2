@@ -402,4 +402,184 @@ describe("evaluateNode", () => {
       ),
     ).toBe(false)
   })
+
+  it("fb_call reads instance.outputPin as a dotted variable name", () => {
+    // The evaluator can't simulate a TON itself; it reads whatever
+    // value the runtime exposes under `inst.Q` (or `.QU`, `.Q1`...).
+    // Verify both branches: missing → false (forgiving), present → use.
+    const node: LdNode = {
+      op: "fb_call",
+      instance: "myT",
+      fb_type: "TON",
+      inputs: [],
+      output_pin: "Q",
+    }
+    expect(evaluateNode(node, {})).toBe(false)
+    expect(evaluateNode(node, { "myT.Q": false })).toBe(false)
+    expect(evaluateNode(node, { "myT.Q": true })).toBe(true)
+    // Other instances or other pins must not be picked up
+    expect(evaluateNode(node, { "other.Q": true })).toBe(false)
+    expect(evaluateNode(node, { "myT.ET": true })).toBe(false)
+  })
+
+  it("fb_call participates in AND/OR like any other boolean leaf", () => {
+    // The whole point of FbCall in the expression position is that it
+    // composes with contact/compare in the same tree shape. Sanity
+    // check end-to-end.
+    const tree: LdNode = {
+      op: "and",
+      args: [
+        { op: "contact", var: "btn", negated: false },
+        {
+          op: "fb_call",
+          instance: "myT",
+          fb_type: "TON",
+          inputs: [],
+          output_pin: "Q",
+        },
+      ],
+    }
+    // btn down but timer not done → false
+    expect(evaluateNode(tree, { btn: true, "myT.Q": false })).toBe(false)
+    // btn down + timer done → true (this is the "delayed start" pattern)
+    expect(evaluateNode(tree, { btn: true, "myT.Q": true })).toBe(true)
+    // btn up overrides timer
+    expect(evaluateNode(tree, { btn: false, "myT.Q": true })).toBe(false)
+  })
+})
+
+import { newFbCall, setFbInputValue, setFbType, updateFbCall } from "./ld-edit"
+
+describe("FbCall editing", () => {
+  function seedWithFb(instanceName = "myT1"): LdProgram {
+    return {
+      name: "p",
+      pou_type: "program",
+      variables: [
+        { name: "btn", type: "BOOL", section: "input", init: null },
+        { name: "out", type: "BOOL", section: "output", init: null },
+      ],
+      rungs: [
+        {
+          id: "r0",
+          label: null,
+          logic: {
+            op: "fb_call",
+            instance: instanceName,
+            fb_type: "TON",
+            inputs: [
+              { pin: "IN", value: { kind: "var", name: "btn" } },
+              { pin: "PT", value: { kind: "literal", value: "T#3s" } },
+            ],
+            output_pin: "Q",
+          },
+          coils: [{ var: "out", kind: "standard" }],
+        },
+      ],
+    }
+  }
+
+  it("newFbCall picks a unique instance name", () => {
+    const seed = seedWithFb()
+    const { node, instance } = newFbCall(seed, "TON")
+    // `myT1` already-in-use → must be myT2
+    expect(instance).toBe("myT2")
+    expect(node.op).toBe("fb_call")
+    if (node.op === "fb_call") {
+      expect(node.fb_type).toBe("TON")
+      expect(node.output_pin).toBe("Q")
+      // Inputs are populated with sensible defaults for each pin
+      expect(node.inputs.map((i) => i.pin)).toEqual(["IN", "PT"])
+    }
+  })
+
+  it("newFbCall starts at instance suffix 1 when none in use", () => {
+    const empty: LdProgram = {
+      name: "p",
+      pou_type: "program",
+      variables: [],
+      rungs: [],
+    }
+    expect(newFbCall(empty, "CTU").instance).toBe("myCnt1")
+    expect(newFbCall(empty, "R_TRIG").instance).toBe("myEdge1")
+  })
+
+  it("setFbType TON→TOF preserves operands for shared pin names", () => {
+    // TON and TOF share IN and PT, so the user shouldn't lose what
+    // they wired when swapping FB type.
+    const next = setFbType(seedWithFb(), 0, [], "TOF")
+    const node = next.rungs[0].logic
+    expect(node.op).toBe("fb_call")
+    if (node.op === "fb_call") {
+      expect(node.fb_type).toBe("TOF")
+      expect(node.inputs).toEqual([
+        { pin: "IN", value: { kind: "var", name: "btn" } },
+        { pin: "PT", value: { kind: "literal", value: "T#3s" } },
+      ])
+      expect(node.output_pin).toBe("Q") // still valid for TOF
+    }
+  })
+
+  it("setFbType TON→CTU resets inputs to new pin set", () => {
+    const next = setFbType(seedWithFb(), 0, [], "CTU")
+    const node = next.rungs[0].logic
+    expect(node.op).toBe("fb_call")
+    if (node.op === "fb_call") {
+      expect(node.fb_type).toBe("CTU")
+      // CTU pins: CU, R, PV (TON's IN/PT do not survive)
+      expect(node.inputs.map((i) => i.pin)).toEqual(["CU", "R", "PV"])
+    }
+  })
+
+  it("setFbType CTUD→TON falls back from QD to a valid output_pin", () => {
+    const start: LdProgram = {
+      name: "p",
+      pou_type: "program",
+      variables: [],
+      rungs: [
+        {
+          id: "r",
+          label: null,
+          logic: {
+            op: "fb_call",
+            instance: "c",
+            fb_type: "CTUD",
+            inputs: [],
+            output_pin: "QD", // CTUD has both QU and QD; TON has only Q
+          },
+          coils: [{ var: "x", kind: "standard" }],
+        },
+      ],
+    }
+    const next = setFbType(start, 0, [], "TON")
+    const node = next.rungs[0].logic
+    if (node.op === "fb_call") {
+      expect(node.output_pin).toBe("Q")
+    }
+  })
+
+  it("setFbInputValue replaces only the matching pin", () => {
+    const next = setFbInputValue(
+      seedWithFb(),
+      0,
+      [],
+      "PT",
+      { kind: "literal", value: "T#10s" },
+    )
+    const node = next.rungs[0].logic
+    if (node.op === "fb_call") {
+      const pt = node.inputs.find((i) => i.pin === "PT")
+      expect(pt?.value).toEqual({ kind: "literal", value: "T#10s" })
+      // IN binding untouched
+      const inp = node.inputs.find((i) => i.pin === "IN")
+      expect(inp?.value).toEqual({ kind: "var", name: "btn" })
+    }
+  })
+
+  it("updateFbCall lets us change instance and output_pin", () => {
+    const renamed = updateFbCall(seedWithFb(), 0, [], { instance: "delay" })
+    if (renamed.rungs[0].logic.op === "fb_call") {
+      expect(renamed.rungs[0].logic.instance).toBe("delay")
+    }
+  })
 })
