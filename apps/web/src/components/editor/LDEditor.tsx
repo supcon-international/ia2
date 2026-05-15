@@ -1,43 +1,94 @@
-import { useMemo } from "react"
+import {
+  ArrowDown,
+  ArrowUp,
+  Plus,
+  RotateCw,
+  Trash2,
+  X,
+} from "lucide-react"
+import { useEffect, useMemo, useRef, useState } from "react"
 
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { cn } from "@/lib/utils"
-import type { LdCoil } from "@/types/generated/LdCoil"
+import {
+  addCoil,
+  addInParallel,
+  addInSeries,
+  addRung,
+  addVariable,
+  deleteCoil,
+  deleteNode,
+  deleteRung,
+  moveRung,
+  newContact,
+  parseProgram,
+  removeVariable,
+  serializeProgram,
+  setCoilKind,
+  setCoilVar,
+  setContactVar,
+  setRungLabel,
+  toggleNegated,
+  updateVariable,
+  type NodePath,
+} from "@/lib/ld-edit"
+import type { LdCoilKind } from "@/types/generated/LdCoilKind"
 import type { LdNode } from "@/types/generated/LdNode"
 import type { LdProgram } from "@/types/generated/LdProgram"
-import type { LdRung } from "@/types/generated/LdRung"
+import type { LdVarSection } from "@/types/generated/LdVarSection"
 
-/**
- * Read-only SVG renderer for a Ladder Diagram POU.
- *
- * Design notes:
- *
- *  - Source of truth is the JSON literal (the `.ld.json` file on disk).
- *    We parse it once on every render. If the JSON is malformed (e.g.
- *    mid-edit save) we render an inline error rather than blanking the
- *    pane, so the user can recover by editing the JSON.
- *
- *  - Layout is deterministic from the boolean tree:
- *      AND  → children laid out left-to-right ("series")
- *      OR   → children laid out top-to-bottom ("parallel"), with extra
- *             vertical rungs auto-drawn to merge the branches back
- *             onto the main horizontal rail.
- *      NOT  → inline slash through the contact (`|/|` notation).
- *      Contacts and coils are fixed-width "tiles" so columns line up
- *      across rungs vertically.
- *
- *  - No drag, no editing. Phase 1 ships read-only — authoring goes
- *    through the JSON view (see `LDJsonFallback` below for the
- *    affordance). Drag/drop authoring lands in a follow-up phase.
- */
+// =================================================================
+//   Controlled LD editor.
+//
+//   Props:
+//     value     — pretty-JSON source string (what's on disk).
+//     onChange  — called whenever the user mutates the program; the
+//                 string passed is the new pretty-JSON to save.
+//
+//   The editor parses `value` into an `LdProgram` on every render. The
+//   JSON IS the source of truth — we never hold "the program" in
+//   internal state separately, so external edits (revert, agent push,
+//   git pull) round-trip without diverging.
+//
+//   Selection lives in local state (ephemeral; lost on POU switch /
+//   page reload — fine, matches editor convention).
+// =================================================================
+
+type Selection =
+  | { kind: "node"; rungIdx: number; path: NodePath }
+  | { kind: "coil"; rungIdx: number; coilIdx: number }
+  | { kind: "rung"; rungIdx: number }
+  | { kind: "variable"; name: string }
+  | null
 
 export function LDEditor({
-  source,
+  value,
+  onChange,
+  readOnly = false,
   className,
 }: {
-  source: string
+  value: string
+  onChange: (next: string) => void
+  readOnly?: boolean
   className?: string
 }) {
-  const parsed = useMemo(() => parse(source), [source])
+  const parsed = useMemo(() => safeParse(value), [value])
+  const [sel, setSel] = useState<Selection>(null)
+
+  // Drop selection when the source changes externally (revert, POU
+  // switch). React's referential-equality check on `value` is what
+  // saves us from infinite render loops on our own onChange.
+  useEffect(() => {
+    setSel(null)
+  }, [value])
 
   if (parsed.kind === "error") {
     return (
@@ -45,85 +96,224 @@ export function LDEditor({
         <div className="border-b border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
           LD JSON parse error: {parsed.message}
         </div>
-        <LDJsonFallback source={source} />
+        <pre className="flex-1 overflow-auto bg-muted/20 px-4 py-3 font-mono text-xs leading-relaxed text-foreground">
+          {value}
+        </pre>
       </div>
     )
   }
   const prog = parsed.program
 
+  const commit = (next: LdProgram) => {
+    if (readOnly) return
+    onChange(serializeProgram(next))
+  }
+
   return (
     <div className={cn("flex h-full min-h-0 flex-col", className)}>
-      <div className="border-b border-border bg-muted/30 px-3 py-1.5 text-[11px] uppercase tracking-wider text-muted-foreground">
-        <span className="font-mono normal-case tracking-normal text-foreground">
-          {prog.name}
-        </span>
-        <span className="ml-2 rounded border border-border bg-muted/50 px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground">
-          ld
-        </span>
-        <span className="ml-2 rounded border border-border bg-muted/50 px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground">
-          {prog.pou_type === "function_block" ? "fb" : "prg"}
-        </span>
-        <span className="ml-3">
-          {prog.rungs.length} rung{prog.rungs.length === 1 ? "" : "s"} ·{" "}
-          {prog.variables.length} var{prog.variables.length === 1 ? "" : "s"}
-        </span>
-      </div>
+      <Header prog={prog} />
 
       <div className="flex-1 overflow-auto bg-background">
-        <VariableLegend variables={prog.variables} />
+        <VariablePanel
+          prog={prog}
+          selection={sel}
+          readOnly={readOnly}
+          onSelect={(name) =>
+            setSel({ kind: "variable", name })
+          }
+          onAdd={(v) => commit(addVariable(prog, v))}
+          onRemove={(name) => {
+            commit(removeVariable(prog, name))
+            if (sel?.kind === "variable" && sel.name === name) setSel(null)
+          }}
+          onUpdate={(name, patch) => commit(updateVariable(prog, name, patch))}
+        />
+
         <div className="space-y-3 px-4 py-3">
           {prog.rungs.map((rung, i) => (
-            <RungView key={rung.id} rung={rung} index={i} />
+            <RungEditor
+              key={rung.id}
+              prog={prog}
+              rung={rung}
+              rungIdx={i}
+              totalRungs={prog.rungs.length}
+              selection={sel}
+              readOnly={readOnly}
+              onSelect={setSel}
+              onCommit={commit}
+            />
           ))}
+          {!readOnly && (
+            <div className="flex justify-center pt-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => commit(addRung(prog))}
+              >
+                <Plus className="mr-1 size-3" />
+                Add rung
+              </Button>
+            </div>
+          )}
         </div>
       </div>
     </div>
   )
 }
 
-/** Tiny variables panel rendered above the rungs. We deliberately keep
- *  this compact (not a separate tab) so the relationship between var
- *  names visible on contacts and their types stays one glance away. */
-function VariableLegend({
-  variables,
+// =================================================================
+//   Top-of-pane summary
+// =================================================================
+
+function Header({ prog }: { prog: LdProgram }) {
+  return (
+    <div className="border-b border-border bg-muted/30 px-3 py-1.5 text-[11px] uppercase tracking-wider text-muted-foreground">
+      <span className="font-mono normal-case tracking-normal text-foreground">
+        {prog.name}
+      </span>
+      <span className="ml-2 rounded border border-border bg-muted/50 px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground">
+        ld
+      </span>
+      <span className="ml-2 rounded border border-border bg-muted/50 px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground">
+        {prog.pou_type === "function_block" ? "fb" : "prg"}
+      </span>
+      <span className="ml-3">
+        {prog.rungs.length} rung{prog.rungs.length === 1 ? "" : "s"} ·{" "}
+        {prog.variables.length} var{prog.variables.length === 1 ? "" : "s"}
+      </span>
+    </div>
+  )
+}
+
+// =================================================================
+//   Variable panel — three columns, inline-editable
+// =================================================================
+
+function VariablePanel({
+  prog,
+  selection,
+  readOnly,
+  onSelect,
+  onAdd,
+  onRemove,
+  onUpdate,
 }: {
-  variables: LdProgram["variables"]
+  prog: LdProgram
+  selection: Selection
+  readOnly: boolean
+  onSelect: (name: string) => void
+  onAdd: (v: LdProgram["variables"][number]) => void
+  onRemove: (name: string) => void
+  onUpdate: (name: string, patch: Partial<LdProgram["variables"][number]>) => void
 }) {
-  if (variables.length === 0) {
-    return (
-      <div className="border-b border-border px-4 py-2 text-[11px] text-muted-foreground">
-        no variables declared
-      </div>
-    )
-  }
-  const groups: Array<{ label: string; section: string }> = [
+  const groups: Array<{ label: string; section: LdVarSection }> = [
     { label: "VAR_INPUT", section: "input" },
     { label: "VAR_OUTPUT", section: "output" },
     { label: "VAR", section: "internal" },
   ]
+  const [drafting, setDrafting] = useState<{
+    section: LdVarSection
+    name: string
+    type: string
+  } | null>(null)
+
   return (
     <div className="grid grid-cols-3 gap-3 border-b border-border bg-muted/10 px-4 py-2 text-[11px]">
       {groups.map((g) => {
-        const vs = variables.filter((v) => v.section === g.section)
-        if (vs.length === 0) return null
+        const vs = prog.variables.filter((v) => v.section === g.section)
         return (
           <div key={g.section}>
-            <div className="mb-1 font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
-              {g.label}
+            <div className="mb-1 flex items-center justify-between font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+              <span>{g.label}</span>
+              {!readOnly && (
+                <button
+                  type="button"
+                  className="rounded p-0.5 hover:bg-accent/40 hover:text-foreground"
+                  onClick={() =>
+                    setDrafting({ section: g.section, name: "", type: "BOOL" })
+                  }
+                  title={`Add ${g.label}`}
+                >
+                  <Plus className="size-3" />
+                </button>
+              )}
             </div>
             <ul className="space-y-0.5">
               {vs.map((v) => (
-                <li key={v.name} className="font-mono">
+                <li
+                  key={v.name}
+                  className={cn(
+                    "group flex items-center gap-1 rounded px-1 font-mono cursor-pointer",
+                    selection?.kind === "variable" && selection.name === v.name
+                      ? "bg-highlight/15"
+                      : "hover:bg-accent/30",
+                  )}
+                  onClick={() => onSelect(v.name)}
+                >
                   <span className="text-foreground">{v.name}</span>
-                  <span className="ml-2 text-muted-foreground">{v.type}</span>
+                  <span className="text-muted-foreground">{v.type}</span>
                   {v.init !== null && v.init !== undefined && (
-                    <span className="ml-1 text-muted-foreground">
-                      := {v.init}
-                    </span>
+                    <span className="text-muted-foreground">:= {v.init}</span>
+                  )}
+                  {!readOnly && (
+                    <button
+                      type="button"
+                      className="ml-auto rounded p-0.5 opacity-0 transition-opacity hover:bg-destructive/15 hover:text-destructive group-hover:opacity-100"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        onRemove(v.name)
+                      }}
+                      title={`Remove ${v.name}`}
+                    >
+                      <X className="size-3" />
+                    </button>
                   )}
                 </li>
               ))}
+              {drafting && drafting.section === g.section && (
+                <li className="flex gap-1 rounded bg-highlight/10 px-1 py-0.5">
+                  <Input
+                    autoFocus
+                    placeholder="name"
+                    value={drafting.name}
+                    onChange={(e) =>
+                      setDrafting({ ...drafting, name: e.target.value })
+                    }
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && drafting.name.trim()) {
+                        onAdd({
+                          name: drafting.name.trim(),
+                          type: drafting.type,
+                          section: g.section,
+                          init: null,
+                        })
+                        setDrafting(null)
+                      } else if (e.key === "Escape") {
+                        setDrafting(null)
+                      }
+                    }}
+                    className="h-6 w-20 font-mono text-[11px]"
+                  />
+                  <Input
+                    placeholder="type"
+                    value={drafting.type}
+                    onChange={(e) =>
+                      setDrafting({ ...drafting, type: e.target.value })
+                    }
+                    className="h-6 w-16 font-mono text-[11px]"
+                  />
+                </li>
+              )}
             </ul>
+            {/* Editable details for the selected variable in this section. */}
+            {selection?.kind === "variable" &&
+              vs.some((v) => v.name === selection.name) && (
+                <VariableDetail
+                  prog={prog}
+                  name={selection.name}
+                  onUpdate={onUpdate}
+                />
+              )}
           </div>
         )
       })}
@@ -131,25 +321,74 @@ function VariableLegend({
   )
 }
 
+function VariableDetail({
+  prog,
+  name,
+  onUpdate,
+}: {
+  prog: LdProgram
+  name: string
+  onUpdate: (name: string, patch: Partial<LdProgram["variables"][number]>) => void
+}) {
+  const v = prog.variables.find((x) => x.name === name)
+  if (!v) return null
+  return (
+    <div className="mt-2 space-y-1 rounded border border-highlight/30 bg-highlight/5 p-1.5 text-[10px]">
+      <Row label="type">
+        <Input
+          value={v.type}
+          onChange={(e) => onUpdate(name, { type: e.target.value })}
+          className="h-6 font-mono"
+        />
+      </Row>
+      <Row label="init">
+        <Input
+          placeholder="(none)"
+          value={v.init ?? ""}
+          onChange={(e) =>
+            onUpdate(name, {
+              init: e.target.value.trim() ? e.target.value : null,
+            })
+          }
+          className="h-6 font-mono"
+        />
+      </Row>
+    </div>
+  )
+}
+
+function Row({
+  label,
+  children,
+}: {
+  label: string
+  children: React.ReactNode
+}) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="w-9 shrink-0 font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+        {label}
+      </span>
+      <div className="flex-1">{children}</div>
+    </div>
+  )
+}
+
 // =================================================================
-//   Rung rendering — recursive layout from the boolean tree
+//   Rung — toolbar + SVG canvas + inline detail overlays
 // =================================================================
 
-const CELL_W = 80
-const CELL_H = 36
+const CELL_W = 90
+const CELL_H = 44
 const RAIL_PAD = 16
-const COIL_W = 96
+const COIL_W = 100
+const TOP_PAD = 12
 
 interface LayoutBox {
-  /** Width of this sub-tree's bounding box in cells. */
   cols: number
-  /** Number of horizontal rows the sub-tree occupies. */
   rows: number
 }
 
-/** Compute the (cols, rows) bounding box for a subtree without
- *  emitting SVG. Used so the renderer knows the canvas size before
- *  recursing again to draw. */
 function measure(node: LdNode): LayoutBox {
   switch (node.op) {
     case "contact":
@@ -182,37 +421,72 @@ function measure(node: LdNode): LayoutBox {
   }
 }
 
-function RungView({ rung, index }: { rung: LdRung; index: number }) {
-  const inner = measure(rung.logic)
-  const cols = inner.cols
-  const rows = inner.rows
-  const width = RAIL_PAD * 2 + cols * CELL_W + COIL_W * Math.max(rung.coils.length, 1) + 24
-  const height = Math.max(rows, 1) * CELL_H + 16
+function RungEditor({
+  prog,
+  rung,
+  rungIdx,
+  totalRungs,
+  selection,
+  readOnly,
+  onSelect,
+  onCommit,
+}: {
+  prog: LdProgram
+  rung: LdProgram["rungs"][number]
+  rungIdx: number
+  totalRungs: number
+  selection: Selection
+  readOnly: boolean
+  onSelect: (s: Selection) => void
+  onCommit: (next: LdProgram) => void
+}) {
+  const layoutBox = measure(rung.logic)
+  const cols = layoutBox.cols
+  const rows = layoutBox.rows
+  const width =
+    RAIL_PAD * 2 +
+    cols * CELL_W +
+    COIL_W * Math.max(rung.coils.length, 1) +
+    24
+  const height = Math.max(rows, 1) * CELL_H + TOP_PAD * 2
+
+  const isSelected =
+    selection?.kind === "rung" && selection.rungIdx === rungIdx
 
   return (
-    <div className="rounded-md border border-border bg-card">
-      <div className="flex items-center justify-between border-b border-border bg-muted/20 px-2 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-        <span>
-          rung {index} · <span className="font-mono normal-case">{rung.id}</span>
-        </span>
-        {rung.label && (
-          <span className="normal-case tracking-normal text-foreground/80">
-            {rung.label}
-          </span>
-        )}
-      </div>
+    <div
+      className={cn(
+        "rounded-md border border-border bg-card",
+        isSelected && "ring-1 ring-highlight",
+      )}
+    >
+      <RungToolbar
+        rung={rung}
+        rungIdx={rungIdx}
+        totalRungs={totalRungs}
+        readOnly={readOnly}
+        onSelectRung={() => onSelect({ kind: "rung", rungIdx })}
+        onLabelChange={(label) => onCommit(setRungLabel(prog, rungIdx, label))}
+        onDelete={() => {
+          onCommit(deleteRung(prog, rungIdx))
+          onSelect(null)
+        }}
+        onMoveUp={() => onCommit(moveRung(prog, rungIdx, rungIdx - 1))}
+        onMoveDown={() => onCommit(moveRung(prog, rungIdx, rungIdx + 1))}
+        onAddCoil={() => {
+          const coilVar =
+            prog.variables.find((v) => v.section === "output")?.name ??
+            prog.variables.find((v) => v.type === "BOOL")?.name ??
+            "out"
+          onCommit(addCoil(prog, rungIdx, coilVar))
+        }}
+      />
       <svg
         viewBox={`0 0 ${width} ${height}`}
         width="100%"
         className="block"
         style={{ height }}
-        // Crisp 1 px strokes regardless of viewBox scaling.
-        // Same trick we used for the Monitor sparklines.
-        // vectorEffect lives on individual elements below.
       >
-        {/* Left + right rails. Coils sit between the right end of the
-            logic network and the right rail; the right rail closes off
-            the rung visually like a real ladder diagram. */}
         <line
           x1={RAIL_PAD}
           y1={0}
@@ -232,24 +506,27 @@ function RungView({ rung, index }: { rung: LdRung; index: number }) {
           vectorEffect="non-scaling-stroke"
         />
 
-        {/* Network output rail — the horizontal wire just to the left of
-            the first coil, where AND-series ends and any OR-branches
-            have merged back. */}
         <RenderNode
           node={rung.logic}
+          path={[]}
           x={RAIL_PAD}
-          y={8}
+          y={TOP_PAD}
           cols={cols}
           rows={rows}
+          rungIdx={rungIdx}
+          selection={selection}
+          readOnly={readOnly}
+          onSelect={onSelect}
+          onCommit={(transform) => onCommit(transform(prog))}
         />
 
-        {/* Coil(s) — one per declared coil, placed to the right of the
-            network. Multiple coils stack horizontally; aesthetically a
-            real ladder uses a "tee" off the output wire, which we
-            approximate by drawing a single horizontal wire to each. */}
         {rung.coils.map((coil, ci) => {
           const cx = RAIL_PAD + cols * CELL_W + ci * COIL_W
-          const cy = 8 + ((rows - 1) * CELL_H) / 2 + CELL_H / 2
+          const cy = TOP_PAD + ((rows - 1) * CELL_H) / 2 + CELL_H / 2
+          const sel =
+            selection?.kind === "coil" &&
+            selection.rungIdx === rungIdx &&
+            selection.coilIdx === ci
           return (
             <g key={ci}>
               <line
@@ -270,29 +547,208 @@ function RungView({ rung, index }: { rung: LdRung; index: number }) {
                 strokeWidth={1}
                 vectorEffect="non-scaling-stroke"
               />
-              <CoilGlyph coil={coil} x={cx + (COIL_W - 36) / 2} y={cy} />
+              <CoilGlyph
+                coil={coil}
+                x={cx + (COIL_W - 36) / 2}
+                y={cy}
+                selected={sel}
+                onClick={() =>
+                  onSelect(
+                    sel ? null : { kind: "coil", rungIdx, coilIdx: ci },
+                  )
+                }
+              />
             </g>
           )
         })}
+
+        {/* Empty-rung hint when no coil declared. */}
+        {rung.coils.length === 0 && (
+          <text
+            x={RAIL_PAD + cols * CELL_W + 12}
+            y={TOP_PAD + ((rows - 1) * CELL_H) / 2 + CELL_H / 2 + 4}
+            className="fill-muted-foreground"
+            fontSize="10"
+            fontFamily="ui-monospace, monospace"
+          >
+            (no coil — add one →)
+          </text>
+        )}
       </svg>
+
+      {/* Inline selection editors live below the SVG so they get
+          predictable layout / scrolling rather than fighting with SVG
+          coordinates. Trade-off: a tiny vertical jump when you select
+          versus a popup library. */}
+      <SelectionDetail
+        prog={prog}
+        rungIdx={rungIdx}
+        rung={rung}
+        selection={selection}
+        readOnly={readOnly}
+        onClose={() => onSelect(null)}
+        onCommit={onCommit}
+      />
     </div>
   )
 }
 
-function RenderNode({
-  node,
-  x,
-  y,
-  cols,
-  rows,
+function RungToolbar({
+  rung,
+  rungIdx,
+  totalRungs,
+  readOnly,
+  onSelectRung,
+  onLabelChange,
+  onDelete,
+  onMoveUp,
+  onMoveDown,
+  onAddCoil,
 }: {
+  rung: LdProgram["rungs"][number]
+  rungIdx: number
+  totalRungs: number
+  readOnly: boolean
+  onSelectRung: () => void
+  onLabelChange: (next: string | null) => void
+  onDelete: () => void
+  onMoveUp: () => void
+  onMoveDown: () => void
+  onAddCoil: () => void
+}) {
+  const [editingLabel, setEditingLabel] = useState(false)
+  return (
+    <div
+      className="flex items-center gap-2 border-b border-border bg-muted/20 px-2 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground"
+      onClick={onSelectRung}
+    >
+      <span className="shrink-0">
+        rung {rungIdx} · <span className="font-mono normal-case">{rung.id}</span>
+      </span>
+      <span className="flex-1 normal-case tracking-normal text-foreground/80">
+        {editingLabel && !readOnly ? (
+          <Input
+            autoFocus
+            defaultValue={rung.label ?? ""}
+            className="h-6 text-xs"
+            onBlur={(e) => {
+              onLabelChange(e.target.value.trim() || null)
+              setEditingLabel(false)
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                onLabelChange((e.target as HTMLInputElement).value.trim() || null)
+                setEditingLabel(false)
+              } else if (e.key === "Escape") {
+                setEditingLabel(false)
+              }
+            }}
+          />
+        ) : (
+          <span
+            className="cursor-text"
+            onClick={(e) => {
+              e.stopPropagation()
+              if (!readOnly) setEditingLabel(true)
+            }}
+          >
+            {rung.label || (
+              <span className="text-muted-foreground/60">click to label…</span>
+            )}
+          </span>
+        )}
+      </span>
+      {!readOnly && (
+        <div
+          className="flex items-center gap-0.5"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <IconBtn
+            title="Move up"
+            disabled={rungIdx === 0}
+            onClick={onMoveUp}
+          >
+            <ArrowUp className="size-3" />
+          </IconBtn>
+          <IconBtn
+            title="Move down"
+            disabled={rungIdx === totalRungs - 1}
+            onClick={onMoveDown}
+          >
+            <ArrowDown className="size-3" />
+          </IconBtn>
+          <IconBtn title="Add coil" onClick={onAddCoil}>
+            <Plus className="size-3" />
+          </IconBtn>
+          <IconBtn
+            title="Delete rung"
+            onClick={onDelete}
+            className="hover:text-destructive"
+          >
+            <Trash2 className="size-3" />
+          </IconBtn>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function IconBtn({
+  children,
+  onClick,
+  disabled,
+  title,
+  className,
+}: {
+  children: React.ReactNode
+  onClick?: () => void
+  disabled?: boolean
+  title?: string
+  className?: string
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      className={cn(
+        "rounded p-0.5 text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-30",
+        className,
+      )}
+    >
+      {children}
+    </button>
+  )
+}
+
+// =================================================================
+//   SVG node renderer (with click handlers)
+// =================================================================
+
+interface NodeRenderProps {
   node: LdNode
+  path: NodePath
   x: number
   y: number
   cols: number
   rows: number
-}) {
+  rungIdx: number
+  selection: Selection
+  readOnly: boolean
+  onSelect: (s: Selection) => void
+  onCommit: (transform: (prog: LdProgram) => LdProgram) => void
+}
+
+function RenderNode(props: NodeRenderProps) {
+  const { node, path, x, y, cols, rows, rungIdx, selection, onSelect } = props
   const midY = y + ((rows - 1) * CELL_H) / 2 + CELL_H / 2
+  const selected =
+    selection?.kind === "node" &&
+    selection.rungIdx === rungIdx &&
+    pathsEqual(selection.path, path)
+
+  const click = () => onSelect(selected ? null : { kind: "node", rungIdx, path })
 
   switch (node.op) {
     case "contact":
@@ -303,17 +759,22 @@ function RenderNode({
           width={CELL_W}
           name={node.var}
           negated={node.negated}
+          selected={selected}
+          onClick={click}
         />
       )
     case "const":
       return (
-        <ConstGlyph x={x} y={midY} width={CELL_W} value={node.value} />
+        <ConstGlyph
+          x={x}
+          y={midY}
+          width={CELL_W}
+          value={node.value}
+          selected={selected}
+          onClick={click}
+        />
       )
     case "not": {
-      // Render the wrapped node with an outer "NOT" annotation. For a
-      // bare contact, prefer the inline negated-contact glyph instead
-      // — visually the same and cheaper. For deeper subtrees, wrap with
-      // a dashed box labelled "NOT".
       if (node.arg.op === "contact") {
         return (
           <ContactGlyph
@@ -322,13 +783,21 @@ function RenderNode({
             width={CELL_W}
             name={node.arg.var}
             negated={!node.arg.negated}
+            selected={selected}
+            onClick={click}
           />
         )
       }
       const m = measure(node.arg)
       return (
         <g>
-          <RenderNode node={node.arg} x={x} y={y} cols={m.cols} rows={m.rows} />
+          <RenderNode
+            {...props}
+            node={node.arg}
+            path={[...path, 0]}
+            cols={m.cols}
+            rows={m.rows}
+          />
           <rect
             x={x + 2}
             y={y + 2}
@@ -353,60 +822,70 @@ function RenderNode({
       )
     }
     case "and": {
-      // Lay children left-to-right, share the same vertical band.
       if (node.args.length === 0) {
-        return <ConstGlyph x={x} y={midY} width={CELL_W} value={true} />
+        return (
+          <ConstGlyph
+            x={x}
+            y={midY}
+            width={CELL_W}
+            value={true}
+            selected={selected}
+            onClick={click}
+          />
+        )
       }
       let cursor = x
-      return (
-        <g>
-          {node.args.map((child, i) => {
-            const m = measure(child)
-            const out = (
-              <RenderNode
-                key={i}
-                node={child}
-                x={cursor}
-                y={y}
-                cols={m.cols}
-                rows={rows}
-              />
-            )
-            cursor += m.cols * CELL_W
-            return out
-          })}
-        </g>
-      )
+      const elems: React.ReactNode[] = []
+      node.args.forEach((child, i) => {
+        const m = measure(child)
+        elems.push(
+          <RenderNode
+            key={i}
+            {...props}
+            node={child}
+            path={[...path, i]}
+            x={cursor}
+            cols={m.cols}
+            rows={rows}
+          />,
+        )
+        cursor += m.cols * CELL_W
+      })
+      return <g>{elems}</g>
     }
     case "or": {
-      // Stack children top-to-bottom; each branch occupies its own
-      // horizontal lane. Vertical short-circuit wires connect the
-      // start and end of each lane back to the rail above/below.
       if (node.args.length === 0) {
-        return <ConstGlyph x={x} y={midY} width={CELL_W} value={false} />
+        return (
+          <ConstGlyph
+            x={x}
+            y={midY}
+            width={CELL_W}
+            value={false}
+            selected={selected}
+            onClick={click}
+          />
+        )
       }
       let rowCursor = 0
       const elems: React.ReactNode[] = []
       const inX = x
       const outX = x + cols * CELL_W
-      // Stub-in: extend lane wires so all child sub-trees are the same
-      // width as `cols` (pad shorter branches with a horizontal line).
-      for (let i = 0; i < node.args.length; i++) {
-        const child = node.args[i]
+      node.args.forEach((child, i) => {
         const m = measure(child)
         const laneY = y + rowCursor * CELL_H
         const laneMidY = laneY + ((m.rows - 1) * CELL_H) / 2 + CELL_H / 2
         elems.push(
           <RenderNode
             key={i}
+            {...props}
             node={child}
+            path={[...path, i]}
             x={inX}
             y={laneY}
             cols={cols}
             rows={m.rows}
           />,
         )
-        // Pad the lane out to `cols` if the sub-tree is narrower.
         if (m.cols < cols) {
           elems.push(
             <line
@@ -422,8 +901,7 @@ function RenderNode({
           )
         }
         rowCursor += m.rows
-      }
-      // Vertical merge wires on left and right of the OR group.
+      })
       const firstY = y + CELL_H / 2
       const lastChildRows = measure(node.args[node.args.length - 1]).rows
       const lastY =
@@ -455,25 +933,40 @@ function RenderNode({
   }
 }
 
-/** Normally-open (`-| |-`) and normally-closed (`-|/|-`) contact. */
+// =================================================================
+//   Glyphs (with selection ring + click handlers)
+// =================================================================
+
 function ContactGlyph({
   x,
   y,
   width,
   name,
   negated,
+  selected,
+  onClick,
 }: {
   x: number
   y: number
   width: number
   name: string
   negated: boolean
+  selected: boolean
+  onClick: () => void
 }) {
   const cx = x + width / 2
   const half = 10
   return (
-    <g>
-      {/* horizontal wires */}
+    <g onClick={onClick} className="cursor-pointer">
+      {/* Wider invisible hit target so small contact glyphs are easy
+          to click on a touchpad. */}
+      <rect
+        x={x + 4}
+        y={y - 18}
+        width={width - 8}
+        height={36}
+        fill="transparent"
+      />
       <line
         x1={x}
         y1={y}
@@ -492,7 +985,6 @@ function ContactGlyph({
         strokeWidth={1}
         vectorEffect="non-scaling-stroke"
       />
-      {/* contact bars */}
       <line
         x1={cx - half}
         y1={y - 9}
@@ -522,7 +1014,6 @@ function ContactGlyph({
           vectorEffect="non-scaling-stroke"
         />
       )}
-      {/* label */}
       <text
         x={cx}
         y={y - 14}
@@ -533,24 +1024,47 @@ function ContactGlyph({
       >
         {name}
       </text>
+      {selected && (
+        <rect
+          x={cx - half - 3}
+          y={y - 12}
+          width={half * 2 + 6}
+          height={24}
+          fill="none"
+          className="stroke-highlight"
+          strokeWidth={1.5}
+          vectorEffect="non-scaling-stroke"
+          rx={2}
+        />
+      )}
     </g>
   )
 }
 
-/** Always-passing (TRUE) or always-blocking (FALSE) literal. */
 function ConstGlyph({
   x,
   y,
   width,
   value,
+  selected,
+  onClick,
 }: {
   x: number
   y: number
   width: number
   value: boolean
+  selected: boolean
+  onClick: () => void
 }) {
   return (
-    <g>
+    <g onClick={onClick} className="cursor-pointer">
+      <rect
+        x={x}
+        y={y - 14}
+        width={width}
+        height={28}
+        fill="transparent"
+      />
       <line
         x1={x}
         y1={y}
@@ -571,20 +1085,50 @@ function ConstGlyph({
       >
         {value ? "TRUE" : "FALSE"}
       </text>
+      {selected && (
+        <rect
+          x={x + 4}
+          y={y - 12}
+          width={width - 8}
+          height={24}
+          fill="none"
+          className="stroke-highlight"
+          strokeWidth={1.5}
+          vectorEffect="non-scaling-stroke"
+          rx={2}
+        />
+      )}
     </g>
   )
 }
 
-/** Output coil glyph. Round parens for standard `-( )-`, `S` for set,
- *  `R` for reset. Variable name is rendered above. */
-function CoilGlyph({ coil, x, y }: { coil: LdCoil; x: number; y: number }) {
+function CoilGlyph({
+  coil,
+  x,
+  y,
+  selected,
+  onClick,
+}: {
+  coil: LdProgram["rungs"][number]["coils"][number]
+  x: number
+  y: number
+  selected: boolean
+  onClick: () => void
+}) {
   const w = 36
   const r = 10
   const cx = x + w / 2
   const inner =
     coil.kind === "set" ? "S" : coil.kind === "reset" ? "R" : null
   return (
-    <g>
+    <g onClick={onClick} className="cursor-pointer">
+      <rect
+        x={x - 4}
+        y={y - 18}
+        width={w + 8}
+        height={36}
+        fill="transparent"
+      />
       <text
         x={cx}
         y={y - 14}
@@ -595,7 +1139,6 @@ function CoilGlyph({ coil, x, y }: { coil: LdCoil; x: number; y: number }) {
       >
         {coil.var}
       </text>
-      {/* parentheses: two arcs facing each other */}
       <path
         d={`M ${cx - r} ${y - r} A ${r * 1.2} ${r * 1.2} 0 0 0 ${cx - r} ${y + r}`}
         fill="none"
@@ -623,33 +1166,401 @@ function CoilGlyph({ coil, x, y }: { coil: LdCoil; x: number; y: number }) {
           {inner}
         </text>
       )}
+      {selected && (
+        <rect
+          x={cx - r - 4}
+          y={y - r - 4}
+          width={(r + 4) * 2}
+          height={(r + 4) * 2}
+          fill="none"
+          className="stroke-highlight"
+          strokeWidth={1.5}
+          vectorEffect="non-scaling-stroke"
+          rx={2}
+        />
+      )}
     </g>
   )
 }
 
 // =================================================================
-//   JSON fallback — visible when parsing fails or as an escape hatch.
+//   Selection detail panel (below the SVG)
+//
+//   When something is selected, an inline editor strip drops in
+//   between the rung canvas and the next rung. Contains all the
+//   actions you'd otherwise hide in popup menus / right-click.
 // =================================================================
 
-function LDJsonFallback({ source }: { source: string }) {
+function SelectionDetail({
+  prog,
+  rungIdx,
+  rung,
+  selection,
+  readOnly,
+  onClose,
+  onCommit,
+}: {
+  prog: LdProgram
+  rungIdx: number
+  rung: LdProgram["rungs"][number]
+  selection: Selection
+  readOnly: boolean
+  onClose: () => void
+  onCommit: (next: LdProgram) => void
+}) {
+  if (!selection || readOnly) return null
+  if (selection.kind === "node" && selection.rungIdx === rungIdx) {
+    return (
+      <NodeDetail
+        prog={prog}
+        rungIdx={rungIdx}
+        rung={rung}
+        path={selection.path}
+        onClose={onClose}
+        onCommit={onCommit}
+      />
+    )
+  }
+  if (selection.kind === "coil" && selection.rungIdx === rungIdx) {
+    return (
+      <CoilDetail
+        prog={prog}
+        rungIdx={rungIdx}
+        rung={rung}
+        coilIdx={selection.coilIdx}
+        onClose={onClose}
+        onCommit={onCommit}
+      />
+    )
+  }
+  return null
+}
+
+function NodeDetail({
+  prog,
+  rungIdx,
+  rung,
+  path,
+  onClose,
+  onCommit,
+}: {
+  prog: LdProgram
+  rungIdx: number
+  rung: LdProgram["rungs"][number]
+  path: NodePath
+  onClose: () => void
+  onCommit: (next: LdProgram) => void
+}) {
+  // Walk the path to find the selected node. Defensive against
+  // stale selections that survive a structural edit by one frame.
+  let node: LdNode | undefined = rung.logic
+  try {
+    for (const step of path) {
+      if (!node) break
+      if (node.op === "and" || node.op === "or") node = node.args[step]
+      else if (node.op === "not") node = node.arg
+      else node = undefined
+    }
+  } catch {
+    node = undefined
+  }
+  if (!node) return null
+
+  const boolVars = prog.variables
+    .filter((v) => v.type === "BOOL" || v.type === "")
+    .map((v) => v.name)
+
   return (
-    <pre className="flex-1 overflow-auto bg-muted/20 px-4 py-3 font-mono text-xs leading-relaxed text-foreground">
-      {source}
-    </pre>
+    <DetailBar onClose={onClose}>
+      {node.op === "contact" ? (
+        <>
+          <DetailLabel>contact</DetailLabel>
+          <VarPicker
+            value={node.var}
+            options={boolVars}
+            onChange={(v) => onCommit(setContactVar(prog, rungIdx, path, v))}
+          />
+          <ToggleBtn
+            active={node.negated}
+            onClick={() => onCommit(toggleNegated(prog, rungIdx, path))}
+            title="Toggle normally-closed"
+          >
+            ¬ negate
+          </ToggleBtn>
+        </>
+      ) : node.op === "const" ? (
+        <>
+          <DetailLabel>const</DetailLabel>
+          <span className="font-mono text-xs">
+            {node.value ? "TRUE" : "FALSE"}
+          </span>
+        </>
+      ) : (
+        <>
+          <DetailLabel>{node.op}</DetailLabel>
+          <span className="text-xs text-muted-foreground">
+            {"args" in node && Array.isArray(node.args)
+              ? `${node.args.length} branches`
+              : "1 child"}
+          </span>
+        </>
+      )}
+
+      <Separator />
+      <ActionBtn
+        onClick={() =>
+          onCommit(
+            addInSeries(prog, rungIdx, path, "after", newContact()),
+          )
+        }
+        title="Insert a contact in series to the right"
+      >
+        <Plus className="size-3" />
+        series
+      </ActionBtn>
+      <ActionBtn
+        onClick={() =>
+          onCommit(
+            addInParallel(prog, rungIdx, path, "after", newContact()),
+          )
+        }
+        title="Insert a contact in parallel below"
+      >
+        <Plus className="size-3" />
+        parallel
+      </ActionBtn>
+      <Separator />
+      <ActionBtn
+        onClick={() => {
+          onCommit(deleteNode(prog, rungIdx, path))
+          onClose()
+        }}
+        title="Delete this element"
+        destructive
+      >
+        <Trash2 className="size-3" />
+        delete
+      </ActionBtn>
+    </DetailBar>
+  )
+}
+
+function CoilDetail({
+  prog,
+  rungIdx,
+  rung,
+  coilIdx,
+  onClose,
+  onCommit,
+}: {
+  prog: LdProgram
+  rungIdx: number
+  rung: LdProgram["rungs"][number]
+  coilIdx: number
+  onClose: () => void
+  onCommit: (next: LdProgram) => void
+}) {
+  const coil = rung.coils[coilIdx]
+  if (!coil) return null
+  const candidates = prog.variables
+    .filter((v) => v.type === "BOOL")
+    .map((v) => v.name)
+  return (
+    <DetailBar onClose={onClose}>
+      <DetailLabel>coil</DetailLabel>
+      <VarPicker
+        value={coil.var}
+        options={candidates}
+        onChange={(v) => onCommit(setCoilVar(prog, rungIdx, coilIdx, v))}
+      />
+      <Select
+        value={coil.kind}
+        onValueChange={(v) =>
+          onCommit(setCoilKind(prog, rungIdx, coilIdx, v as LdCoilKind))
+        }
+      >
+        <SelectTrigger className="h-7 w-32 text-xs">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="standard">standard ( )</SelectItem>
+          <SelectItem value="set">set (S)</SelectItem>
+          <SelectItem value="reset">reset (R)</SelectItem>
+        </SelectContent>
+      </Select>
+      <Separator />
+      <ActionBtn
+        onClick={() => {
+          onCommit(deleteCoil(prog, rungIdx, coilIdx))
+          onClose()
+        }}
+        title="Remove this coil"
+        destructive
+      >
+        <Trash2 className="size-3" />
+        delete
+      </ActionBtn>
+    </DetailBar>
   )
 }
 
 // =================================================================
-//   Parsing helpers
+//   Detail-bar primitives
+// =================================================================
+
+function DetailBar({
+  onClose,
+  children,
+}: {
+  onClose: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <div className="flex items-center gap-2 border-t border-highlight/30 bg-highlight/5 px-3 py-1.5 text-xs">
+      {children}
+      <button
+        type="button"
+        onClick={onClose}
+        className="ml-auto rounded p-0.5 text-muted-foreground hover:bg-accent/40 hover:text-foreground"
+        title="Close"
+      >
+        <X className="size-3" />
+      </button>
+    </div>
+  )
+}
+
+function DetailLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+      {children}
+    </span>
+  )
+}
+
+function Separator() {
+  return <span className="text-muted-foreground/30">·</span>
+}
+
+function ActionBtn({
+  onClick,
+  title,
+  destructive,
+  children,
+}: {
+  onClick: () => void
+  title?: string
+  destructive?: boolean
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      className={cn(
+        "inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider transition-colors",
+        destructive
+          ? "text-destructive hover:bg-destructive/10"
+          : "text-foreground hover:bg-accent/40",
+      )}
+    >
+      {children}
+    </button>
+  )
+}
+
+function ToggleBtn({
+  active,
+  onClick,
+  title,
+  children,
+}: {
+  active: boolean
+  onClick: () => void
+  title?: string
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      className={cn(
+        "inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider transition-colors",
+        active
+          ? "bg-highlight/15 text-highlight"
+          : "text-muted-foreground hover:bg-accent/40 hover:text-foreground",
+      )}
+    >
+      {children}
+    </button>
+  )
+}
+
+/** Combo input + datalist. Avoids the overhead of a real Select
+ *  for the common case ("type the variable name and pick a suggestion
+ *  from declared variables").
+ *
+ *  Internal draft state so typing doesn't trigger a JSON serialise /
+ *  parse round-trip on every keystroke. We commit on blur / Enter,
+ *  and reset the draft when `value` changes externally (e.g. user
+ *  selects a different element). */
+function VarPicker({
+  value,
+  options,
+  onChange,
+}: {
+  value: string
+  options: string[]
+  onChange: (v: string) => void
+}) {
+  const id = useRef(`varpicker-${Math.random().toString(36).slice(2, 8)}`)
+  const [draft, setDraft] = useState(value)
+  useEffect(() => {
+    setDraft(value)
+  }, [value])
+  return (
+    <>
+      <input
+        list={id.current}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => {
+          const next = draft.trim()
+          if (next && next !== value) onChange(next)
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            const next = draft.trim()
+            if (next && next !== value) onChange(next)
+          } else if (e.key === "Escape") {
+            setDraft(value)
+            ;(e.target as HTMLInputElement).blur()
+          }
+        }}
+        className="h-7 w-32 rounded border border-input bg-transparent px-2 font-mono text-xs"
+      />
+      <datalist id={id.current}>
+        {options.map((o) => (
+          <option key={o} value={o} />
+        ))}
+      </datalist>
+    </>
+  )
+}
+
+// =================================================================
+//   Helpers
 // =================================================================
 
 type Parsed =
   | { kind: "ok"; program: LdProgram }
   | { kind: "error"; message: string }
 
-function parse(source: string): Parsed {
+function safeParse(source: string): Parsed {
   try {
-    const program = JSON.parse(source) as LdProgram
+    const program = parseProgram(source)
     if (!program || typeof program !== "object") {
       return { kind: "error", message: "top-level value is not an object" }
     }
@@ -661,3 +1572,13 @@ function parse(source: string): Parsed {
     return { kind: "error", message: String(e) }
   }
 }
+
+function pathsEqual(a: NodePath, b: NodePath) {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+  return true
+}
+
+/** Mark `RotateCw` as referenced so its tree-shake doesn't whine —
+ *  we ship the icon for a future "rotate / swap" action. */
+void RotateCw

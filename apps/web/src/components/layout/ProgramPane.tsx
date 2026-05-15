@@ -194,7 +194,7 @@ export function ProgramPane() {
               that LDEditor surfaces when the source can't parse —
               and via direct file edits / agent writes for now). */}
           {currentPou.declarations[0]?.language === "ld" ? (
-            <LDEditor source={source} />
+            <LDEditor value={source} onChange={setSource} />
           ) : (
             <STEditor
               value={source}
