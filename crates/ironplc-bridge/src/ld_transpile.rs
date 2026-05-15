@@ -48,8 +48,20 @@ pub fn transpile_to_st(prog: &LdProgram) -> Result<String, BridgeError> {
         LdPouType::FunctionBlock => ("FUNCTION_BLOCK", "END_FUNCTION_BLOCK"),
     };
 
+    // Pre-scan: any rung with >1 coil needs a BOOL temporary so we
+    // evaluate the network exactly once and feed all coils from it.
+    // ironplc requires every identifier to be declared in a VAR block
+    // before use, so we collect the temp names up-front and emit them
+    // as internal variables in the VAR section.
+    let rung_temps: Vec<String> = prog
+        .rungs
+        .iter()
+        .filter(|r| r.coils.len() > 1)
+        .map(|r| format!("__rung_{}", sanitise_ident(&r.id)))
+        .collect();
+
     let _ = writeln!(out, "{} {}", head, prog.name);
-    write_variable_blocks(&mut out, &prog.variables);
+    write_variable_blocks(&mut out, &prog.variables, &rung_temps);
     out.push('\n');
 
     for (idx, rung) in prog.rungs.iter().enumerate() {
@@ -60,7 +72,11 @@ pub fn transpile_to_st(prog: &LdProgram) -> Result<String, BridgeError> {
     Ok(out)
 }
 
-fn write_variable_blocks(out: &mut String, vars: &[LdVariable]) {
+fn write_variable_blocks(
+    out: &mut String,
+    vars: &[LdVariable],
+    rung_temps: &[String],
+) {
     // IEC requires VAR blocks in a specific order with no duplicates,
     // and ironplc's `allow_empty_var_blocks` already lets us emit
     // empty sections — so we always emit all three for shape stability.
@@ -78,6 +94,15 @@ fn write_variable_blocks(out: &mut String, vars: &[LdVariable]) {
                 .map(|s| format!(" := {s}"))
                 .unwrap_or_default();
             let _ = writeln!(out, "        {} : {}{};", v.name, v.type_name, init);
+        }
+        // The VAR block also carries multi-coil rung temporaries
+        // (`__rung_<id> : BOOL`). They're transpiler bookkeeping;
+        // we keep them in the same block as the user's internal vars
+        // because ironplc parses one VAR section per kind.
+        if section == LdVarSection::Internal {
+            for tmp in rung_temps {
+                let _ = writeln!(out, "        {tmp} : BOOL;");
+            }
         }
         out.push_str("    END_VAR\n");
     }
@@ -374,6 +399,63 @@ mod tests {
     fn empty_and_or_collapse_to_identity() {
         assert_eq!(render_node(&LdNode::And { args: vec![] }).unwrap(), "TRUE");
         assert_eq!(render_node(&LdNode::Or { args: vec![] }).unwrap(), "FALSE");
+    }
+
+    #[test]
+    fn multiple_coil_rung_declares_temporary_in_var_block() {
+        // Regression: ironplc refuses ST that references an undeclared
+        // identifier, so the `__rung_X` temp the transpiler synthesises
+        // for multi-coil rungs must show up in the VAR section.
+        let prog = LdProgram {
+            name: "p".into(),
+            pou_type: LdPouType::Program,
+            variables: vec![
+                LdVariable {
+                    name: "a".into(),
+                    type_name: "BOOL".into(),
+                    section: LdVarSection::Input,
+                    init: None,
+                },
+                LdVariable {
+                    name: "x".into(),
+                    type_name: "BOOL".into(),
+                    section: LdVarSection::Output,
+                    init: None,
+                },
+                LdVariable {
+                    name: "y".into(),
+                    type_name: "BOOL".into(),
+                    section: LdVarSection::Output,
+                    init: None,
+                },
+            ],
+            rungs: vec![LdRung {
+                id: "multi".into(),
+                label: None,
+                logic: LdNode::Contact {
+                    var: "a".into(),
+                    negated: false,
+                },
+                coils: vec![
+                    LdCoil { var: "x".into(), kind: LdCoilKind::Standard },
+                    LdCoil { var: "y".into(), kind: LdCoilKind::Standard },
+                ],
+            }],
+        };
+        let st = transpile_to_st(&prog).unwrap();
+        // The temp must be declared in VAR before the rung uses it.
+        let temp_decl_pos = st.find("__rung_multi : BOOL").expect("temp must be declared");
+        let temp_use_pos = st.find("__rung_multi := a").expect("temp must be used");
+        assert!(
+            temp_decl_pos < temp_use_pos,
+            "temp declaration must precede its use:\n{st}"
+        );
+        // And it must sit inside the internal VAR block, not VAR_INPUT/OUTPUT.
+        let internal_var_pos = st.rfind("    VAR\n").expect("internal VAR block present");
+        assert!(
+            temp_decl_pos > internal_var_pos,
+            "temp must be inside the internal VAR block, not the input/output ones"
+        );
     }
 
     #[test]
