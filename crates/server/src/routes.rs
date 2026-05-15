@@ -662,6 +662,7 @@ pub async fn check(
     // need a second LSP-style channel.
     let language = match q.language.as_deref().map(str::to_ascii_lowercase).as_deref() {
         Some("ld") => PouLanguage::Ld,
+        Some("fbd") => PouLanguage::Fbd,
         _ => PouLanguage::St,
     };
     Json(ironplc_bridge::check_pou_source(&body, language))

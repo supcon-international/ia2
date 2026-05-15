@@ -1,6 +1,7 @@
 import { PanelRight, Play, Plus, RotateCcw, Save, Square } from "lucide-react"
 import { useState } from "react"
 
+import { FBDEditor } from "@/components/editor/FBDEditor"
 import { LDEditor } from "@/components/editor/LDEditor"
 import { STEditor } from "@/components/editor/STEditor"
 import { cn } from "@/lib/utils"
@@ -188,13 +189,18 @@ export function ProgramPane() {
       )}
       <div className="flex min-h-0 flex-1">
         <div className="min-h-0 min-w-0 flex-1">
-          {/* Editor dispatch by POU language. ST keeps the Monaco
-              editor; LD renders a read-only SVG ladder (authoring
-              still goes through the JSON, via the in-editor fallback
-              that LDEditor surfaces when the source can't parse —
-              and via direct file edits / agent writes for now). */}
+          {/* Editor dispatch by POU language:
+              - ST  → Monaco editor (full authoring).
+              - LD  → SVG ladder editor (full graphical authoring +
+                      JSON fallback when the file is mid-edit).
+              - FBD → SVG block diagram (read-only viewer for now —
+                      authoring still goes through the JSON, with
+                      `cs check` / `cs transpile` as the agent loop).
+                      Phase 3c will add drag-to-place editing. */}
           {currentPou.declarations[0]?.language === "ld" ? (
             <LDEditor value={source} onChange={setSource} />
+          ) : currentPou.declarations[0]?.language === "fbd" ? (
+            <FBDEditor value={source} onChange={setSource} />
           ) : (
             <STEditor
               value={source}
