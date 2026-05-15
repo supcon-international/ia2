@@ -219,6 +219,10 @@ fn strip_any_configuration(source: &str) -> String {
 /// One diagnostic in source-positioned form (1-indexed line/column for the
 /// Monaco editor). Severity is "error" for now — ironplc emits a single
 /// diagnostic stream without warning/info distinction at this layer.
+///
+/// For LD POUs, `ld_location` carries the resolved LD element the
+/// diagnostic originated from (rung / coil / FB call / variable). It's
+/// `None` for ST POUs and for LD diagnostics on boilerplate lines.
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct CheckDiagnostic {
@@ -229,12 +233,81 @@ pub struct CheckDiagnostic {
     pub start_column: u32,
     pub end_line: u32,
     pub end_column: u32,
+    /// For LD POUs only: which LD element this diagnostic originated
+    /// from. `None` for ST POUs and for diagnostics on boilerplate
+    /// lines (PROGRAM header, END_VAR, etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ld_location: Option<ld_transpile::LdLocation>,
 }
 
 /// Parse + analyse a Structured Text source and return all diagnostics
 /// (syntax errors, type errors, undeclared identifiers, etc.). Does NOT run
 /// codegen — this is the fast path for editor squiggles.
 pub fn check(source: &str) -> Vec<CheckDiagnostic> {
+    check_inner(source, None)
+}
+
+/// Like `check`, but for a graphical-language POU: parses the source,
+/// transpiles to ST, runs the ironplc pipeline, then maps each
+/// diagnostic's line back to the originating LD element. ST-language
+/// POUs should still go through `check` — this entry is only useful
+/// when the source on disk is graphical JSON, not text.
+///
+/// Returns a single synthetic diagnostic if the JSON itself doesn't
+/// parse (so the editor still gets a squiggle pointing at the broken
+/// document rather than silent failure).
+pub fn check_pou_source(
+    source: &str,
+    language: project::PouLanguage,
+) -> Vec<CheckDiagnostic> {
+    match language {
+        project::PouLanguage::St => check(source),
+        project::PouLanguage::Ld => {
+            let prog: project::LdProgram = match serde_json::from_str(source) {
+                Ok(p) => p,
+                Err(e) => {
+                    // Hand-rolled diagnostic — ironplc never saw this
+                    // source so it doesn't have one for us to wrap.
+                    return vec![CheckDiagnostic {
+                        severity: "error".into(),
+                        code: "LD-PARSE".into(),
+                        message: format!("Invalid LD JSON: {e}"),
+                        start_line: e.line() as u32,
+                        start_column: e.column() as u32,
+                        end_line: e.line() as u32,
+                        end_column: (e.column() as u32).saturating_add(1),
+                        ld_location: None,
+                    }];
+                }
+            };
+            let (st, map) = match ld_transpile::transpile_to_st_with_map(&prog) {
+                Ok(pair) => pair,
+                Err(e) => {
+                    return vec![CheckDiagnostic {
+                        severity: "error".into(),
+                        code: "LD-TRANSPILE".into(),
+                        message: format!("{e:?}"),
+                        start_line: 1,
+                        start_column: 1,
+                        end_line: 1,
+                        end_column: 1,
+                        ld_location: None,
+                    }];
+                }
+            };
+            check_inner(&st, Some(&map))
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Shared implementation of `check` / `check_pou_source`. If `map` is
+/// present, every produced diagnostic is annotated with the LD element
+/// whose generated ST line was reported.
+fn check_inner(
+    source: &str,
+    map: Option<&ld_transpile::LdSourceMap>,
+) -> Vec<CheckDiagnostic> {
     let file_id = FileId::default();
     // `allow_empty_var_blocks` mirrors the ironplc CLI flag. POU templates
     // we ship intentionally start with empty VAR / VAR_INPUT / VAR_OUTPUT
@@ -244,18 +317,23 @@ pub fn check(source: &str) -> Vec<CheckDiagnostic> {
 
     let library = match ironplc_parser::parse_program(source, &file_id, &options) {
         Ok(l) => l,
-        Err(d) => return vec![diag_to_dto(&d, source)],
+        Err(d) => return vec![diag_to_dto_with_map(&d, source, map)],
     };
 
     let (_, context) = match ironplc_analyzer::stages::analyze(&[&library], &options) {
         Ok(t) => t,
-        Err(ds) => return ds.iter().map(|d| diag_to_dto(d, source)).collect(),
+        Err(ds) => {
+            return ds
+                .iter()
+                .map(|d| diag_to_dto_with_map(d, source, map))
+                .collect()
+        }
     };
 
     context
         .diagnostics()
         .iter()
-        .map(|d| diag_to_dto(d, source))
+        .map(|d| diag_to_dto_with_map(d, source, map))
         .collect()
 }
 
@@ -415,16 +493,30 @@ fn init_type_name(init: &InitialValueAssignmentKind) -> String {
     }
 }
 
-fn diag_to_dto(d: &Diagnostic, source: &str) -> CheckDiagnostic {
+/// Convert an ironplc diagnostic to our wire DTO, additionally looking
+/// up the LD origin via `map` when present. Diagnostics on lines that
+/// don't correspond to an LD element (boilerplate, synthetic temps)
+/// arrive with `ld_location = None`, which the editor renders as a
+/// generic file-level error rather than a per-element squiggle.
+fn diag_to_dto_with_map(
+    d: &Diagnostic,
+    source: &str,
+    map: Option<&ld_transpile::LdSourceMap>,
+) -> CheckDiagnostic {
     let start = LineColumn::from_offset(source, d.primary.location.start);
     let end = LineColumn::from_offset(source, d.primary.location.end);
+    let start_line = start.line + 1;
+    let ld_location = map
+        .and_then(|m| m.lookup(start_line as usize))
+        .cloned();
     CheckDiagnostic {
         severity: "error".into(),
         code: d.code.clone(),
         message: d.description(),
-        start_line: start.line + 1,
+        start_line,
         start_column: start.column + 1,
         end_line: end.line + 1,
         end_column: end.column + 1,
+        ld_location,
     }
 }

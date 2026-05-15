@@ -8,6 +8,7 @@ import {
 } from "lucide-react"
 import { useEffect, useMemo, useRef, useState } from "react"
 
+import { checkProgram } from "@/lib/api"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import {
@@ -18,6 +19,8 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { cn } from "@/lib/utils"
+import type { CheckDiagnostic } from "@/types/generated/CheckDiagnostic"
+import type { LdLocation } from "@/types/generated/LdLocation"
 import {
   addCoil,
   addInParallel,
@@ -134,6 +137,38 @@ export function LDEditor({
     setSel(null)
   }, [value])
 
+  // ---- Diagnostics ----
+  //
+  // ironplc's LSP doesn't speak LD JSON, so we poll the HTTP `check`
+  // endpoint with `language=ld` whenever the source settles. The
+  // returned diagnostics carry an `ld_location` that pinpoints which
+  // rung / coil / variable / FB call the error came from — we render
+  // it as a banner up top and inline badges on the affected elements.
+  //
+  // 350 ms debounce: long enough to skip every keystroke when the user
+  // types, short enough that the squiggle appears before they finish
+  // wondering "is this right?".
+  const [diagnostics, setDiagnostics] = useState<CheckDiagnostic[]>([])
+  useEffect(() => {
+    if (parsed.kind === "error") {
+      // JSON itself broken — `check` would just bounce, and we already
+      // show the parse error in-pane.
+      setDiagnostics([])
+      return
+    }
+    const handle = setTimeout(async () => {
+      try {
+        const diags = await checkProgram(value, "ld")
+        setDiagnostics(diags)
+      } catch (e) {
+        // Network errors don't constitute LD errors — keep the last
+        // good diagnostic snapshot. Logging is enough.
+        console.warn("LD diagnostics fetch failed:", e)
+      }
+    }, 350)
+    return () => clearTimeout(handle)
+  }, [value, parsed.kind])
+
   if (parsed.kind === "error") {
     return (
       <div className={cn("flex h-full min-h-0 flex-col", className)}>
@@ -153,15 +188,47 @@ export function LDEditor({
     onChange(serializeProgram(next))
   }
 
+  // Index diagnostics by ld_location so each renderer can look up
+  // "are there errors on this element?" in O(1).
+  const diagIndex = useMemo(() => indexDiagnostics(diagnostics), [diagnostics])
+
   return (
     <div className={cn("flex h-full min-h-0 flex-col", className)}>
       <Header prog={prog} />
+
+      {diagnostics.length > 0 && (
+        <DiagnosticsBanner
+          diagnostics={diagnostics}
+          onJump={(d) => {
+            // Jump to the rung containing the diagnostic. We don't dive
+            // into the LD logic tree yet (that would require a node
+            // path); landing on the rung is enough to show the user
+            // where to look.
+            const loc = d.ld_location
+            if (!loc) return
+            if (loc.kind === "rung") {
+              const i = prog.rungs.findIndex((r) => r.id === loc.rung_id)
+              if (i >= 0) setSel({ kind: "rung", rungIdx: i })
+            } else if (loc.kind === "coil") {
+              const i = prog.rungs.findIndex((r) => r.id === loc.rung_id)
+              if (i >= 0)
+                setSel({ kind: "coil", rungIdx: i, coilIdx: loc.coil_index })
+            } else if (loc.kind === "fb_call") {
+              const i = prog.rungs.findIndex((r) => r.id === loc.rung_id)
+              if (i >= 0) setSel({ kind: "rung", rungIdx: i })
+            } else if (loc.kind === "variable") {
+              setSel({ kind: "variable", name: loc.name })
+            }
+          }}
+        />
+      )}
 
       <div className="flex-1 overflow-auto bg-background">
         <VariablePanel
           prog={prog}
           selection={sel}
           readOnly={readOnly}
+          diagIndex={diagIndex}
           onSelect={(name) =>
             setSel({ kind: "variable", name })
           }
@@ -184,6 +251,7 @@ export function LDEditor({
               selection={sel}
               readOnly={readOnly}
               liveValues={liveValues}
+              rungDiagnostics={diagIndex.byRung.get(rung.id) ?? []}
               onSelect={setSel}
               onCommit={commit}
             />
@@ -209,6 +277,98 @@ export function LDEditor({
 // =================================================================
 //   Top-of-pane summary
 // =================================================================
+
+// =================================================================
+//   Diagnostics indexing + banner
+// =================================================================
+
+/**
+ * Indexed view over a diagnostics list — O(1) lookup by rung / variable
+ * / coil so each render path stays cheap. Rungs and variables get
+ * dedicated maps; the full diagnostic objects sit in `all` for the
+ * banner.
+ */
+interface DiagIndex {
+  all: CheckDiagnostic[]
+  byRung: Map<string, CheckDiagnostic[]>
+  byVariable: Map<string, CheckDiagnostic[]>
+}
+
+function indexDiagnostics(diags: CheckDiagnostic[]): DiagIndex {
+  const byRung = new Map<string, CheckDiagnostic[]>()
+  const byVariable = new Map<string, CheckDiagnostic[]>()
+  for (const d of diags) {
+    const loc = d.ld_location
+    if (!loc) continue
+    if (loc.kind === "rung" || loc.kind === "coil" || loc.kind === "fb_call") {
+      const list = byRung.get(loc.rung_id) ?? []
+      list.push(d)
+      byRung.set(loc.rung_id, list)
+    } else if (loc.kind === "variable") {
+      const list = byVariable.get(loc.name) ?? []
+      list.push(d)
+      byVariable.set(loc.name, list)
+    }
+  }
+  return { all: diags, byRung, byVariable }
+}
+
+/** Format an LdLocation for human display. Used in the banner. */
+function describeLocation(loc: LdLocation | null | undefined): string {
+  if (!loc) return "—"
+  switch (loc.kind) {
+    case "rung":
+      return `rung ${loc.rung_id}`
+    case "coil":
+      return `rung ${loc.rung_id} · coil ${loc.coil_index}`
+    case "fb_call":
+      return `rung ${loc.rung_id} · ${loc.instance}(…)`
+    case "variable":
+      return `var ${loc.name}`
+  }
+}
+
+function DiagnosticsBanner({
+  diagnostics,
+  onJump,
+}: {
+  diagnostics: CheckDiagnostic[]
+  onJump: (d: CheckDiagnostic) => void
+}) {
+  return (
+    <div className="border-b border-destructive/30 bg-destructive/5 text-xs">
+      <div className="flex items-center gap-2 px-3 py-1.5">
+        <span className="font-mono font-medium text-destructive">
+          {diagnostics.length} {diagnostics.length === 1 ? "error" : "errors"}
+        </span>
+      </div>
+      <ul className="divide-y divide-destructive/15">
+        {diagnostics.slice(0, 8).map((d, i) => (
+          <li key={i}>
+            <button
+              type="button"
+              onClick={() => onJump(d)}
+              className="flex w-full items-start gap-2 px-3 py-1 text-left hover:bg-destructive/10"
+            >
+              <span className="font-mono text-[10px] text-destructive">
+                {d.code}
+              </span>
+              <span className="flex-1 text-foreground">{d.message}</span>
+              <span className="font-mono text-[10px] text-muted-foreground">
+                {describeLocation(d.ld_location)}
+              </span>
+            </button>
+          </li>
+        ))}
+        {diagnostics.length > 8 && (
+          <li className="px-3 py-1 text-muted-foreground">
+            +{diagnostics.length - 8} more…
+          </li>
+        )}
+      </ul>
+    </div>
+  )
+}
 
 function Header({ prog }: { prog: LdProgram }) {
   return (
@@ -238,6 +398,7 @@ function VariablePanel({
   prog,
   selection,
   readOnly,
+  diagIndex,
   onSelect,
   onAdd,
   onRemove,
@@ -246,6 +407,7 @@ function VariablePanel({
   prog: LdProgram
   selection: Selection
   readOnly: boolean
+  diagIndex: DiagIndex
   onSelect: (name: string) => void
   onAdd: (v: LdProgram["variables"][number]) => void
   onRemove: (name: string) => void
@@ -292,8 +454,14 @@ function VariablePanel({
                     selection?.kind === "variable" && selection.name === v.name
                       ? "bg-highlight/15"
                       : "hover:bg-accent/30",
+                    // Red outline when a diagnostic mentions this var.
+                    diagIndex.byVariable.has(v.name) &&
+                      "ring-1 ring-destructive/60",
                   )}
                   onClick={() => onSelect(v.name)}
+                  title={
+                    diagIndex.byVariable.get(v.name)?.[0]?.message ?? undefined
+                  }
                 >
                   <span className="text-foreground">{v.name}</span>
                   <span className="text-muted-foreground">{v.type}</span>
@@ -487,6 +655,7 @@ function RungEditor({
   selection,
   readOnly,
   liveValues,
+  rungDiagnostics,
   onSelect,
   onCommit,
 }: {
@@ -497,9 +666,15 @@ function RungEditor({
   selection: Selection
   readOnly: boolean
   liveValues: { bools: Record<string, boolean>; numerics: Record<string, number> } | null
+  rungDiagnostics: CheckDiagnostic[]
   onSelect: (s: Selection) => void
   onCommit: (next: LdProgram) => void
 }) {
+  // We only render rung-level error decoration today (banner up top
+  // has the per-element detail). Per-coil and per-FB-call colouring
+  // can come later by slicing `rungDiagnostics` further.
+  const hasRungError = rungDiagnostics.length > 0
+  const firstErrorMsg = rungDiagnostics[0]?.message ?? null
   // Network output power: when running, this is `evaluateNode(root,
   // values)` — drives wire colouring AND coil "energised" state.
   // Null when not running; renderers treat null as "no online data,
@@ -549,13 +724,19 @@ function RungEditor({
       className={cn(
         "rounded-md border border-border bg-card",
         isSelected && "ring-1 ring-highlight",
+        // Heavier outline on any rung-tagged diagnostic so users can
+        // glance at the page and spot which rungs need attention. The
+        // banner up top has the actual messages.
+        hasRungError && "border-destructive/70",
       )}
+      title={firstErrorMsg ?? undefined}
     >
       <RungToolbar
         rung={rung}
         rungIdx={rungIdx}
         totalRungs={totalRungs}
         readOnly={readOnly}
+        hasError={hasRungError}
         onSelectRung={() => onSelect({ kind: "rung", rungIdx })}
         onLabelChange={(label) => onCommit(setRungLabel(prog, rungIdx, label))}
         onDelete={() => {
@@ -726,6 +907,7 @@ function RungToolbar({
   rungIdx,
   totalRungs,
   readOnly,
+  hasError,
   onSelectRung,
   onLabelChange,
   onDelete,
@@ -737,6 +919,7 @@ function RungToolbar({
   rungIdx: number
   totalRungs: number
   readOnly: boolean
+  hasError: boolean
   onSelectRung: () => void
   onLabelChange: (next: string | null) => void
   onDelete: () => void
@@ -747,9 +930,21 @@ function RungToolbar({
   const [editingLabel, setEditingLabel] = useState(false)
   return (
     <div
-      className="flex items-center gap-2 border-b border-border bg-muted/20 px-2 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground"
+      className={cn(
+        "flex items-center gap-2 border-b border-border bg-muted/20 px-2 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground",
+        hasError && "border-destructive/30 bg-destructive/5",
+      )}
       onClick={onSelectRung}
     >
+      {hasError && (
+        <span
+          className="font-mono text-destructive"
+          title="This rung has compile errors — see banner above"
+          aria-label="rung has errors"
+        >
+          ⚠
+        </span>
+      )}
       <span className="shrink-0">
         rung {rungIdx} · <span className="font-mono normal-case">{rung.id}</span>
       </span>

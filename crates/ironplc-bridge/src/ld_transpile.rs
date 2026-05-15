@@ -27,6 +27,8 @@ use project::{
     LdCoilKind, LdComparator, LdFbInput, LdNode, LdOperand, LdPouType, LdProgram, LdRung,
     LdVarSection, LdVariable,
 };
+use serde::Serialize;
+use ts_rs::TS;
 
 use crate::errors::BridgeError;
 
@@ -34,10 +36,107 @@ use crate::errors::BridgeError;
 /// build it from a deterministic walk of the program.
 type FbInstanceTable = BTreeMap<String, String>;
 
+// =================================================================
+//   Source map
+//
+//   ironplc reports diagnostics keyed by (line, column) in the ST
+//   source it received. Our LD pipeline generates that ST — the user
+//   never sees those lines. The source map turns "ST line 47" back
+//   into "the FB call to myT1 in rung r3", so the IDE can highlight
+//   the right element on the canvas.
+//
+//   The map is line-resolution (one slot per generated ST line),
+//   1-indexed. Slots that don't correspond to a specific LD element
+//   are `None` (POU headers, VAR-block headers, END_PROGRAM, etc.).
+// =================================================================
+
+/// Location of an LD element addressable from a diagnostic.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LdLocation {
+    /// A specific declared variable.
+    Variable {
+        name: String,
+    },
+    /// Anywhere within a rung — most common case (the rung's main
+    /// assignment line). `rung_id` matches `LdRung::id` in the JSON.
+    Rung {
+        rung_id: String,
+    },
+    /// A specific coil in a multi-coil rung. `coil_index` is the
+    /// 0-based position in `LdRung::coils`.
+    Coil {
+        rung_id: String,
+        coil_index: usize,
+    },
+    /// The `inst(PIN := ..., ...);` statement for an FB call.
+    FbCall {
+        rung_id: String,
+        instance: String,
+    },
+}
+
+/// One-line-per-entry mapping. Index `i` describes ST line `i+1`
+/// (lines are 1-indexed in ironplc diagnostics).
+#[derive(Debug, Clone, Default)]
+pub struct LdSourceMap {
+    pub lines: Vec<Option<LdLocation>>,
+}
+
+impl LdSourceMap {
+    /// Look up the LD origin of an ST line (1-indexed). Returns
+    /// `None` for boilerplate lines and out-of-range queries.
+    pub fn lookup(&self, line: usize) -> Option<&LdLocation> {
+        if line == 0 {
+            return None;
+        }
+        self.lines.get(line - 1).and_then(|s| s.as_ref())
+    }
+}
+
+/// Internal writer that batches `out: String` and the source map.
+/// Every line emitted via `writeln` records exactly one span entry —
+/// so `out.lines().count() == map.lines.len()` at all times.
+struct StEmitter {
+    out: String,
+    map: Vec<Option<LdLocation>>,
+}
+
+impl StEmitter {
+    fn new() -> Self {
+        Self {
+            out: String::new(),
+            map: Vec::new(),
+        }
+    }
+
+    /// Emit one line of ST plus a source-map entry.
+    fn line(&mut self, span: Option<LdLocation>, content: std::fmt::Arguments) {
+        let _ = writeln!(self.out, "{content}");
+        self.map.push(span);
+    }
+
+    /// Emit a single newline (no LD origin).
+    fn blank(&mut self) {
+        self.out.push('\n');
+        self.map.push(None);
+    }
+}
+
 /// Top-level entry: render an `LdProgram` to a complete ST source
 /// string ready to feed `ironplc_bridge::compile` (or
-/// `compile_isolated_source`).
+/// `compile_isolated_source`). Discards the source map — use
+/// `transpile_to_st_with_map` if you need diagnostic mapping.
 pub fn transpile_to_st(prog: &LdProgram) -> Result<String, BridgeError> {
+    Ok(transpile_to_st_with_map(prog)?.0)
+}
+
+/// Like `transpile_to_st` but also returns the source map so callers
+/// can translate diagnostic line numbers back to LD elements.
+pub fn transpile_to_st_with_map(
+    prog: &LdProgram,
+) -> Result<(String, LdSourceMap), BridgeError> {
     if prog.name.is_empty() {
         return Err(BridgeError::Parse("LD program name is empty".into()));
     }
@@ -48,7 +147,7 @@ pub fn transpile_to_st(prog: &LdProgram) -> Result<String, BridgeError> {
         )));
     }
 
-    let mut out = String::new();
+    let mut em = StEmitter::new();
     let (head, foot) = match prog.pou_type {
         LdPouType::Program => ("PROGRAM", "END_PROGRAM"),
         LdPouType::FunctionBlock => ("FUNCTION_BLOCK", "END_FUNCTION_BLOCK"),
@@ -73,16 +172,16 @@ pub fn transpile_to_st(prog: &LdProgram) -> Result<String, BridgeError> {
     // very confusing ironplc diagnostic later.
     let fb_instances = collect_fb_instances(&prog.rungs)?;
 
-    let _ = writeln!(out, "{} {}", head, prog.name);
-    write_variable_blocks(&mut out, &prog.variables, &rung_temps, &fb_instances);
-    out.push('\n');
+    em.line(None, format_args!("{} {}", head, prog.name));
+    write_variable_blocks(&mut em, &prog.variables, &rung_temps, &fb_instances);
+    em.blank();
 
     for (idx, rung) in prog.rungs.iter().enumerate() {
-        emit_rung(&mut out, rung, idx)?;
+        emit_rung(&mut em, rung, idx)?;
     }
 
-    let _ = writeln!(out, "{foot}");
-    Ok(out)
+    em.line(None, format_args!("{foot}"));
+    Ok((em.out, LdSourceMap { lines: em.map }))
 }
 
 /// Walk all rung logic trees, gathering every `FbCall` instance. Errors
@@ -140,7 +239,7 @@ fn walk_for_fb_calls(
 }
 
 fn write_variable_blocks(
-    out: &mut String,
+    em: &mut StEmitter,
     vars: &[LdVariable],
     rung_temps: &[String],
     fb_instances: &FbInstanceTable,
@@ -154,35 +253,41 @@ fn write_variable_blocks(
             LdVarSection::Output => "VAR_OUTPUT",
             LdVarSection::Internal => "VAR",
         };
-        let _ = writeln!(out, "    {header}");
+        em.line(None, format_args!("    {header}"));
         for v in vars.iter().filter(|v| v.section == section) {
             let init = v
                 .init
                 .as_ref()
                 .map(|s| format!(" := {s}"))
                 .unwrap_or_default();
-            let _ = writeln!(out, "        {} : {}{};", v.name, v.type_name, init);
+            em.line(
+                Some(LdLocation::Variable {
+                    name: v.name.clone(),
+                }),
+                format_args!("        {} : {}{};", v.name, v.type_name, init),
+            );
         }
         // The VAR block also carries (a) multi-coil rung temporaries
         // (`__rung_<id> : BOOL`) and (b) FB instances synthesised
         // from FbCall nodes (`myT1 : TON;`). They're transpiler
         // bookkeeping; we keep them in the same block as the user's
         // internal vars because ironplc parses one VAR section per
-        // kind.
+        // kind. Synthetic lines have no LD origin — diagnostics on
+        // them would be transpiler bugs, not user authoring problems.
         if section == LdVarSection::Internal {
             for tmp in rung_temps {
-                let _ = writeln!(out, "        {tmp} : BOOL;");
+                em.line(None, format_args!("        {tmp} : BOOL;"));
             }
             for (instance, fb_type) in fb_instances {
-                let _ = writeln!(out, "        {instance} : {fb_type};");
+                em.line(None, format_args!("        {instance} : {fb_type};"));
             }
         }
-        out.push_str("    END_VAR\n");
+        em.line(None, format_args!("    END_VAR"));
     }
 }
 
 fn emit_rung(
-    out: &mut String,
+    em: &mut StEmitter,
     rung: &project::LdRung,
     idx: usize,
 ) -> Result<(), BridgeError> {
@@ -193,10 +298,19 @@ fn emit_rung(
         )));
     }
     let logic = render_node(&rung.logic)?;
+    let rung_span = LdLocation::Rung {
+        rung_id: rung.id.clone(),
+    };
     if let Some(label) = &rung.label {
-        let _ = writeln!(out, "    (* rung {}: {} *)", rung.id, label);
+        em.line(
+            Some(rung_span.clone()),
+            format_args!("    (* rung {}: {} *)", rung.id, label),
+        );
     } else {
-        let _ = writeln!(out, "    (* rung {} *)", rung.id);
+        em.line(
+            Some(rung_span.clone()),
+            format_args!("    (* rung {} *)", rung.id),
+        );
     }
 
     // Emit FB call statements for any FbCall nodes in this rung's
@@ -210,7 +324,7 @@ fn emit_rung(
     // the FB to see the most recent values. Calling more than once
     // is also fine — for edge detectors the second call sees CLK
     // unchanged so it's a no-op.
-    emit_fb_calls_for_rung(out, &rung.logic)?;
+    emit_fb_calls_for_rung(em, &rung.id, &rung.logic)?;
 
     // Most rungs have one coil; if there are several, we evaluate
     // `logic` once via a temporary so re-running the network for each
@@ -218,24 +332,36 @@ fn emit_rung(
     // The temporary uses a stable identifier derived from the rung id
     // so name collisions across rungs are impossible.
     if rung.coils.len() == 1 {
-        emit_coil(out, &rung.coils[0], &logic);
+        emit_coil(em, &rung.coils[0], 0, &rung.id, &logic);
     } else {
         let tmp = format!("__rung_{}", sanitise_ident(&rung.id));
-        let _ = writeln!(out, "    {tmp} := {logic};");
-        for coil in &rung.coils {
-            emit_coil(out, coil, &tmp);
+        em.line(
+            Some(rung_span.clone()),
+            format_args!("    {tmp} := {logic};"),
+        );
+        for (i, coil) in rung.coils.iter().enumerate() {
+            emit_coil(em, coil, i, &rung.id, &tmp);
         }
     }
-    out.push('\n');
+    em.blank();
     Ok(())
 }
 
 /// Walk the rung's logic tree in source order and emit one
 /// `instance(PIN := value, ...);` line per unique FbCall instance.
 /// De-duplicates so each instance is called at most once per rung.
-fn emit_fb_calls_for_rung(out: &mut String, logic: &LdNode) -> Result<(), BridgeError> {
+fn emit_fb_calls_for_rung(
+    em: &mut StEmitter,
+    rung_id: &str,
+    logic: &LdNode,
+) -> Result<(), BridgeError> {
     let mut seen: Vec<String> = Vec::new();
-    let mut emit = |node: &LdNode| -> Result<(), BridgeError> {
+    // Collect the FB calls first (order + uniqueness) before emitting,
+    // so we don't have to thread the emitter through the visitor's
+    // FnMut closure (which conflicts with rustc's borrow checker when
+    // both em and the closure capture mutate state).
+    let mut calls: Vec<(String, String)> = Vec::new();
+    let mut collect = |node: &LdNode| -> Result<(), BridgeError> {
         if let LdNode::FbCall {
             instance, inputs, ..
         } = node
@@ -243,12 +369,21 @@ fn emit_fb_calls_for_rung(out: &mut String, logic: &LdNode) -> Result<(), Bridge
             if !seen.iter().any(|s| s == instance) {
                 seen.push(instance.clone());
                 let args = render_fb_inputs(inputs)?;
-                let _ = writeln!(out, "    {instance}({args});");
+                calls.push((instance.clone(), args));
             }
         }
         Ok(())
     };
-    walk_in_order(logic, &mut emit)?;
+    walk_in_order(logic, &mut collect)?;
+    for (instance, args) in calls {
+        em.line(
+            Some(LdLocation::FbCall {
+                rung_id: rung_id.to_string(),
+                instance: instance.clone(),
+            }),
+            format_args!("    {instance}({args});"),
+        );
+    }
     Ok(())
 }
 
@@ -285,23 +420,31 @@ fn render_fb_inputs(inputs: &[LdFbInput]) -> Result<String, BridgeError> {
     Ok(parts.join(", "))
 }
 
-fn emit_coil(out: &mut String, coil: &project::LdCoil, expr: &str) {
+fn emit_coil(
+    em: &mut StEmitter,
+    coil: &project::LdCoil,
+    coil_index: usize,
+    rung_id: &str,
+    expr: &str,
+) {
+    let span = Some(LdLocation::Coil {
+        rung_id: rung_id.to_string(),
+        coil_index,
+    });
     match coil.kind {
         LdCoilKind::Standard => {
-            let _ = writeln!(out, "    {} := {};", coil.var, expr);
+            em.line(span, format_args!("    {} := {};", coil.var, expr));
         }
         LdCoilKind::Set => {
-            let _ = writeln!(
-                out,
-                "    IF {expr} THEN {} := TRUE; END_IF;",
-                coil.var
+            em.line(
+                span,
+                format_args!("    IF {expr} THEN {} := TRUE; END_IF;", coil.var),
             );
         }
         LdCoilKind::Reset => {
-            let _ = writeln!(
-                out,
-                "    IF {expr} THEN {} := FALSE; END_IF;",
-                coil.var
+            em.line(
+                span,
+                format_args!("    IF {expr} THEN {} := FALSE; END_IF;", coil.var),
             );
         }
     }
@@ -1326,6 +1469,273 @@ mod tests {
             ],
         );
         assert_compiles_clean(&prog);
+    }
+
+    // =================================================================
+    //   Source map tests
+    // =================================================================
+
+    /// Find the 1-indexed line number where `needle` first appears in
+    /// `s`. Panics if not found — test assertions need a hit, not a
+    /// silent None.
+    fn line_of(s: &str, needle: &str) -> usize {
+        for (i, line) in s.lines().enumerate() {
+            if line.contains(needle) {
+                return i + 1;
+            }
+        }
+        panic!("`{needle}` not found in:\n{s}");
+    }
+
+    #[test]
+    fn source_map_locates_variable_declaration_lines() {
+        let prog = motor_seal_program();
+        let (st, map) = transpile_to_st_with_map(&prog).unwrap();
+        // The line declaring `start_btn` must map to that variable.
+        let n = line_of(&st, "start_btn : BOOL");
+        match map.lookup(n) {
+            Some(LdLocation::Variable { name }) => assert_eq!(name, "start_btn"),
+            other => panic!("expected Variable, got {other:?}\n{st}"),
+        }
+    }
+
+    #[test]
+    fn source_map_locates_coil_assignment_lines() {
+        let prog = motor_seal_program();
+        let (st, map) = transpile_to_st_with_map(&prog).unwrap();
+        // The single coil assignment is on the line that contains
+        // `motor_run :=`.
+        let n = line_of(&st, "motor_run := (");
+        match map.lookup(n) {
+            Some(LdLocation::Coil { rung_id, coil_index }) => {
+                assert_eq!(rung_id, "r0");
+                assert_eq!(*coil_index, 0);
+            }
+            other => panic!("expected Coil, got {other:?}\n{st}"),
+        }
+    }
+
+    #[test]
+    fn source_map_locates_multi_coil_rung_lines() {
+        // Multi-coil rung: temp assignment line maps to Rung; each
+        // following coil assignment maps to its Coil with the right
+        // index.
+        let prog = LdProgram {
+            name: "p".into(),
+            pou_type: LdPouType::Program,
+            variables: vec![
+                LdVariable {
+                    name: "a".into(),
+                    type_name: "BOOL".into(),
+                    section: LdVarSection::Input,
+                    init: None,
+                },
+                LdVariable {
+                    name: "x".into(),
+                    type_name: "BOOL".into(),
+                    section: LdVarSection::Output,
+                    init: None,
+                },
+                LdVariable {
+                    name: "y".into(),
+                    type_name: "BOOL".into(),
+                    section: LdVarSection::Output,
+                    init: None,
+                },
+            ],
+            rungs: vec![LdRung {
+                id: "multi".into(),
+                label: None,
+                logic: LdNode::Contact {
+                    var: "a".into(),
+                    negated: false,
+                },
+                coils: vec![
+                    LdCoil { var: "x".into(), kind: LdCoilKind::Standard },
+                    LdCoil { var: "y".into(), kind: LdCoilKind::Standard },
+                ],
+            }],
+        };
+        let (st, map) = transpile_to_st_with_map(&prog).unwrap();
+        // tmp assignment line is `__rung_multi := a;`
+        let tmp_line = line_of(&st, "__rung_multi := a");
+        match map.lookup(tmp_line) {
+            Some(LdLocation::Rung { rung_id }) => assert_eq!(rung_id, "multi"),
+            other => panic!("expected Rung, got {other:?}\n{st}"),
+        }
+        // Two coil lines
+        let x_line = line_of(&st, "x := __rung_multi");
+        match map.lookup(x_line) {
+            Some(LdLocation::Coil { rung_id, coil_index }) => {
+                assert_eq!(rung_id, "multi");
+                assert_eq!(*coil_index, 0);
+            }
+            other => panic!("expected Coil[0], got {other:?}\n{st}"),
+        }
+        let y_line = line_of(&st, "y := __rung_multi");
+        match map.lookup(y_line) {
+            Some(LdLocation::Coil { rung_id, coil_index }) => {
+                assert_eq!(rung_id, "multi");
+                assert_eq!(*coil_index, 1);
+            }
+            other => panic!("expected Coil[1], got {other:?}\n{st}"),
+        }
+    }
+
+    #[test]
+    fn source_map_locates_fb_call_lines() {
+        // FB call statement gets its own LdLocation::FbCall entry,
+        // distinct from the rung's coil assignment line.
+        let prog = LdProgram {
+            name: "p".into(),
+            pou_type: LdPouType::Program,
+            variables: vec![
+                LdVariable {
+                    name: "btn".into(),
+                    type_name: "BOOL".into(),
+                    section: LdVarSection::Input,
+                    init: None,
+                },
+                LdVariable {
+                    name: "out".into(),
+                    type_name: "BOOL".into(),
+                    section: LdVarSection::Output,
+                    init: None,
+                },
+            ],
+            rungs: vec![LdRung {
+                id: "rdelay".into(),
+                label: None,
+                logic: LdNode::FbCall {
+                    instance: "myT".into(),
+                    fb_type: "TON".into(),
+                    inputs: vec![
+                        LdFbInput {
+                            pin: "IN".into(),
+                            value: LdOperand::Var { name: "btn".into() },
+                        },
+                        LdFbInput {
+                            pin: "PT".into(),
+                            value: LdOperand::Literal {
+                                value: "T#1s".into(),
+                            },
+                        },
+                    ],
+                    output_pin: "Q".into(),
+                },
+                coils: vec![LdCoil {
+                    var: "out".into(),
+                    kind: LdCoilKind::Standard,
+                }],
+            }],
+        };
+        let (st, map) = transpile_to_st_with_map(&prog).unwrap();
+        let call_line = line_of(&st, "myT(IN := btn");
+        match map.lookup(call_line) {
+            Some(LdLocation::FbCall { rung_id, instance }) => {
+                assert_eq!(rung_id, "rdelay");
+                assert_eq!(instance, "myT");
+            }
+            other => panic!("expected FbCall, got {other:?}\n{st}"),
+        }
+        // The coil assignment one line below should still be a Coil.
+        let coil_line = line_of(&st, "out := myT.Q");
+        match map.lookup(coil_line) {
+            Some(LdLocation::Coil { rung_id, coil_index }) => {
+                assert_eq!(rung_id, "rdelay");
+                assert_eq!(*coil_index, 0);
+            }
+            other => panic!("expected Coil, got {other:?}\n{st}"),
+        }
+    }
+
+    #[test]
+    fn source_map_returns_none_for_boilerplate_lines() {
+        let prog = motor_seal_program();
+        let (st, map) = transpile_to_st_with_map(&prog).unwrap();
+        // PROGRAM header has no LD origin
+        assert!(map.lookup(line_of(&st, "PROGRAM motor")).is_none());
+        // VAR header line
+        assert!(map.lookup(line_of(&st, "VAR_INPUT")).is_none());
+        // END_PROGRAM line
+        assert!(map.lookup(line_of(&st, "END_PROGRAM")).is_none());
+    }
+
+    #[test]
+    fn source_map_line_count_matches_output() {
+        // Integrity invariant — every emitted line gets exactly one
+        // map slot. If a future emitter forgets to push, the
+        // diagnostics on later lines drift by one.
+        let prog = motor_seal_program();
+        let (st, map) = transpile_to_st_with_map(&prog).unwrap();
+        let line_count = st.lines().count();
+        assert_eq!(
+            line_count, map.lines.len(),
+            "expected one map entry per emitted line; got {} lines vs {} entries\n{}",
+            line_count,
+            map.lines.len(),
+            st,
+        );
+    }
+
+    #[test]
+    fn end_to_end_ld_diagnostic_carries_ld_location() {
+        // A coil that references a variable not declared in `variables`
+        // should produce an ironplc diagnostic. We want it to come back
+        // tagged with `LdLocation::Coil` pointing at the offending rung,
+        // so the editor can put a squiggle on the right glyph.
+        let prog = LdProgram {
+            name: "bad".into(),
+            pou_type: LdPouType::Program,
+            variables: vec![LdVariable {
+                name: "btn".into(),
+                type_name: "BOOL".into(),
+                section: LdVarSection::Input,
+                init: None,
+            }],
+            rungs: vec![LdRung {
+                id: "loose".into(),
+                label: None,
+                logic: LdNode::Contact {
+                    var: "btn".into(),
+                    negated: false,
+                },
+                // `nope` is not declared anywhere — ironplc should
+                // complain about an undefined variable.
+                coils: vec![LdCoil {
+                    var: "nope".into(),
+                    kind: LdCoilKind::Standard,
+                }],
+            }],
+        };
+        let source = serde_json::to_string(&prog).unwrap();
+        let diags = crate::check_pou_source(&source, project::PouLanguage::Ld);
+        assert!(!diags.is_empty(), "expected at least one diagnostic");
+        // At least one diagnostic should be tagged as belonging to the
+        // offending coil — we don't pin the exact code because that's
+        // an ironplc implementation detail.
+        let tagged = diags.iter().find(|d| {
+            matches!(
+                d.ld_location,
+                Some(crate::ld_transpile::LdLocation::Coil { ref rung_id, coil_index })
+                    if rung_id == "loose" && coil_index == 0
+            )
+        });
+        assert!(
+            tagged.is_some(),
+            "expected a diagnostic tagged Coil(loose, 0); got: {diags:#?}",
+        );
+    }
+
+    #[test]
+    fn end_to_end_ld_malformed_json_returns_parse_diagnostic() {
+        // A user mid-edit can save broken JSON. Rather than the LSP
+        // endpoint going silent, surface a synthetic LD-PARSE diagnostic
+        // so the editor at least shows "this file is broken".
+        let diags = crate::check_pou_source("{ this isn't json", project::PouLanguage::Ld);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, "LD-PARSE");
+        assert!(diags[0].ld_location.is_none());
     }
 
     #[test]

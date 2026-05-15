@@ -41,6 +41,10 @@ function lspToCheck(diag: LspDiagnostic): CheckDiagnostic {
     start_column: diag.range.start.character + 1,
     end_line: diag.range.end.line + 1,
     end_column: diag.range.end.character + 1,
+    // LSP diagnostics always come from ST sources (Monaco editor),
+    // never from LD JSON, so there's no `ld_location` to populate.
+    // The field stays null on the wire.
+    ld_location: null,
   }
 }
 

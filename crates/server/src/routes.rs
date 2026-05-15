@@ -12,7 +12,7 @@ use std::time::Duration;
 use axum::{
     Json,
     extract::{
-        Path as AxumPath, State,
+        Path as AxumPath, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     response::{
@@ -642,8 +642,29 @@ pub async fn migrate_tasks(
 //  Compile / run / stream
 // ============================================================
 
-pub async fn check(body: String) -> Json<Vec<CheckDiagnostic>> {
-    Json(ironplc_bridge::check(&body))
+/// Query parameters for `POST /api/check`. `language` defaults to ST
+/// for back-compat with callers that don't know about LD yet (they POST
+/// a plain text/plain body and get ST-mode behaviour).
+#[derive(Debug, Default, Deserialize)]
+pub struct CheckQuery {
+    #[serde(default)]
+    pub language: Option<String>,
+}
+
+pub async fn check(
+    Query(q): Query<CheckQuery>,
+    body: String,
+) -> Json<Vec<CheckDiagnostic>> {
+    // The frontend posts `?language=ld` when the editor source on the
+    // wire is `.ld.json`. Anything else (or absent) is treated as ST,
+    // which is the historical behaviour. Keeping `check` and
+    // `check_pou_source` as one HTTP route means the editor doesn't
+    // need a second LSP-style channel.
+    let language = match q.language.as_deref().map(str::to_ascii_lowercase).as_deref() {
+        Some("ld") => PouLanguage::Ld,
+        _ => PouLanguage::St,
+    };
+    Json(ironplc_bridge::check_pou_source(&body, language))
 }
 
 /// Compile the whole project (every POU + tasks.toml-synthesized
@@ -673,6 +694,7 @@ pub async fn validate_project(
                 start_column: 1,
                 end_line: 1,
                 end_column: 1,
+                ld_location: None,
             }]),
         }
     })

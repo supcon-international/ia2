@@ -243,11 +243,22 @@ export async function updateIomap(iomap: IoMap): Promise<RunResponse> {
 
 // ---------- Runtime ----------
 
-export async function checkProgram(source: string): Promise<CheckDiagnostic[]> {
+export async function checkProgram(
+  source: string,
+  language: "st" | "ld" = "st",
+): Promise<CheckDiagnostic[]> {
+  // LD source is JSON; ST is plain text. Different Content-Type plus a
+  // `?language=` query so the bridge knows to transpile before running
+  // ironplc. Without the query the server defaults to ST for back-compat
+  // with older clients.
+  const url =
+    language === "st" ? `/api/check` : `/api/check?language=${language}`
+  const contentType =
+    language === "ld" ? "application/json" : "text/plain"
   return jsonOrThrow(
-    await fetch(`/api/check`, {
+    await fetch(url, {
       method: "POST",
-      headers: { "Content-Type": "text/plain" },
+      headers: { "Content-Type": contentType },
       body: source,
     }),
     "POST /api/check",
