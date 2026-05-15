@@ -244,7 +244,7 @@ pub async fn project_tree(
             .into_iter()
             .map(|f| PouFile {
                 path: f.path,
-                declarations: ironplc_bridge::extract_pou_declarations(&f.source),
+                declarations: ironplc_bridge::extract_pou_declarations(&f.source, f.language),
             })
             .collect();
         Ok(ProjectTree {
@@ -279,10 +279,11 @@ pub async fn get_pou(
     AxumPath(path): AxumPath<String>,
 ) -> Result<Json<Pou>, ApiError> {
     with_project(&state, |store| {
+        let language = store.pou_file_language(&path)?;
         let source = store.read_pou_source(&path)?;
         Ok(Pou {
             path: path.clone(),
-            declarations: ironplc_bridge::extract_pou_declarations(&source),
+            declarations: ironplc_bridge::extract_pou_declarations(&source, language),
             source,
         })
     })
@@ -294,10 +295,11 @@ pub async fn create_pou(
     Json(req): Json<CreatePouRequest>,
 ) -> Result<Json<Pou>, ApiError> {
     with_project(&state, |store| {
-        let source = store.create_pou_file(&req.path, req.type_, req.language)?;
+        let language = req.language;
+        let source = store.create_pou_file(&req.path, req.type_, language)?;
         Ok(Pou {
             path: req.path,
-            declarations: ironplc_bridge::extract_pou_declarations(&source),
+            declarations: ironplc_bridge::extract_pou_declarations(&source, language),
             source,
         })
     })
@@ -713,8 +715,9 @@ pub async fn project_pous(
         let paths = store.list_pou_paths()?;
         let mut out = Vec::new();
         for path in paths {
+            let language = store.pou_file_language(&path)?;
             let source = store.read_pou_source(&path)?;
-            for d in ironplc_bridge::extract_pou_declarations(&source) {
+            for d in ironplc_bridge::extract_pou_declarations(&source, language) {
                 out.push(PouInProject {
                     file_path: path.clone(),
                     name: d.name,
@@ -796,9 +799,10 @@ pub async fn run(
                 // debug section then only knows about this file's
                 // declarations, so Monitor + /api/runtime/snapshot show
                 // exactly the variables the user is looking at.
+                let language = store.pou_file_language(file_path)?;
                 let source = store.read_pou_source(file_path)?;
                 let tasks = single_program_tasks(name);
-                ironplc_bridge::compile_isolated_source(&source, &tasks)?
+                ironplc_bridge::compile_isolated_source(&source, language, &tasks)?
             }
             (Some(name), None) => {
                 // Ad-hoc but no file scope — fall back to whole-project
@@ -953,6 +957,12 @@ pub struct RuntimeStatus {
     /// Timestamp_us of the most recent snapshot, or 0.
     pub last_snapshot_us: u64,
     pub last_error: Option<String>,
+    /// What kind of run is active (isolated vs scheduled) and which
+    /// PROGRAM(s) it covers. Populated from `AppState.running_info`
+    /// which the /api/run handler writes when it starts a program;
+    /// cleared on /api/stop and on close-project. `None` here just
+    /// means nothing is currently running.
+    pub running_info: Option<RunningInfo>,
 }
 
 /// One-shot overview of the runtime — designed for agents who want
@@ -984,6 +994,7 @@ pub async fn runtime_status(
     };
     let snap = state.last_snapshot.lock().expect("last_snapshot").clone();
     let last_error = state.last_error.lock().expect("last_error").clone();
+    let running_info = state.running_info.lock().expect("running_info").clone();
     let _ = project_open; // suppress unused — kept for symmetry with runtime
     Json(RuntimeStatus {
         running,
@@ -993,6 +1004,7 @@ pub async fn runtime_status(
         scan_count: snap.as_ref().map(|s| s.scan_count).unwrap_or(0),
         last_snapshot_us: snap.as_ref().map(|s| s.timestamp_us).unwrap_or(0),
         last_error,
+        running_info,
     })
 }
 

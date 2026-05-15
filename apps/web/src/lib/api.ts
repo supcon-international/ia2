@@ -17,6 +17,7 @@ import type { ProjectPous } from "@/types/generated/ProjectPous"
 import type { ProjectTree } from "@/types/generated/ProjectTree"
 import type { Protocol } from "@/types/generated/Protocol"
 import type { RunResponse } from "@/types/generated/RunResponse"
+import type { RuntimeStatus } from "@/types/generated/RuntimeStatus"
 import type { Tasks } from "@/types/generated/Tasks"
 import type { VariableInfo } from "@/types/generated/VariableInfo"
 
@@ -287,6 +288,17 @@ export async function stopProgram(): Promise<RunResponse> {
 
 export function eventsUrl(): string {
   return `/api/events`
+}
+
+/** Snapshot of "what is the runtime doing right now" — same struct the
+ *  agent docs / GET endpoint surface. The IDE uses this on mount and
+ *  after detach to recover `running_info` (the page-reload case where
+ *  no SSE `started` event will fire for an already-running program). */
+export async function fetchRuntimeStatus(): Promise<RuntimeStatus> {
+  return jsonOrThrow(
+    await fetch(`/api/runtime/status`),
+    "GET /api/runtime/status",
+  )
 }
 
 export async function fetchDemoSlaveSnapshot(): Promise<DemoSlaveSnapshot> {

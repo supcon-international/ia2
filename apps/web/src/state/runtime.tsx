@@ -42,6 +42,7 @@ import {
   fetchPou,
   fetchProject,
   fetchProjects as apiFetchProjects,
+  fetchRuntimeStatus,
   migrateTasks as apiMigrateTasks,
   openProject as apiOpenProject,
   runProgram,
@@ -227,6 +228,27 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         setProject(tree)
         if (!tree) {
           setAvailableProjects(await apiFetchProjects())
+        }
+        // Recover running state from the server in case a program was
+        // started before this page loaded. Without this, a hard reload
+        // would leave the Monitor header blank even though the bridge
+        // is happily streaming snapshots, because the SSE `started`
+        // event already fired and we missed it.
+        const status = await fetchRuntimeStatus()
+        if (status.running) {
+          setIsRunning(true)
+          if (status.running_info) {
+            const info = status.running_info
+            if (info.kind === "isolated") {
+              setRunning({
+                kind: "isolated",
+                program: info.program,
+                filePath: info.file_path,
+              })
+            } else {
+              setRunning({ kind: "scheduled", programs: info.programs })
+            }
+          }
         }
       } catch (e) {
         setError(String(e))
