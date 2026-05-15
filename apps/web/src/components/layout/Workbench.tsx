@@ -3,7 +3,6 @@ import { Group, Panel, Separator, type Layout } from "react-resizable-panels"
 
 import { ProjectEmptyState } from "@/components/dialogs/ProjectEmptyState"
 import { RuntimeProvider, useRuntime } from "@/state/runtime"
-import { AgentsPane } from "./AgentsPane"
 import { DevicePane } from "./DevicePane"
 import { EdgePane } from "./EdgePane"
 import { IoMapPane } from "./IoMapPane"
@@ -65,20 +64,19 @@ function usePersistedLayout(
 // Stable IDs — used as React keys and as layout dict keys.
 const PANEL_PROJECT = "project"
 const PANEL_CENTER = "center"
-const PANEL_AGENTS = "agents"
 const PANEL_EDITOR = "editor"
 const PANEL_MONITOR = "monitor"
 
 function Shell() {
   const { project, projectLoading, view } = useRuntime()
 
-  // Storage keys are versioned (v2) so anyone with a borked layout from
-  // the prior bug (number minSize was interpreted as px → side panels
-  // clamped to 40 / 45 px) starts fresh on next reload.
-  const [hLayout, setHLayout] = usePersistedLayout("cs.shell.h.v2", {
+  // Storage keys bumped to v3 with the removal of the right-hand
+  // Agents pane — without the bump, anyone with a saved v2 layout
+  // would have a leftover `agents` slot in the dict that no panel
+  // claims, leaving the center stuck at its old narrow width.
+  const [hLayout, setHLayout] = usePersistedLayout("cs.shell.h.v3", {
     [PANEL_PROJECT]: 18,
-    [PANEL_CENTER]: 60,
-    [PANEL_AGENTS]: 22,
+    [PANEL_CENTER]: 82,
   })
   const [vLayout, setVLayout] = usePersistedLayout("cs.shell.v.v2", {
     [PANEL_EDITOR]: 68,
@@ -156,16 +154,6 @@ function Shell() {
               <MonitorPane />
             </Panel>
           </Group>
-        </Panel>
-        <Gutter orientation="vertical" />
-        <Panel
-          id={PANEL_AGENTS}
-          minSize="10%"
-          maxSize="45%"
-          collapsible
-          collapsedSize="0%"
-        >
-          <AgentsPane />
         </Panel>
       </Group>
     </div>
