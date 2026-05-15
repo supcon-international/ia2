@@ -1,0 +1,32 @@
+{
+  "name": "good_fbd",
+  "pou_type": "program",
+  "variables": [
+    { "name": "tick", "type": "BOOL", "section": "input" },
+    { "name": "rst",  "type": "BOOL", "section": "input" },
+    { "name": "done", "type": "BOOL", "section": "output" }
+  ],
+  "blocks": [
+    {
+      "id": "edge",
+      "fb_type": "R_TRIG",
+      "instance": "rt",
+      "inputs": [
+        { "pin": "CLK", "value": { "kind": "var", "name": "tick" } }
+      ]
+    },
+    {
+      "id": "counter",
+      "fb_type": "CTU",
+      "instance": "cu",
+      "inputs": [
+        { "pin": "CU", "value": { "kind": "block",   "block_id": "edge", "pin": "Q" } },
+        { "pin": "R",  "value": { "kind": "var",     "name":     "rst"           } },
+        { "pin": "PV", "value": { "kind": "literal", "value":    "3"             } }
+      ]
+    }
+  ],
+  "outputs": [
+    { "variable": "done", "from_block": "counter", "from_pin": "Q" }
+  ]
+}

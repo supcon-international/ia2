@@ -1,0 +1,22 @@
+{
+  "name": "bad_fbd",
+  "pou_type": "program",
+  "variables": [
+    { "name": "btn", "type": "BOOL", "section": "input" },
+    { "name": "out", "type": "BOOL", "section": "output" }
+  ],
+  "blocks": [
+    {
+      "id": "b0",
+      "fb_type": "TON",
+      "instance": "myT",
+      "inputs": [
+        { "pin": "IN", "value": { "kind": "var", "name": "ghost" } },
+        { "pin": "PT", "value": { "kind": "literal", "value": "T#1s" } }
+      ]
+    }
+  ],
+  "outputs": [
+    { "variable": "out", "from_block": "b0", "from_pin": "Q" }
+  ]
+}

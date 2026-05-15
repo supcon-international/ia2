@@ -695,6 +695,7 @@ pub async fn validate_project(
                 end_line: 1,
                 end_column: 1,
                 ld_location: None,
+                fbd_location: None,
             }]),
         }
     })

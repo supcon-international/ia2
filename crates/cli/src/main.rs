@@ -228,9 +228,15 @@ fn print_diagnostics_human(file: &Path, diags: &[CheckDiagnostic]) {
     }
     let f = file.display();
     for d in diags {
-        let loc_hint = match &d.ld_location {
-            None => String::new(),
-            Some(loc) => format!(" [{}]", describe_ld_location(loc)),
+        // Exactly one of ld_location / fbd_location is populated for
+        // graphical POUs; both are None for ST. Order doesn't matter —
+        // they're mutually exclusive by construction.
+        let loc_hint = if let Some(loc) = &d.ld_location {
+            format!(" [{}]", describe_ld_location(loc))
+        } else if let Some(loc) = &d.fbd_location {
+            format!(" [{}]", describe_fbd_location(loc))
+        } else {
+            String::new()
         };
         eprintln!(
             "{f}:{}:{}: {} {}{loc_hint}: {}",
@@ -246,6 +252,15 @@ fn describe_ld_location(loc: &ironplc_bridge::LdLocation) -> String {
         Rung { rung_id } => format!("rung {rung_id}"),
         Coil { rung_id, coil_index } => format!("rung {rung_id} · coil {coil_index}"),
         FbCall { rung_id, instance } => format!("rung {rung_id} · {instance}(…)"),
+    }
+}
+
+fn describe_fbd_location(loc: &ironplc_bridge::FbdLocation) -> String {
+    use ironplc_bridge::FbdLocation::*;
+    match loc {
+        Variable { name } => format!("var {name}"),
+        Block { block_id } => format!("block {block_id}"),
+        Output { variable } => format!("output {variable}"),
     }
 }
 
@@ -278,6 +293,22 @@ fn cmd_transpile(file: &Path, with_map: bool) -> Result<i32> {
                 // Serialise the map alongside the ST — JSON output, one
                 // pair per call. The map.lines field is a Vec<Option<…>>
                 // which serde renders as `[null, {…}, null, …]`.
+                let payload = serde_json::json!({
+                    "st": st,
+                    "source_map": map.lines,
+                });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                print!("{st}");
+            }
+            Ok(0)
+        }
+        PouLanguage::Fbd => {
+            let prog: project::FbdProgram = serde_json::from_str(&source)
+                .with_context(|| format!("parsing FBD JSON in {}", file.display()))?;
+            let (st, map) = ironplc_bridge::transpile_fbd_to_st_with_map(&prog)
+                .with_context(|| format!("transpiling {}", file.display()))?;
+            if with_map {
                 let payload = serde_json::json!({
                     "st": st,
                     "source_map": map.lines,

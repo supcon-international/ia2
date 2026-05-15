@@ -13,12 +13,16 @@
 //! ```
 
 mod errors;
+mod fbd;
 mod ld;
 mod paths;
 mod store;
 mod types;
 
 pub use errors::StoreError;
+pub use fbd::{
+    FbdBlock, FbdInputBinding, FbdInputSource, FbdOutputBinding, FbdPosition, FbdProgram,
+};
 pub use ld::{
     LdCoil, LdCoilKind, LdComparator, LdFbInput, LdNode, LdOperand, LdPouType, LdProgram,
     LdRung, LdVarSection, LdVariable,

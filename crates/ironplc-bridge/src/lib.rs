@@ -3,12 +3,17 @@
 //! intended for downstream consumption by the server crate.
 
 mod errors;
+mod fbd_transpile;
 mod ld_transpile;
 mod runtime;
 
 pub use ld_transpile::transpile_to_st as transpile_ld_to_st;
 pub use ld_transpile::{
     transpile_to_st_with_map as transpile_ld_to_st_with_map, LdLocation, LdSourceMap,
+};
+pub use fbd_transpile::transpile_to_st as transpile_fbd_to_st;
+pub use fbd_transpile::{
+    transpile_to_st_with_map as transpile_fbd_to_st_with_map, FbdLocation, FbdSourceMap,
 };
 
 pub use errors::BridgeError;
@@ -152,6 +157,11 @@ fn source_to_st(
                 .map_err(|e| BridgeError::Parse(format!("LD JSON parse: {e}")))?;
             ld_transpile::transpile_to_st(&prog)
         }
+        project::PouLanguage::Fbd => {
+            let prog: project::FbdProgram = serde_json::from_str(source)
+                .map_err(|e| BridgeError::Parse(format!("FBD JSON parse: {e}")))?;
+            fbd_transpile::transpile_to_st(&prog)
+        }
         other => Err(BridgeError::Parse(format!(
             "{other:?} not yet supported by the bridge"
         ))),
@@ -223,9 +233,9 @@ fn strip_any_configuration(source: &str) -> String {
 /// Monaco editor). Severity is "error" for now — ironplc emits a single
 /// diagnostic stream without warning/info distinction at this layer.
 ///
-/// For LD POUs, `ld_location` carries the resolved LD element the
-/// diagnostic originated from (rung / coil / FB call / variable). It's
-/// `None` for ST POUs and for LD diagnostics on boilerplate lines.
+/// For graphical-language POUs, `ld_location` / `fbd_location` carry the
+/// resolved element the diagnostic originated from. Exactly one of them
+/// is populated (or neither, for ST POUs / boilerplate lines).
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct CheckDiagnostic {
@@ -237,24 +247,29 @@ pub struct CheckDiagnostic {
     pub end_line: u32,
     pub end_column: u32,
     /// For LD POUs only: which LD element this diagnostic originated
-    /// from. `None` for ST POUs and for diagnostics on boilerplate
-    /// lines (PROGRAM header, END_VAR, etc.).
+    /// from. `None` for ST / FBD POUs and for diagnostics on
+    /// boilerplate lines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ld_location: Option<ld_transpile::LdLocation>,
+    /// For FBD POUs only: which block / output binding / variable
+    /// declaration this diagnostic originated from. `None` for ST / LD
+    /// POUs and for diagnostics on boilerplate lines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fbd_location: Option<fbd_transpile::FbdLocation>,
 }
 
 /// Parse + analyse a Structured Text source and return all diagnostics
 /// (syntax errors, type errors, undeclared identifiers, etc.). Does NOT run
 /// codegen — this is the fast path for editor squiggles.
 pub fn check(source: &str) -> Vec<CheckDiagnostic> {
-    check_inner(source, None)
+    check_inner(source, SourceMapKind::None)
 }
 
 /// Like `check`, but for a graphical-language POU: parses the source,
 /// transpiles to ST, runs the ironplc pipeline, then maps each
-/// diagnostic's line back to the originating LD element. ST-language
-/// POUs should still go through `check` — this entry is only useful
-/// when the source on disk is graphical JSON, not text.
+/// diagnostic's line back to the originating LD / FBD element.
+/// ST-language POUs should still go through `check` — this entry
+/// dispatches on the supplied `language`.
 ///
 /// Returns a single synthetic diagnostic if the JSON itself doesn't
 /// parse (so the editor still gets a squiggle pointing at the broken
@@ -268,49 +283,74 @@ pub fn check_pou_source(
         project::PouLanguage::Ld => {
             let prog: project::LdProgram = match serde_json::from_str(source) {
                 Ok(p) => p,
-                Err(e) => {
-                    // Hand-rolled diagnostic — ironplc never saw this
-                    // source so it doesn't have one for us to wrap.
-                    return vec![CheckDiagnostic {
-                        severity: "error".into(),
-                        code: "LD-PARSE".into(),
-                        message: format!("Invalid LD JSON: {e}"),
-                        start_line: e.line() as u32,
-                        start_column: e.column() as u32,
-                        end_line: e.line() as u32,
-                        end_column: (e.column() as u32).saturating_add(1),
-                        ld_location: None,
-                    }];
-                }
+                Err(e) => return vec![synthetic_parse_diag("LD-PARSE", "LD", &e)],
             };
             let (st, map) = match ld_transpile::transpile_to_st_with_map(&prog) {
                 Ok(pair) => pair,
-                Err(e) => {
-                    return vec![CheckDiagnostic {
-                        severity: "error".into(),
-                        code: "LD-TRANSPILE".into(),
-                        message: format!("{e:?}"),
-                        start_line: 1,
-                        start_column: 1,
-                        end_line: 1,
-                        end_column: 1,
-                        ld_location: None,
-                    }];
-                }
+                Err(e) => return vec![synthetic_transpile_diag("LD-TRANSPILE", &e)],
             };
-            check_inner(&st, Some(&map))
+            check_inner(&st, SourceMapKind::Ld(&map))
+        }
+        project::PouLanguage::Fbd => {
+            let prog: project::FbdProgram = match serde_json::from_str(source) {
+                Ok(p) => p,
+                Err(e) => return vec![synthetic_parse_diag("FBD-PARSE", "FBD", &e)],
+            };
+            let (st, map) = match fbd_transpile::transpile_to_st_with_map(&prog) {
+                Ok(pair) => pair,
+                Err(e) => return vec![synthetic_transpile_diag("FBD-TRANSPILE", &e)],
+            };
+            check_inner(&st, SourceMapKind::Fbd(&map))
         }
         _ => Vec::new(),
     }
 }
 
+/// One of: no map, an LD map, an FBD map. Used by `check_inner` to
+/// route diagnostics through the right reverse-mapping helper without
+/// growing the public API.
+enum SourceMapKind<'a> {
+    None,
+    Ld(&'a ld_transpile::LdSourceMap),
+    Fbd(&'a fbd_transpile::FbdSourceMap),
+}
+
+fn synthetic_parse_diag(
+    code: &str,
+    language_name: &str,
+    e: &serde_json::Error,
+) -> CheckDiagnostic {
+    CheckDiagnostic {
+        severity: "error".into(),
+        code: code.into(),
+        message: format!("Invalid {language_name} JSON: {e}"),
+        start_line: e.line() as u32,
+        start_column: e.column() as u32,
+        end_line: e.line() as u32,
+        end_column: (e.column() as u32).saturating_add(1),
+        ld_location: None,
+        fbd_location: None,
+    }
+}
+
+fn synthetic_transpile_diag(code: &str, e: &BridgeError) -> CheckDiagnostic {
+    CheckDiagnostic {
+        severity: "error".into(),
+        code: code.into(),
+        message: format!("{e:?}"),
+        start_line: 1,
+        start_column: 1,
+        end_line: 1,
+        end_column: 1,
+        ld_location: None,
+        fbd_location: None,
+    }
+}
+
 /// Shared implementation of `check` / `check_pou_source`. If `map` is
-/// present, every produced diagnostic is annotated with the LD element
-/// whose generated ST line was reported.
-fn check_inner(
-    source: &str,
-    map: Option<&ld_transpile::LdSourceMap>,
-) -> Vec<CheckDiagnostic> {
+/// present, every produced diagnostic is annotated with the LD / FBD
+/// element whose generated ST line was reported.
+fn check_inner(source: &str, map: SourceMapKind<'_>) -> Vec<CheckDiagnostic> {
     let file_id = FileId::default();
     // `allow_empty_var_blocks` mirrors the ironplc CLI flag. POU templates
     // we ship intentionally start with empty VAR / VAR_INPUT / VAR_OUTPUT
@@ -320,7 +360,7 @@ fn check_inner(
 
     let library = match ironplc_parser::parse_program(source, &file_id, &options) {
         Ok(l) => l,
-        Err(d) => return vec![diag_to_dto_with_map(&d, source, map)],
+        Err(d) => return vec![diag_to_dto_with_map(&d, source, &map)],
     };
 
     let (_, context) = match ironplc_analyzer::stages::analyze(&[&library], &options) {
@@ -328,7 +368,7 @@ fn check_inner(
         Err(ds) => {
             return ds
                 .iter()
-                .map(|d| diag_to_dto_with_map(d, source, map))
+                .map(|d| diag_to_dto_with_map(d, source, &map))
                 .collect()
         }
     };
@@ -336,7 +376,7 @@ fn check_inner(
     context
         .diagnostics()
         .iter()
-        .map(|d| diag_to_dto_with_map(d, source, map))
+        .map(|d| diag_to_dto_with_map(d, source, &map))
         .collect()
 }
 
@@ -497,21 +537,24 @@ fn init_type_name(init: &InitialValueAssignmentKind) -> String {
 }
 
 /// Convert an ironplc diagnostic to our wire DTO, additionally looking
-/// up the LD origin via `map` when present. Diagnostics on lines that
-/// don't correspond to an LD element (boilerplate, synthetic temps)
-/// arrive with `ld_location = None`, which the editor renders as a
-/// generic file-level error rather than a per-element squiggle.
+/// up the LD / FBD origin via `map` when present. Diagnostics on lines
+/// that don't correspond to a graphical element (boilerplate, synthetic
+/// temps) arrive with both `ld_location` and `fbd_location` = None,
+/// which the editor renders as a generic file-level error rather than
+/// a per-element squiggle.
 fn diag_to_dto_with_map(
     d: &Diagnostic,
     source: &str,
-    map: Option<&ld_transpile::LdSourceMap>,
+    map: &SourceMapKind<'_>,
 ) -> CheckDiagnostic {
     let start = LineColumn::from_offset(source, d.primary.location.start);
     let end = LineColumn::from_offset(source, d.primary.location.end);
     let start_line = start.line + 1;
-    let ld_location = map
-        .and_then(|m| m.lookup(start_line as usize))
-        .cloned();
+    let (ld_location, fbd_location) = match map {
+        SourceMapKind::None => (None, None),
+        SourceMapKind::Ld(m) => (m.lookup(start_line as usize).cloned(), None),
+        SourceMapKind::Fbd(m) => (None, m.lookup(start_line as usize).cloned()),
+    };
     CheckDiagnostic {
         severity: "error".into(),
         code: d.code.clone(),
@@ -521,5 +564,6 @@ fn diag_to_dto_with_map(
         end_line: end.line + 1,
         end_column: end.column + 1,
         ld_location,
+        fbd_location,
     }
 }

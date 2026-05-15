@@ -177,6 +177,10 @@ impl ProjectStore {
         if ld.exists() {
             return Some((ld, PouLanguage::Ld));
         }
+        let fbd = dir.join(format!("{slug}.fbd.json"));
+        if fbd.exists() {
+            return Some((fbd, PouLanguage::Fbd));
+        }
         None
     }
 
@@ -253,6 +257,10 @@ impl ProjectStore {
             PouLanguage::Ld => (
                 self.root.join("pous").join(format!("{path}.ld.json")),
                 template_for_ld(leaf, type_),
+            ),
+            PouLanguage::Fbd => (
+                self.root.join("pous").join(format!("{path}.fbd.json")),
+                template_for_fbd(leaf, type_),
             ),
             other => {
                 return Err(StoreError::UnsupportedLanguage(format!("{other:?}")));
@@ -872,6 +880,8 @@ fn walk_pou_files(
         // get classified as a plain `.json`.
         let (slug_stem, lang) = if let Some(s) = name.strip_suffix(".ld.json") {
             (s, PouLanguage::Ld)
+        } else if let Some(s) = name.strip_suffix(".fbd.json") {
+            (s, PouLanguage::Fbd)
         } else if let Some(s) = name.strip_suffix(".st") {
             (s, PouLanguage::St)
         } else {
@@ -1026,6 +1036,55 @@ fn template_for_ld(name: &str, type_: PouType) -> String {
         }],
     };
     serde_json::to_string_pretty(&prog).expect("LD template serialises")
+}
+
+fn template_for_fbd(name: &str, type_: PouType) -> String {
+    use crate::fbd::{FbdBlock, FbdInputBinding, FbdInputSource, FbdProgram};
+    use crate::ld::{LdPouType, LdVarSection, LdVariable};
+    let pou_type = match type_ {
+        PouType::Program => LdPouType::Program,
+        PouType::FunctionBlock => LdPouType::FunctionBlock,
+        // FBD functions are also uncommon — same fallback as LD.
+        PouType::Function => LdPouType::Program,
+    };
+    // Seed with a single TON block driven by a placeholder input so
+    // the file is a valid, compileable starting point — the user sees
+    // the canonical shape immediately and edits one block / one wire
+    // at a time. We don't bind an output (no VAR_OUTPUT in this
+    // skeleton), so the block is a no-op at runtime but renders + lints
+    // clean.
+    let prog = FbdProgram {
+        name: name.into(),
+        pou_type,
+        variables: vec![LdVariable {
+            name: "trigger".into(),
+            type_name: "BOOL".into(),
+            section: LdVarSection::Internal,
+            init: None,
+        }],
+        blocks: vec![FbdBlock {
+            id: "b0".into(),
+            fb_type: "TON".into(),
+            instance: "myT".into(),
+            inputs: vec![
+                FbdInputBinding {
+                    pin: "IN".into(),
+                    value: FbdInputSource::Var {
+                        name: "trigger".into(),
+                    },
+                },
+                FbdInputBinding {
+                    pin: "PT".into(),
+                    value: FbdInputSource::Literal {
+                        value: "T#1s".into(),
+                    },
+                },
+            ],
+            position: None,
+        }],
+        outputs: vec![],
+    };
+    serde_json::to_string_pretty(&prog).expect("FBD template serialises")
 }
 
 fn default_config_for(protocol: Protocol) -> ProtocolConfig {

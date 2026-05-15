@@ -236,13 +236,15 @@ them at ST and explain ST replaces IL with a real expression syntax.
 
 ## Phased rollout
 
-| Phase | Scope | ~ Cost | Demo target |
-|---|---|---|---|
-| **1. LD** | Schema + transpiler + read-only SVG render + write path. | 1–2 weeks | "Author a motor seal-in circuit by editing JSON, see it render as a ladder, Run it, watch the coil flip in Monitor." |
-| **2. LD editing** | Drag/drop add contacts; rung edit. | 1 week | Click-to-add contact, change variable from a dropdown. |
-| **3. FBD** | Schema + dependency sort + transpiler + react-flow renderer with auto-layout (dagre). | 2–3 weeks | "Define a cascade controller graphically; the FB instances we already have (pid, lp_filter, arrhenius) appear as draggable blocks." |
-| **4. FBD position persistence (= CFC)** | Save dragged positions to JSON. Nothing else changes. | 2 days | Same demo as Phase 3, but rearranging blocks survives reload. |
-| **5. SFC** | Schema + transpiler + vertical-flow renderer. | 2 weeks | Batch process: idle → filling → draining → idle. Watch `current_step` change in Monitor. |
+| Phase | Scope | ~ Cost | Demo target | Status |
+|---|---|---|---|---|
+| **1. LD** | Schema + transpiler + read-only SVG render + write path. | 1–2 weeks | "Author a motor seal-in circuit by editing JSON, see it render as a ladder, Run it, watch the coil flip in Monitor." | ✅ shipped |
+| **2. LD editing** | Drag/drop add contacts; rung edit. | 1 week | Click-to-add contact, change variable from a dropdown. | ✅ shipped (incl. Compare blocks, standard FB library, source map) |
+| **3a. FBD backend** | JSON schema + topological-sort transpiler + source map + bridge dispatch + `cs check/transpile` integration. | done 2026-05-16 | `cs check pou.fbd.json` returns structured diagnostics with `fbd_location`; `cs transpile` dumps topo-ordered ST. | ✅ shipped |
+| **3b. FBD renderer** | react-flow + dagre read-only renderer, editor coming in 3c. | next | "Render `click_counter.fbd.json` and `cascade_pid.fbd.json` as block-and-wire diagrams in the IDE." | 🚧 pending |
+| **3c. FBD authoring** | Drag blocks, draw wires, pick FB types. | later | Build the demo above with the mouse, not by hand-editing JSON. | 🚧 pending |
+| **4. FBD position persistence (= CFC)** | Save dragged positions to JSON. Nothing else changes. | 2 days | Same demo as Phase 3, but rearranging blocks survives reload. | (gated on 3c) |
+| **5. SFC** | Schema + transpiler + vertical-flow renderer. | 2 weeks | Batch process: idle → filling → draining → idle. Watch `current_step` change in Monitor. | 🚧 pending |
 
 Each phase **ships independently**. Don't gate Phase 3 on Phase 2 being
 "polished". A read-only renderer with JSON-edit-only authoring is a

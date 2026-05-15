@@ -26,6 +26,21 @@ fn bad_ld() -> PathBuf {
     p
 }
 
+/// Path to a small valid FBD POU: R_TRIG → CTU pipeline.
+fn good_fbd() -> PathBuf {
+    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    p.push("tests/fixtures/good.fbd.json");
+    p
+}
+
+/// Path to an FBD POU with one undeclared variable on a block input
+/// pin — exercises the fbd_location wiring.
+fn bad_fbd() -> PathBuf {
+    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    p.push("tests/fixtures/bad.fbd.json");
+    p
+}
+
 fn cs() -> Command {
     Command::cargo_bin("cs").expect("compiled cs binary should exist")
 }
@@ -170,6 +185,51 @@ fn project_info_lists_pous_and_devices() {
     let pous = v["pous"].as_array().unwrap();
     assert_eq!(pous.len(), 1);
     assert_eq!(pous[0], "main");
+}
+
+#[test]
+fn fbd_check_clean_file_exits_zero() {
+    cs().arg("check")
+        .arg(good_fbd())
+        .assert()
+        .success()
+        .stderr(contains("clean"));
+}
+
+#[test]
+fn fbd_check_dirty_file_reports_fbd_location() {
+    let out = cs()
+        .arg("check")
+        .arg(bad_fbd())
+        .arg("--json")
+        .assert()
+        .code(1);
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let diag = &v["files"][0]["diagnostics"][0];
+    // The ghost variable is on block b0's IN pin; ironplc reports the
+    // error on the line of the FB call, so fbd_location should be
+    // `Block { block_id: "b0" }` — NOT ld_location.
+    assert!(diag["ld_location"].is_null());
+    assert_eq!(diag["fbd_location"]["kind"], "block");
+    assert_eq!(diag["fbd_location"]["block_id"], "b0");
+}
+
+#[test]
+fn fbd_transpile_emits_topo_sorted_calls() {
+    let out = cs().arg("transpile").arg(good_fbd()).assert().success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    // VAR section declares both FB instances
+    assert!(stdout.contains("rt : R_TRIG;"), "got:\n{stdout}");
+    assert!(stdout.contains("cu : CTU;"), "got:\n{stdout}");
+    // CTU references R_TRIG via dot access on the source instance
+    assert!(stdout.contains("cu(CU := rt.Q"), "got:\n{stdout}");
+    // Topo order: edge before counter
+    let edge = stdout.find("rt(CLK").unwrap();
+    let counter = stdout.find("cu(CU").unwrap();
+    assert!(edge < counter, "edge block must execute before counter");
+    // Output binding lands at the end
+    assert!(stdout.contains("done := cu.Q;"), "got:\n{stdout}");
 }
 
 #[test]
