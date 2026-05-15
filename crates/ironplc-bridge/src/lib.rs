@@ -7,6 +7,9 @@ mod ld_transpile;
 mod runtime;
 
 pub use ld_transpile::transpile_to_st as transpile_ld_to_st;
+pub use ld_transpile::{
+    transpile_to_st_with_map as transpile_ld_to_st_with_map, LdLocation, LdSourceMap,
+};
 
 pub use errors::BridgeError;
 pub use runtime::{DeviceSpec, ProgramHandle, RuntimeWriteError, VarSnapshot, VarValue, spawn};

@@ -60,6 +60,45 @@ from every existing PLC vendor's tooling, which is GUI-only.
 - **Deterministic state**: same inputs → same outputs. No hidden mutable state in tooling that an agent can't observe.
 - **Stable identifiers**: an agent that learned "POU `polymer_cstr` is in `pous/polymer_cstr.st`" yesterday must find it in the same place today.
 
+### 4a. CLI is the headline agent interface
+
+API-first is necessary but not sufficient. **The primary agent surface
+is the `cs` command-line binary**, not the HTTP API.
+
+Agents work like developers: read file, write file, run command, look
+at stdout. Every workflow that goes through an HTTP endpoint is one
+the agent must specifically learn (which URL? which Content-Type? is
+the server running? which project is "open"?). Every workflow that
+goes through a CLI feels native — `cs check pou.ld.json` slots into
+the same mental model as `tsc --noEmit` or `cargo build`. CLI is also
+the only path that works offline, in CI, in pre-commit, and inside
+batch refactoring scripts.
+
+**Rules**:
+- **Everything you'd do _before_ runtime starts — validate, transpile,
+  compile, lint, deploy, inspect project — MUST have a `cs` subcommand**.
+  The HTTP equivalent is supplemental, not primary. If a feature only
+  exists in HTTP, that's a regression on this axis.
+- **Anything that requires the running runtime (live values, attach,
+  Run/Stop, SSE streaming) stays HTTP-only**. A CLI wrapper that just
+  proxies to the server isn't a real CLI primitive — don't bother.
+- **`--help` text is written FOR THE AGENT**. Say when to use the tool,
+  when NOT to, what to call next. Style reference:
+  `vendor/ironplc/compiler/mcp/src/server.rs` — note how each tool's
+  description tells the agent the right sequencing
+  ("Call check until ok:true, then compile to obtain container_id,
+  then run").
+- **Every subcommand**: supports `--json` for machine output, prints
+  human-readable to stdout by default, errors to stderr. Exit codes
+  follow Unix: `0` success / `1` clean run but found issues (errors
+  in source / failed tests) / `2` usage error / `>2` infrastructure.
+- **No MCP server (yet)**. MCP is a wire format with a specific
+  protocol; CLI is universal. Future work can wrap our CLI as MCP if
+  some agent platform demands it — doing it the other way around
+  (CLI as a thin shim over MCP) would be awkward. The upstream
+  `ironplc-mcp` is a great _design_ reference for tool descriptions
+  and tool sequencing, not necessarily a protocol to copy.
+
 ## What this rules out
 
 Anti-patterns to refuse — refer to these by name in code review:

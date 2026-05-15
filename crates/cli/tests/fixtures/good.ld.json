@@ -1,0 +1,44 @@
+{
+  "name": "good",
+  "pou_type": "program",
+  "variables": [
+    { "name": "start_btn", "type": "BOOL", "section": "input" },
+    { "name": "stop_btn",  "type": "BOOL", "section": "input" },
+    { "name": "motor",     "type": "BOOL", "section": "output", "init": "FALSE" }
+  ],
+  "rungs": [
+    {
+      "id": "armed_seal",
+      "label": "Hold start 3s → motor seals in",
+      "logic": {
+        "op": "or",
+        "args": [
+          {
+            "op": "and",
+            "args": [
+              { "op": "contact", "var": "start_btn" },
+              {
+                "op": "fb_call",
+                "instance": "armTimer",
+                "fb_type": "TON",
+                "inputs": [
+                  { "pin": "IN", "value": { "kind": "var",     "name":  "start_btn" } },
+                  { "pin": "PT", "value": { "kind": "literal", "value": "T#3s"     } }
+                ],
+                "output_pin": "Q"
+              }
+            ]
+          },
+          {
+            "op": "and",
+            "args": [
+              { "op": "contact", "var": "motor" },
+              { "op": "contact", "var": "stop_btn", "negated": true }
+            ]
+          }
+        ]
+      },
+      "coils": [{ "var": "motor", "kind": "standard" }]
+    }
+  ]
+}

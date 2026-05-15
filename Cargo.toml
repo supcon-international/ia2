@@ -3,6 +3,12 @@ resolver = "2"
 members = ["crates/*"]
 exclude = ["vendor/*"]
 
+# clap is only used by the CLI crate today; declare here for workspace
+# coherence so other crates can add it without version drift.
+[workspace.dependencies.clap]
+version = "4"
+features = ["derive"]
+
 [workspace.package]
 # Edition 2021 matches vendored ironplc; their subcrates use
 # `edition.workspace = true` and resolve to our [workspace.package] because

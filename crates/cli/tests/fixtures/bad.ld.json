@@ -1,0 +1,14 @@
+{
+  "name": "bad",
+  "pou_type": "program",
+  "variables": [
+    { "name": "btn", "type": "BOOL", "section": "input" }
+  ],
+  "rungs": [
+    {
+      "id": "loose",
+      "logic": { "op": "contact", "var": "btn" },
+      "coils": [{ "var": "nope", "kind": "standard" }]
+    }
+  ]
+}
