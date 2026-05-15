@@ -442,13 +442,37 @@ function RungEditor({
 }) {
   const layoutBox = measure(rung.logic)
   const cols = layoutBox.cols
-  const rows = layoutBox.rows
-  const width =
-    RAIL_PAD * 2 +
-    cols * CELL_W +
-    COIL_W * Math.max(rung.coils.length, 1) +
-    24
-  const height = Math.max(rows, 1) * CELL_H + TOP_PAD * 2
+  const networkRows = layoutBox.rows
+  // Total rows = max(network height, coil count). A 3-coil rung needs
+  // 3 rows of vertical space for the coil stack even if the network
+  // is a single contact, and vice versa. This is the canonical IEC
+  // 61131-3 LD layout — multiple coils on one rung are PARALLEL loads
+  // driven by the same network output, drawn as vertical branches at
+  // the right edge of the rung.
+  const coilCount = rung.coils.length
+  const totalRows = Math.max(networkRows, coilCount, 1)
+  // Network is centered vertically within the rung's total height; the
+  // coil column sits to the right with one row per coil, also centered.
+  const networkY = TOP_PAD + ((totalRows - networkRows) * CELL_H) / 2
+  const coilStackY =
+    TOP_PAD + ((totalRows - Math.max(coilCount, 1)) * CELL_H) / 2
+  // Single output column (coils stacked vertically) sits right after
+  // the network. With multiple coils we still only need ONE column
+  // width — they don't extend horizontally.
+  const width = RAIL_PAD * 2 + cols * CELL_W + COIL_W + 24
+  const height = totalRows * CELL_H + TOP_PAD * 2
+
+  // The "network exit" y is the middle of the network's vertical band.
+  const networkOutY =
+    networkY + (networkRows * CELL_H) / 2
+  // x where the coil column begins (right edge of the contact network).
+  const coilColX = RAIL_PAD + cols * CELL_W
+  // x where each coil glyph's left paren sits; centered in COIL_W.
+  const coilGlyphX = coilColX + (COIL_W - 36) / 2
+  // Y of each individual coil (one row per coil, centered in its row).
+  const coilYs = rung.coils.map(
+    (_, ci) => coilStackY + ci * CELL_H + CELL_H / 2,
+  )
 
   const isSelected =
     selection?.kind === "rung" && selection.rungIdx === rungIdx
@@ -510,9 +534,9 @@ function RungEditor({
           node={rung.logic}
           path={[]}
           x={RAIL_PAD}
-          y={TOP_PAD}
+          y={networkY}
           cols={cols}
-          rows={rows}
+          rows={networkRows}
           rungIdx={rungIdx}
           selection={selection}
           readOnly={readOnly}
@@ -520,53 +544,86 @@ function RungEditor({
           onCommit={(transform) => onCommit(transform(prog))}
         />
 
-        {rung.coils.map((coil, ci) => {
-          const cx = RAIL_PAD + cols * CELL_W + ci * COIL_W
-          const cy = TOP_PAD + ((rows - 1) * CELL_H) / 2 + CELL_H / 2
-          const sel =
-            selection?.kind === "coil" &&
-            selection.rungIdx === rungIdx &&
-            selection.coilIdx === ci
-          return (
-            <g key={ci}>
+        {/* Coil column: vertical stack of parallel loads driven by the
+            network output. Standard IEC 61131-3 LD: one horizontal wire
+            from network out to a vertical merge column, then one
+            horizontal wire from each coil to the right rail. */}
+        {coilCount >= 1 && (
+          <>
+            {/* Horizontal wire from the network output to the coil column. */}
+            <line
+              x1={coilColX}
+              y1={networkOutY}
+              x2={coilColX}
+              y2={networkOutY}
+              className="stroke-foreground"
+              strokeWidth={1}
+              vectorEffect="non-scaling-stroke"
+            />
+            {/* Vertical merge wire only when more than one coil — single
+                coil rungs use a flat horizontal connection (classical
+                single-coil look). */}
+            {coilCount > 1 && (
               <line
-                x1={cx}
-                y1={cy}
-                x2={cx + COIL_W - 8}
-                y2={cy}
+                x1={coilColX}
+                y1={Math.min(networkOutY, coilYs[0])}
+                x2={coilColX}
+                y2={Math.max(networkOutY, coilYs[coilYs.length - 1])}
                 className="stroke-foreground"
                 strokeWidth={1}
                 vectorEffect="non-scaling-stroke"
               />
-              <line
-                x1={cx + COIL_W - 8}
-                y1={cy}
-                x2={width - RAIL_PAD}
-                y2={cy}
-                className="stroke-foreground"
-                strokeWidth={1}
-                vectorEffect="non-scaling-stroke"
-              />
-              <CoilGlyph
-                coil={coil}
-                x={cx + (COIL_W - 36) / 2}
-                y={cy}
-                selected={sel}
-                onClick={() =>
-                  onSelect(
-                    sel ? null : { kind: "coil", rungIdx, coilIdx: ci },
-                  )
-                }
-              />
-            </g>
-          )
-        })}
+            )}
+            {rung.coils.map((coil, ci) => {
+              const cy = coilYs[ci]
+              const sel =
+                selection?.kind === "coil" &&
+                selection.rungIdx === rungIdx &&
+                selection.coilIdx === ci
+              return (
+                <g key={ci}>
+                  {/* horizontal wire: merge column → coil glyph */}
+                  <line
+                    x1={coilColX}
+                    y1={cy}
+                    x2={coilGlyphX}
+                    y2={cy}
+                    className="stroke-foreground"
+                    strokeWidth={1}
+                    vectorEffect="non-scaling-stroke"
+                  />
+                  {/* horizontal wire: coil glyph → right rail */}
+                  <line
+                    x1={coilGlyphX + 36}
+                    y1={cy}
+                    x2={width - RAIL_PAD}
+                    y2={cy}
+                    className="stroke-foreground"
+                    strokeWidth={1}
+                    vectorEffect="non-scaling-stroke"
+                  />
+                  <CoilGlyph
+                    coil={coil}
+                    x={coilGlyphX}
+                    y={cy}
+                    selected={sel}
+                    onClick={() =>
+                      onSelect(
+                        sel ? null : { kind: "coil", rungIdx, coilIdx: ci },
+                      )
+                    }
+                  />
+                </g>
+              )
+            })}
+          </>
+        )}
 
         {/* Empty-rung hint when no coil declared. */}
-        {rung.coils.length === 0 && (
+        {coilCount === 0 && (
           <text
-            x={RAIL_PAD + cols * CELL_W + 12}
-            y={TOP_PAD + ((rows - 1) * CELL_H) / 2 + CELL_H / 2 + 4}
+            x={coilColX + 12}
+            y={networkOutY + 4}
             className="fill-muted-foreground"
             fontSize="10"
             fontFamily="ui-monospace, monospace"
