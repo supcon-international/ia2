@@ -32,6 +32,28 @@ pub struct AppState {
     /// `None` if the last run is clean. Updated when AppEvent::Error
     /// fires and on a clean Started.
     pub last_error: Arc<Mutex<Option<String>>>,
+    /// What the most-recent /api/run call asked the bridge to run.
+    /// Lets the IDE recover "running ad-hoc / running scheduled, which
+    /// PROGRAM(s)" after a page reload without an out-of-band channel.
+    /// Cleared on /api/stop and on close-project.
+    pub running_info: Arc<Mutex<Option<RunningInfo>>>,
+}
+
+/// Same shape the frontend uses, on the server side, so /api/runtime/status
+/// can report it back across the wire (via `RuntimeStatus.running_info`).
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RunningInfo {
+    /// `compile_isolated_source` path: one PROGRAM from one .st file.
+    Isolated {
+        program: String,
+        file_path: String,
+    },
+    /// `compile_project_with_tasks` (or `compile_project`): full
+    /// tasks.toml schedule. Programs are the PROGRAM names, not the
+    /// instance names — that's what makes sense to a human at a glance.
+    Scheduled { programs: Vec<String> },
 }
 
 impl AppState {
@@ -47,6 +69,7 @@ impl AppState {
             attachments: AttachmentRegistry::new(),
             last_snapshot: Arc::new(Mutex::new(None)),
             last_error: Arc::new(Mutex::new(None)),
+            running_info: Arc::new(Mutex::new(None)),
         }
     }
 }

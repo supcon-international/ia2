@@ -61,6 +61,23 @@ export type View = "app" | "device" | "iomap" | "edge" | "tasks"
  * via the SSH-forwarded port. */
 export type AttachedEdge = { name: string; localPort: number } | null
 
+/** What the runtime is currently executing.
+ *
+ *  - `isolated`: ProgramPane "Run THIS POU" — one PROGRAM, compiled from
+ *    a single source file, on a synthetic single-task schedule.
+ *  - `scheduled`: TasksPane "Run project" — every PROGRAM instance bound
+ *    in `tasks.toml`. We snapshot the list at run-time so the Monitor
+ *    header stays accurate even if the user edits tasks.toml afterwards.
+ *  - `remote`: attached to an edge runtime. We can't easily know the
+ *    edge's running programs without calling its `/status` endpoint, so
+ *    show the edge name and let the operator inspect there.
+ *  - `null`: nothing running locally and not attached. */
+export type RunningInfo =
+  | { kind: "isolated"; program: string; filePath: string }
+  | { kind: "scheduled"; programs: string[] }
+  | { kind: "remote"; edge: string }
+  | null
+
 type AppState = {
   // Project
   project: ProjectTree | null
@@ -87,6 +104,8 @@ type AppState = {
   isRunning: boolean
   connected: boolean
   lastSnapshot: VarSnapshot | null
+  /** What the runtime is currently executing — see `RunningInfo`. */
+  running: RunningInfo
 
   // Errors
   error: string | null
@@ -162,6 +181,13 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   const [connected, setConnected] = useState(false)
   const [lastSnapshot, setLastSnapshot] = useState<VarSnapshot | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // What's actually executing right now. Tracked client-side because
+  // the bridge's `started` SSE event doesn't carry program names — the
+  // call site (ProgramPane Run vs TasksPane Run) is the source of truth
+  // for whether this is an ad-hoc isolated run or the full tasks.toml
+  // schedule. Cleared on stop / SSE `stopped` so we don't leave a stale
+  // "running ..." pill after the program exits.
+  const [running, setRunning] = useState<RunningInfo>(null)
 
   const esRef = useRef<EventSource | null>(null)
 
@@ -252,6 +278,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         // good enough; the program has been running on the edge for a
         // while already.
         setIsRunning(true)
+        setRunning({ kind: "remote", edge: attached.name })
         setError(null)
       }
     }
@@ -274,6 +301,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
               break
             case "stopped":
               setIsRunning(false)
+              setRunning(null)
               break
             case "error":
               setError(ev.data)
@@ -355,6 +383,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       setCurrentPou(null)
       setSource("")
       setIsRunning(false)
+      setRunning(null)
       setLastSnapshot(null)
       setAvailableProjects(await apiFetchProjects())
     } catch (e) {
@@ -645,6 +674,10 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       setError(String(e))
     }
     setAttached(null)
+    // Detaching means we're back on the local bridge, which may or may
+    // not be running. Until a "started" comes through, no running info.
+    setRunning(null)
+    setIsRunning(false)
   }, [attached])
 
   // ---------------- Run / Stop ----------------
@@ -661,16 +694,36 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
           setCurrentPou({ ...currentPou, source })
         }
         await runProgram(program, file_path)
+        // Record what we just kicked off so the Monitor header can
+        // label the snapshots. Three cases:
+        //   - program + file_path -> ProgramPane isolated run
+        //   - program only        -> project-level run with a chosen
+        //     PROGRAM (treat as isolated for labelling — Monitor will
+        //     show that one name)
+        //   - neither             -> full tasks.toml schedule
+        if (program && file_path) {
+          setRunning({ kind: "isolated", program, filePath: file_path })
+        } else if (program) {
+          setRunning({ kind: "isolated", program, filePath: program })
+        } else {
+          setRunning({
+            kind: "scheduled",
+            programs: tasks.programs.map((p) => p.program),
+          })
+        }
       } catch (e) {
         setError(String(e))
       }
     },
-    [currentPou, source],
+    [currentPou, source, tasks],
   )
 
   const stop = useCallback(async () => {
     try {
       await stopProgram()
+      // Clear immediately for snappy UI; the SSE `stopped` event will
+      // also clear, but the round-trip is several hundred ms.
+      setRunning(null)
     } catch (e) {
       setError(String(e))
     }
@@ -696,6 +749,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         iomap,
         tasks,
         isRunning,
+        running,
         connected,
         lastSnapshot,
         error,

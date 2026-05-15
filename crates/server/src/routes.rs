@@ -40,7 +40,7 @@ use ts_rs::TS;
 use crate::edges::{AttachInfo, DeployReport, EdgeProbe, attach_edge, deploy_to_edge, probe_edge};
 use crate::error::ApiError;
 use crate::events::AppEvent;
-use crate::state::AppState;
+use crate::state::{AppState, RunningInfo};
 
 // ============================================================
 //  Response types (TS-exported)
@@ -850,6 +850,36 @@ pub async fn run(
         .lock()
         .expect("program mutex")
         .replace(handle);
+
+    // Record what kind of run this is so /api/runtime/status can label
+    // the Monitor pane on a fresh page load (which would otherwise have
+    // no way to know — the SSE `Started` event already fired).
+    let info = match (req.program.as_deref(), req.file_path.as_deref()) {
+        (Some(name), Some(file_path)) => Some(RunningInfo::Isolated {
+            program: name.to_string(),
+            file_path: file_path.to_string(),
+        }),
+        (Some(name), None) => Some(RunningInfo::Scheduled {
+            programs: vec![name.to_string()],
+        }),
+        (None, _) => {
+            // Whole-project schedule — pull the PROGRAM names from
+            // tasks.toml so the IDE can render them, not the instance
+            // names (instances are bookkeeping; PROGRAM names are what
+            // humans recognise from the POU tree).
+            let programs = state
+                .project
+                .lock()
+                .expect("project mutex")
+                .as_ref()
+                .and_then(|s| s.read_tasks().ok().flatten())
+                .map(|t| t.programs.into_iter().map(|p| p.program).collect())
+                .unwrap_or_default();
+            Some(RunningInfo::Scheduled { programs })
+        }
+    };
+    *state.running_info.lock().expect("running_info mutex") = info;
+
     let _ = state.event_tx.send(AppEvent::Started);
 
     Ok(Json(RunResponse { ok: true }))
@@ -864,6 +894,7 @@ pub async fn stop(State(state): State<AppState>) -> Json<RunResponse> {
     {
         handle.stop();
     }
+    *state.running_info.lock().expect("running_info mutex") = None;
     let _ = state.event_tx.send(AppEvent::Stopped);
     Json(RunResponse { ok: true })
 }

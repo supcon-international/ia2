@@ -14,11 +14,11 @@ import {
   stripHexPrefix,
   type VarCategory,
 } from "@/lib/var-history"
-import { useRuntime } from "@/state/runtime"
+import { useRuntime, type RunningInfo } from "@/state/runtime"
 import type { VarValue } from "@/types/generated/VarValue"
 
 export function MonitorPane() {
-  const { lastSnapshot, isRunning, currentPou } = useRuntime()
+  const { lastSnapshot, isRunning, currentPou, running } = useRuntime()
 
   // History buffers (mutated in place; re-rendered via a tick counter).
   const historyRef = useRef<Map<string, number[]>>(new Map())
@@ -76,12 +76,15 @@ export function MonitorPane() {
 
   return (
     <section className="flex h-full min-h-0 min-w-0 flex-col border-t border-border bg-muted/20">
-      <div className="flex h-7 items-center justify-between border-b border-border px-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-        <span>Monitor</span>
+      <div className="flex h-7 items-center justify-between gap-3 border-b border-border px-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+        <span className="flex shrink-0 items-center gap-2">
+          <span>Monitor</span>
+          <RunningPill running={running} isRunning={isRunning} />
+        </span>
         {lastSnapshot && (
           <span
             className={cn(
-              "font-mono normal-case tracking-normal",
+              "shrink-0 font-mono normal-case tracking-normal",
               stale ? "text-muted-foreground" : "text-foreground",
             )}
           >
@@ -126,6 +129,95 @@ export function MonitorPane() {
         )}
       </div>
     </section>
+  )
+}
+
+// ============================================================
+//   RunningPill — header chip that labels WHICH program(s) the
+//   variables below belong to. Three variants:
+//
+//     - isolated  (ProgramPane Run): one PROGRAM name in FX Green
+//     - scheduled (TasksPane Run):   list of PROGRAM names
+//     - remote    (attached to edge): edge alias + "remote" tag
+//
+//   When `running` is null but `isRunning` is true (race window
+//   between SSE `started` and our local state catching up), fall
+//   back to a neutral "running" tag so the header doesn't lie.
+// ============================================================
+
+function RunningPill({
+  running,
+  isRunning,
+}: {
+  running: RunningInfo
+  isRunning: boolean
+}) {
+  if (!running) {
+    if (isRunning) {
+      return <Tag color="highlight">running</Tag>
+    }
+    return null
+  }
+  if (running.kind === "isolated") {
+    return (
+      <Tag color="highlight" title={`Running ad-hoc from ${running.filePath}.st`}>
+        <span className="font-mono">{running.program}</span>
+        <span className="opacity-60">isolated</span>
+      </Tag>
+    )
+  }
+  if (running.kind === "scheduled") {
+    const names = running.programs
+    const label =
+      names.length === 0
+        ? "(empty schedule)"
+        : names.length <= 3
+          ? names.join(", ")
+          : `${names.slice(0, 2).join(", ")} +${names.length - 2}`
+    return (
+      <Tag
+        color="highlight"
+        title={
+          names.length > 0
+            ? `Running ${names.length} PROGRAM instance${names.length > 1 ? "s" : ""}: ${names.join(", ")}`
+            : "tasks.toml has no PROGRAM bindings"
+        }
+      >
+        <span className="font-mono">{label}</span>
+        <span className="opacity-60">scheduled</span>
+      </Tag>
+    )
+  }
+  // remote
+  return (
+    <Tag color="muted" title={`Attached to edge ${running.edge}`}>
+      <span className="font-mono">{running.edge}</span>
+      <span className="opacity-60">remote</span>
+    </Tag>
+  )
+}
+
+function Tag({
+  color,
+  title,
+  children,
+}: {
+  color: "highlight" | "muted"
+  title?: string
+  children: React.ReactNode
+}) {
+  return (
+    <span
+      title={title}
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded px-1.5 py-0.5 font-medium normal-case tracking-normal",
+        color === "highlight"
+          ? "bg-highlight/15 text-highlight"
+          : "border border-border bg-muted/50 text-muted-foreground",
+      )}
+    >
+      {children}
+    </span>
   )
 }
 
