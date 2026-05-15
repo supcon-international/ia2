@@ -1,6 +1,7 @@
 import { PanelRight, Play, Plus, RotateCcw, Save, Square } from "lucide-react"
 import { useState } from "react"
 
+import { LDEditor } from "@/components/editor/LDEditor"
 import { STEditor } from "@/components/editor/STEditor"
 import { cn } from "@/lib/utils"
 import { useRuntime } from "@/state/runtime"
@@ -187,11 +188,20 @@ export function ProgramPane() {
       )}
       <div className="flex min-h-0 flex-1">
         <div className="min-h-0 min-w-0 flex-1">
-          <STEditor
-            value={source}
-            onChange={setSource}
-            diagnostics={diagnostics}
-          />
+          {/* Editor dispatch by POU language. ST keeps the Monaco
+              editor; LD renders a read-only SVG ladder (authoring
+              still goes through the JSON, via the in-editor fallback
+              that LDEditor surfaces when the source can't parse —
+              and via direct file edits / agent writes for now). */}
+          {currentPou.declarations[0]?.language === "ld" ? (
+            <LDEditor source={source} />
+          ) : (
+            <STEditor
+              value={source}
+              onChange={setSource}
+              diagnostics={diagnostics}
+            />
+          )}
         </div>
         {varsOpen && (
           <div className="hidden min-h-0 w-[240px] shrink-0 md:block">

@@ -94,6 +94,10 @@ pub struct Pou {
 pub struct PouFileSource {
     pub path: String,
     pub source: String,
+    /// Detected from the file extension — `.st` → `St`, `.ld.json` →
+    /// `Ld`. Lets the bridge route parsing/transpilation per file
+    /// without re-probing the filesystem.
+    pub language: PouLanguage,
 }
 
 /// As `ProjectTree`, but with each POU file represented as raw source

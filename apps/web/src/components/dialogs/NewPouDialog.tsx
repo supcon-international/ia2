@@ -19,6 +19,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { useRuntime } from "@/state/runtime"
+import type { PouLanguage } from "@/types/generated/PouLanguage"
 import type { PouType } from "@/types/generated/PouType"
 
 type ControlledProps = {
@@ -46,6 +47,7 @@ export function NewPouDialog(props: Props) {
   const parent = props.parent ?? ""
   const [name, setName] = useState("")
   const [kind, setKind] = useState<PouType>("program")
+  const [language, setLanguage] = useState<PouLanguage>("st")
   const [submitting, setSubmitting] = useState(false)
 
   // Clear inputs each time the dialog opens, so re-opening for a
@@ -54,16 +56,18 @@ export function NewPouDialog(props: Props) {
     if (open) {
       setName("")
       setKind("program")
+      setLanguage("st")
     }
   }, [open, parent])
 
   const trimmed = name.trim()
   const fullPath = parent ? `${parent}/${trimmed}` : trimmed
+  const extension = language === "ld" ? "ld.json" : "st"
 
   const submit = async () => {
     if (!trimmed) return
     setSubmitting(true)
-    await createPou(fullPath, kind)
+    await createPou(fullPath, kind, language)
     setSubmitting(false)
     setOpen(false)
   }
@@ -95,28 +99,45 @@ export function NewPouDialog(props: Props) {
               }}
               autoFocus
             />
-            {trimmed && parent && (
+            {trimmed && (
               <div className="font-mono text-[11px] text-muted-foreground">
-                applications/{fullPath}.st
+                pous/{fullPath}.{extension}
               </div>
             )}
           </div>
-          <div className="space-y-2">
-            <Label>Type</Label>
-            <Select
-              value={kind}
-              onValueChange={(v) => setKind(v as PouType)}
-            >
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="program">Program (ST)</SelectItem>
-                <SelectItem value="function_block">
-                  Function Block (ST)
-                </SelectItem>
-              </SelectContent>
-            </Select>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-2">
+              <Label>Type</Label>
+              <Select
+                value={kind}
+                onValueChange={(v) => setKind(v as PouType)}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="program">Program</SelectItem>
+                  <SelectItem value="function_block">
+                    Function Block
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label>Language</Label>
+              <Select
+                value={language}
+                onValueChange={(v) => setLanguage(v as PouLanguage)}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="st">Structured Text</SelectItem>
+                  <SelectItem value="ld">Ladder Diagram</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
           </div>
         </div>
         <DialogFooter>

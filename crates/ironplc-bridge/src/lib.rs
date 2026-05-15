@@ -3,7 +3,10 @@
 //! intended for downstream consumption by the server crate.
 
 mod errors;
+mod ld_transpile;
 mod runtime;
+
+pub use ld_transpile::transpile_to_st as transpile_ld_to_st;
 
 pub use errors::BridgeError;
 pub use runtime::{DeviceSpec, ProgramHandle, RuntimeWriteError, VarSnapshot, VarValue, spawn};
@@ -85,10 +88,14 @@ pub fn compile_project_with_tasks(
 
     let mut combined = String::new();
     for path in &pou_paths {
+        let language = store
+            .pou_file_language(path)
+            .map_err(|e| BridgeError::Parse(format!("language for '{path}': {e}")))?;
         let source = store
             .read_pou_source(path)
             .map_err(|e| BridgeError::Parse(format!("reading pou '{path}': {e}")))?;
-        let cleaned = strip_any_configuration(&source);
+        let st = source_to_st(&source, language)?;
+        let cleaned = strip_any_configuration(&st);
         combined.push_str(&cleaned);
         if !combined.ends_with('\n') {
             combined.push('\n');
@@ -104,8 +111,12 @@ pub fn compile_project_with_tasks(
 /// Run actually runs cascade_pid in isolation — without ironplc's debug
 /// section pulling in variables from PROGRAMs declared in *other* files
 /// (which is what happens when `compile_project` concatenates everything).
+///
+/// `language` selects how `source` is interpreted: `St` → use the text
+/// verbatim, `Ld` → transpile from JSON to ST first.
 pub fn compile_isolated_source(
     source: &str,
+    language: project::PouLanguage,
     tasks: &project::Tasks,
 ) -> Result<Container, BridgeError> {
     if tasks.programs.is_empty() {
@@ -113,13 +124,35 @@ pub fn compile_isolated_source(
             "no PROGRAM instance to run".into(),
         ));
     }
-    let mut combined = String::with_capacity(source.len() + 256);
-    combined.push_str(&strip_any_configuration(source));
+    let st = source_to_st(source, language)?;
+    let mut combined = String::with_capacity(st.len() + 256);
+    combined.push_str(&strip_any_configuration(&st));
     if !combined.ends_with('\n') {
         combined.push('\n');
     }
     combined.push_str(&synthesize_configuration(tasks));
     compile(&combined)
+}
+
+/// Lower an arbitrary POU source into ST, ready for ironplc to parse.
+/// `St` is the identity. `Ld` parses the JSON via the LD schema and
+/// runs the transpiler. Returns a descriptive parse error if the input
+/// shape doesn't match the declared language.
+fn source_to_st(
+    source: &str,
+    language: project::PouLanguage,
+) -> Result<String, BridgeError> {
+    match language {
+        project::PouLanguage::St => Ok(source.to_string()),
+        project::PouLanguage::Ld => {
+            let prog: project::LdProgram = serde_json::from_str(source)
+                .map_err(|e| BridgeError::Parse(format!("LD JSON parse: {e}")))?;
+            ld_transpile::transpile_to_st(&prog)
+        }
+        other => Err(BridgeError::Parse(format!(
+            "{other:?} not yet supported by the bridge"
+        ))),
+    }
 }
 
 /// Build a single CONFIGURATION block from the project's task / program
@@ -243,11 +276,46 @@ pub struct VariableInfo {
 /// to surface here; the LSP diagnostics endpoint is the right path for
 /// "what's wrong with this source".
 ///
-/// Language is hard-coded to `St` for now (the only language ironplc
-/// supports). When other languages land upstream, this function will
-/// either get an explicit `language` parameter or peek at the file
-/// extension; the caller doesn't change.
-pub fn extract_pou_declarations(source: &str) -> Vec<project::PouDecl> {
+/// Dispatches on `language`:
+///
+/// - `St`  — runs the ironplc parser and emits one `PouDecl` per
+///   top-level PROGRAM / FUNCTION_BLOCK / FUNCTION.
+/// - `Ld`  — parses the `.ld.json` source and emits a single `PouDecl`
+///   built from the `LdProgram`'s name + pou_type. LD files are
+///   single-declaration by design (see `crates/project/src/ld.rs`).
+/// - others — returns empty (no parser yet). The new-POU dialog
+///   prevents these from existing on disk, but be defensive.
+pub fn extract_pou_declarations(
+    source: &str,
+    language: project::PouLanguage,
+) -> Vec<project::PouDecl> {
+    use project::{PouDecl, PouLanguage, PouType};
+    match language {
+        PouLanguage::St => extract_st_declarations(source),
+        PouLanguage::Ld => {
+            // Tolerant: if the JSON is malformed (mid-edit save, say)
+            // we just return no decls rather than blowing up the
+            // entire /api/project response.
+            match serde_json::from_str::<project::LdProgram>(source) {
+                Ok(prog) => vec![PouDecl {
+                    name: prog.name,
+                    type_: match prog.pou_type {
+                        project::LdPouType::Program => PouType::Program,
+                        project::LdPouType::FunctionBlock => PouType::FunctionBlock,
+                    },
+                    language: PouLanguage::Ld,
+                }],
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to parse LD source for declarations");
+                    vec![]
+                }
+            }
+        }
+        _ => vec![],
+    }
+}
+
+fn extract_st_declarations(source: &str) -> Vec<project::PouDecl> {
     use project::{PouDecl, PouLanguage, PouType};
     let file_id = FileId::default();
     let mut options = CompilerOptions::default();

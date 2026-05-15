@@ -111,8 +111,13 @@ impl ProjectStore {
         let pou_paths = self.list_pou_paths()?;
         let mut pous = Vec::with_capacity(pou_paths.len());
         for path in pou_paths {
+            let language = self.pou_file_language(&path)?;
             let source = self.read_pou_source(&path)?;
-            pous.push(PouFileSource { path, source });
+            pous.push(PouFileSource {
+                path,
+                source,
+                language,
+            });
         }
         let devices = self.list_devices()?;
         let edges = self.list_edges()?;
@@ -148,26 +153,73 @@ impl ProjectStore {
             return Ok(vec![]);
         }
         let mut out = Vec::new();
-        walk_files(&root, "", "st", &mut |rel, _source| {
-            out.push(rel.to_string());
+        walk_pou_files(&root, "", &mut |slug, _lang, _src| {
+            out.push(slug.to_string());
             Ok(())
         })?;
         out.sort();
+        out.dedup();
         Ok(out)
     }
 
+    /// Locate the on-disk file for a POU slug, returning both the path
+    /// and the language detected from its extension. We probe `.st`
+    /// first (the common case) then `.ld.json`. When graphical languages
+    /// expand we add more probes here — one source of truth for the
+    /// "slug → file" mapping.
+    pub fn pou_file_path(&self, slug: &str) -> Option<(PathBuf, PouLanguage)> {
+        let dir = self.root.join("pous");
+        let st = dir.join(format!("{slug}.st"));
+        if st.exists() {
+            return Some((st, PouLanguage::St));
+        }
+        let ld = dir.join(format!("{slug}.ld.json"));
+        if ld.exists() {
+            return Some((ld, PouLanguage::Ld));
+        }
+        None
+    }
+
+    /// Read the raw on-disk contents of a POU file, regardless of
+    /// language. For `.st` this is the IEC source; for `.ld.json` it's
+    /// the JSON literal — the caller (typically the bridge) decides
+    /// what to do with it based on the language hint from
+    /// [`pou_file_language`](Self::pou_file_language).
     pub fn read_pou_source(&self, path: &str) -> Result<String, StoreError> {
         validate_path(path)?;
-        let file = self.root.join("pous").join(format!("{path}.st"));
-        if !file.exists() {
-            return Err(StoreError::PouNotFound(path.into()));
-        }
+        let (file, _lang) = self
+            .pou_file_path(path)
+            .ok_or_else(|| StoreError::PouNotFound(path.into()))?;
         Ok(fs::read_to_string(&file)?)
     }
 
+    /// Read the language of an existing POU. Returns `PouNotFound` if
+    /// the slug doesn't resolve to a file on disk.
+    pub fn pou_file_language(&self, path: &str) -> Result<PouLanguage, StoreError> {
+        validate_path(path)?;
+        let (_, lang) = self
+            .pou_file_path(path)
+            .ok_or_else(|| StoreError::PouNotFound(path.into()))?;
+        Ok(lang)
+    }
+
+    /// Overwrite the POU file at `path`. The on-disk language is
+    /// preserved — we don't allow a save to change `.st` into `.ld.json`
+    /// or vice versa, because that would silently invalidate any
+    /// in-flight UI state. Creating a new POU of a different language
+    /// is `create_pou_file`.
     pub fn write_pou_source(&self, path: &str, source: &str) -> Result<(), StoreError> {
         validate_path(path)?;
-        let file = self.root.join("pous").join(format!("{path}.st"));
+        let (file, _lang) = match self.pou_file_path(path) {
+            Some(pair) => pair,
+            None => {
+                // First write of a freshly-named POU — fall back to
+                // `.st`. New non-ST POUs come through `create_pou_file`
+                // which sets the extension explicitly.
+                let p = self.root.join("pous").join(format!("{path}.st"));
+                (p, PouLanguage::St)
+            }
+        };
         if let Some(parent) = file.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -176,7 +228,12 @@ impl ProjectStore {
     }
 
     /// Create a new POU file with a single declaration of `type_` in
-    /// `language` (only `St` supported for now). Returns the new source.
+    /// `language`. Returns the seeded source.
+    ///
+    /// Supported languages: ST and LD. Others (FBD / SFC / IL / CFC)
+    /// still error out cleanly so the UI can surface a "coming soon"
+    /// message rather than silently writing a file the bridge can't
+    /// compile.
     pub fn create_pou_file(
         &self,
         path: &str,
@@ -184,15 +241,23 @@ impl ProjectStore {
         language: PouLanguage,
     ) -> Result<String, StoreError> {
         validate_path(path)?;
-        let file = self.root.join("pous").join(format!("{path}.st"));
-        if file.exists() {
+        if self.pou_file_path(path).is_some() {
             return Err(StoreError::AlreadyExists(path.into()));
         }
-        if language != PouLanguage::St {
-            return Err(StoreError::UnsupportedLanguage(format!("{language:?}")));
-        }
         let leaf = leaf_segment(path);
-        let source = template_for(leaf, type_);
+        let (file, source) = match language {
+            PouLanguage::St => (
+                self.root.join("pous").join(format!("{path}.st")),
+                template_for(leaf, type_),
+            ),
+            PouLanguage::Ld => (
+                self.root.join("pous").join(format!("{path}.ld.json")),
+                template_for_ld(leaf, type_),
+            ),
+            other => {
+                return Err(StoreError::UnsupportedLanguage(format!("{other:?}")));
+            }
+        };
         fs::create_dir_all(file.parent().unwrap())?;
         fs::write(&file, &source)?;
         Ok(source)
@@ -200,10 +265,9 @@ impl ProjectStore {
 
     pub fn delete_pou_file(&self, path: &str) -> Result<(), StoreError> {
         validate_path(path)?;
-        let file = self.root.join("pous").join(format!("{path}.st"));
-        if !file.exists() {
-            return Err(StoreError::PouNotFound(path.into()));
-        }
+        let (file, _lang) = self
+            .pou_file_path(path)
+            .ok_or_else(|| StoreError::PouNotFound(path.into()))?;
         fs::remove_file(file)?;
         Ok(())
     }
@@ -772,6 +836,58 @@ fn leaf_segment(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
+/// Recursively walk pou files under `root`, recognising both `.st`
+/// and `.ld.json` extensions. The slug returned strips the extension(s)
+/// so callers can pass it back through `pou_file_path` / `read_pou_*`.
+fn walk_pou_files(
+    root: &Path,
+    prefix: &str,
+    cb: &mut dyn FnMut(&str, PouLanguage, String) -> Result<(), StoreError>,
+) -> Result<(), StoreError> {
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        let ftype = entry.file_type()?;
+        let name_os = entry.file_name();
+        let name = match name_os.to_str() {
+            Some(s) => s,
+            None => continue,
+        };
+        if name.starts_with('.') {
+            continue;
+        }
+        if ftype.is_dir() {
+            let next_prefix = if prefix.is_empty() {
+                name.to_string()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            walk_pou_files(&path, &next_prefix, cb)?;
+            continue;
+        }
+        if !ftype.is_file() {
+            continue;
+        }
+        // Match the longest known suffix first so `.ld.json` doesn't
+        // get classified as a plain `.json`.
+        let (slug_stem, lang) = if let Some(s) = name.strip_suffix(".ld.json") {
+            (s, PouLanguage::Ld)
+        } else if let Some(s) = name.strip_suffix(".st") {
+            (s, PouLanguage::St)
+        } else {
+            continue;
+        };
+        let slug = if prefix.is_empty() {
+            slug_stem.to_string()
+        } else {
+            format!("{prefix}/{slug_stem}")
+        };
+        let contents = fs::read_to_string(&path)?;
+        cb(&slug, lang, contents)?;
+    }
+    Ok(())
+}
+
 /// Recursively walk every file under `root` whose extension matches `ext`,
 /// invoking `cb(rel_path_without_ext, contents)` for each.
 fn walk_files(
@@ -870,6 +986,46 @@ fn template_for(name: &str, type_: PouType) -> String {
              \nEND_FUNCTION\n"
         ),
     }
+}
+
+/// Source template for a new LD POU. Returns a JSON literal that
+/// matches the [`crate::ld::LdProgram`] schema — one always-passing
+/// rung that asserts the coil, so the new file compiles end-to-end
+/// without further authoring. The user replaces the rung with their
+/// actual logic.
+fn template_for_ld(name: &str, type_: PouType) -> String {
+    use crate::ld::{
+        LdCoil, LdCoilKind, LdNode, LdPouType, LdProgram, LdRung, LdVarSection, LdVariable,
+    };
+    let pou_type = match type_ {
+        PouType::Program => LdPouType::Program,
+        PouType::FunctionBlock => LdPouType::FunctionBlock,
+        // Functions in LD are uncommon and not exposed in the UI yet
+        // (see `LdPouType` docs). Fall back to Program so the seeded
+        // file is at least valid; the caller is responsible for
+        // gating Function creation in LD.
+        PouType::Function => LdPouType::Program,
+    };
+    let prog = LdProgram {
+        name: name.into(),
+        pou_type,
+        variables: vec![LdVariable {
+            name: "out".into(),
+            type_name: "BOOL".into(),
+            section: LdVarSection::Internal,
+            init: None,
+        }],
+        rungs: vec![LdRung {
+            id: "r0".into(),
+            label: Some("Replace this rung with your logic".into()),
+            logic: LdNode::Const { value: true },
+            coils: vec![LdCoil {
+                var: "out".into(),
+                kind: LdCoilKind::Standard,
+            }],
+        }],
+    };
+    serde_json::to_string_pretty(&prog).expect("LD template serialises")
 }
 
 fn default_config_for(protocol: Protocol) -> ProtocolConfig {
