@@ -62,7 +62,12 @@ export function NewPouDialog(props: Props) {
 
   const trimmed = name.trim()
   const fullPath = parent ? `${parent}/${trimmed}` : trimmed
-  const extension = language === "ld" ? "ld.json" : "st"
+  const extension =
+    language === "ld"
+      ? "ld.json"
+      : language === "fbd"
+        ? "fbd.json"
+        : "st"
 
   const submit = async () => {
     if (!trimmed) return
@@ -135,6 +140,7 @@ export function NewPouDialog(props: Props) {
                 <SelectContent>
                   <SelectItem value="st">Structured Text</SelectItem>
                   <SelectItem value="ld">Ladder Diagram</SelectItem>
+                  <SelectItem value="fbd">Function Block Diagram</SelectItem>
                 </SelectContent>
               </Select>
             </div>

@@ -404,6 +404,7 @@ pub struct VariableInfo {
 /// - `Ld`  — parses the `.ld.json` source and emits a single `PouDecl`
 ///   built from the `LdProgram`'s name + pou_type. LD files are
 ///   single-declaration by design (see `crates/project/src/ld.rs`).
+/// - `Fbd` — same idea as LD but for `.fbd.json`.
 /// - others — returns empty (no parser yet). The new-POU dialog
 ///   prevents these from existing on disk, but be defensive.
 pub fn extract_pou_declarations(
@@ -413,6 +414,27 @@ pub fn extract_pou_declarations(
     use project::{PouDecl, PouLanguage, PouType};
     match language {
         PouLanguage::St => extract_st_declarations(source),
+        PouLanguage::Fbd => {
+            // Same tolerant-parse pattern as LD: malformed JSON yields
+            // an empty decl list rather than blowing up
+            // /api/project. Without this branch the IDE never
+            // discovers that an `.fbd.json` POU is FBD-language and
+            // dispatches the Monaco ST editor — which is wrong.
+            match serde_json::from_str::<project::FbdProgram>(source) {
+                Ok(prog) => vec![PouDecl {
+                    name: prog.name,
+                    type_: match prog.pou_type {
+                        project::LdPouType::Program => PouType::Program,
+                        project::LdPouType::FunctionBlock => PouType::FunctionBlock,
+                    },
+                    language: PouLanguage::Fbd,
+                }],
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to parse FBD source for declarations");
+                    vec![]
+                }
+            }
+        }
         PouLanguage::Ld => {
             // Tolerant: if the JSON is malformed (mid-edit save, say)
             // we just return no decls rather than blowing up the
