@@ -5,8 +5,11 @@
 mod errors;
 mod fbd_transpile;
 mod ld_transpile;
+mod problem_docs;
 mod runtime;
 mod sfc_transpile;
+
+pub use problem_docs::{lookup_problem_doc, lookup_problem_explanation};
 
 pub use ld_transpile::transpile_to_st as transpile_ld_to_st;
 pub use ld_transpile::{
@@ -243,9 +246,15 @@ fn strip_any_configuration(source: &str) -> String {
 /// Monaco editor). Severity is "error" for now — ironplc emits a single
 /// diagnostic stream without warning/info distinction at this layer.
 ///
-/// For graphical-language POUs, `ld_location` / `fbd_location` carry the
-/// resolved element the diagnostic originated from. Exactly one of them
-/// is populated (or neither, for ST POUs / boilerplate lines).
+/// For graphical-language POUs, `ld_location` / `fbd_location` / `sfc_location`
+/// carry the resolved element the diagnostic originated from. Exactly one of
+/// them is populated (or neither, for ST POUs / boilerplate lines).
+///
+/// **The "thick" diagnostic fields** — `context`, `related`, `explanation` —
+/// come from `ironplc::Diagnostic`'s richer model. ironplc attaches
+/// "describing" strings (`variable=foo`), secondary labels (`did you mean:
+/// bar?`), and ships an RST doc per problem code. We expose all three so
+/// human users and agents both see what to do next, not just "syntax error".
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct CheckDiagnostic {
@@ -256,6 +265,22 @@ pub struct CheckDiagnostic {
     pub start_column: u32,
     pub end_line: u32,
     pub end_column: u32,
+    /// Extra context fragments (e.g. `"variable=ghost"`). Comes from
+    /// ironplc's `Diagnostic.described`. Empty for diagnostics without
+    /// context (most syntax errors).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context: Vec<String>,
+    /// Secondary labels pointing at related source locations — the
+    /// canonical "did you mean: counter?" / "first declared here"
+    /// pattern. Empty for diagnostics without related info.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related: Vec<DiagnosticRelated>,
+    /// Embedded explanation from ironplc's problem-code documentation
+    /// (RST body, title stripped). `None` if the code isn't in
+    /// ironplc's registry — true for our synthetic
+    /// LD-PARSE / FBD-TRANSPILE etc. codes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<String>,
     /// For LD POUs only: which LD element this diagnostic originated
     /// from. `None` for ST / FBD / SFC POUs and for diagnostics on
     /// boilerplate lines.
@@ -268,6 +293,31 @@ pub struct CheckDiagnostic {
     pub fbd_location: Option<fbd_transpile::FbdLocation>,
     /// For SFC POUs only: which step / action / transition / variable
     /// the diagnostic originated from. `None` for other languages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sfc_location: Option<sfc_transpile::SfcLocation>,
+}
+
+/// One secondary label on a diagnostic. Both Monaco's
+/// `relatedInformation` and our graphical-editor banners render these
+/// as clickable jumps from the primary diagnostic to the related
+/// source location — that's what makes "did you mean: foo?" useful
+/// instead of just informative.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct DiagnosticRelated {
+    pub message: String,
+    pub start_line: u32,
+    pub start_column: u32,
+    pub end_line: u32,
+    pub end_column: u32,
+    /// Same dispatch as the parent diagnostic. The related label
+    /// usually lives on the SAME source as the primary, but we still
+    /// run it through the source map so jumps from the editor land in
+    /// the right graphical element.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ld_location: Option<ld_transpile::LdLocation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fbd_location: Option<fbd_transpile::FbdLocation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sfc_location: Option<sfc_transpile::SfcLocation>,
 }
@@ -354,6 +404,9 @@ fn synthetic_parse_diag(
         start_column: e.column() as u32,
         end_line: e.line() as u32,
         end_column: (e.column() as u32).saturating_add(1),
+        context: vec![],
+        related: vec![],
+        explanation: None,
         ld_location: None,
         fbd_location: None,
         sfc_location: None,
@@ -369,6 +422,9 @@ fn synthetic_transpile_diag(code: &str, e: &BridgeError) -> CheckDiagnostic {
         start_column: 1,
         end_line: 1,
         end_column: 1,
+        context: vec![],
+        related: vec![],
+        explanation: None,
         ld_location: None,
         fbd_location: None,
         sfc_location: None,
@@ -615,12 +671,44 @@ fn diag_to_dto_with_map(
     let start = LineColumn::from_offset(source, d.primary.location.start);
     let end = LineColumn::from_offset(source, d.primary.location.end);
     let start_line = start.line + 1;
-    let (ld_location, fbd_location, sfc_location) = match map {
-        SourceMapKind::None => (None, None, None),
-        SourceMapKind::Ld(m) => (m.lookup(start_line as usize).cloned(), None, None),
-        SourceMapKind::Fbd(m) => (None, m.lookup(start_line as usize).cloned(), None),
-        SourceMapKind::Sfc(m) => (None, None, m.lookup(start_line as usize).cloned()),
-    };
+    let (ld_location, fbd_location, sfc_location) =
+        lookup_locations(map, start_line as usize);
+
+    // `described` is ironplc's structured context — "variable=foo",
+    // "type=BOOL", etc. We pass it through verbatim; the editor /
+    // CLI present it as one short line per entry under the primary
+    // message.
+    let context = d.described.clone();
+
+    // Each secondary label resolves to a related-info entry. ironplc
+    // emits them with byte offsets, so we run them through the same
+    // (offset → line/col → optional graphical location) pipeline as
+    // the primary label.
+    let related: Vec<DiagnosticRelated> = d
+        .secondary
+        .iter()
+        .map(|label| {
+            let rs = LineColumn::from_offset(source, label.location.start);
+            let re = LineColumn::from_offset(source, label.location.end);
+            let rline = rs.line + 1;
+            let (rl_loc, rf_loc, rs_loc) = lookup_locations(map, rline as usize);
+            DiagnosticRelated {
+                message: label.message.clone(),
+                start_line: rline,
+                start_column: rs.column + 1,
+                end_line: re.line + 1,
+                end_column: re.column + 1,
+                ld_location: rl_loc,
+                fbd_location: rf_loc,
+                sfc_location: rs_loc,
+            }
+        })
+        .collect();
+
+    // Embedded RST doc — only present for ironplc's own problem codes
+    // (P0001..P9999). Our synthetic codes (LD-PARSE etc.) won't match.
+    let explanation = problem_docs::lookup_problem_explanation(&d.code);
+
     CheckDiagnostic {
         severity: "error".into(),
         code: d.code.clone(),
@@ -629,8 +717,30 @@ fn diag_to_dto_with_map(
         start_column: start.column + 1,
         end_line: end.line + 1,
         end_column: end.column + 1,
+        context,
+        related,
+        explanation,
         ld_location,
         fbd_location,
         sfc_location,
+    }
+}
+
+/// Resolve a 1-indexed ST line to its (ld, fbd, sfc) graphical
+/// origin, using whichever source map is active. Used by both the
+/// primary diagnostic and each related label.
+fn lookup_locations(
+    map: &SourceMapKind<'_>,
+    line: usize,
+) -> (
+    Option<ld_transpile::LdLocation>,
+    Option<fbd_transpile::FbdLocation>,
+    Option<sfc_transpile::SfcLocation>,
+) {
+    match map {
+        SourceMapKind::None => (None, None, None),
+        SourceMapKind::Ld(m) => (m.lookup(line).cloned(), None, None),
+        SourceMapKind::Fbd(m) => (None, m.lookup(line).cloned(), None),
+        SourceMapKind::Sfc(m) => (None, None, m.lookup(line).cloned()),
     }
 }

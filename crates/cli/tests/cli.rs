@@ -122,6 +122,92 @@ fn check_multiple_files_aggregates_results() {
 }
 
 #[test]
+fn explain_known_code_prints_doc_exits_zero() {
+    // P4007 is one of ironplc's most common errors — the embedded
+    // RST page mentions "variable" repeatedly.
+    let out = cs().arg("explain").arg("P4007").assert().success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    // First line is the "code — title" summary.
+    assert!(stdout.starts_with("P4007"), "got:\n{stdout}");
+    // Body should include the RST title block AND prose about variables.
+    assert!(
+        stdout.to_lowercase().contains("variable"),
+        "expected RST body to mention 'variable'; got:\n{stdout}"
+    );
+}
+
+#[test]
+fn explain_unknown_code_exits_one() {
+    cs().arg("explain")
+        .arg("XX-NOT-A-CODE")
+        .assert()
+        .code(1)
+        .stderr(contains("no documentation"));
+}
+
+#[test]
+fn check_explain_appends_problem_doc_to_human_output() {
+    // Bad LD fixture references undeclared variable `nope` → P4007.
+    // With `--explain`, the full RST body must follow the diagnostic.
+    let out = cs()
+        .arg("check")
+        .arg(bad_ld())
+        .arg("--explain")
+        .assert()
+        .code(1);
+    let stderr = String::from_utf8_lossy(&out.get_output().stderr);
+    // The diagnostic line itself.
+    assert!(stderr.contains("P4007"), "got:\n{stderr}");
+    // Context line under the diagnostic.
+    assert!(
+        stderr.contains("variable=nope") || stderr.contains("nope"),
+        "expected context line mentioning the offending var; got:\n{stderr}"
+    );
+    // Explanation prose (from the embedded RST).
+    assert!(
+        stderr.to_lowercase().contains("example"),
+        "explanation should include the RST 'Example' section; got:\n{stderr}"
+    );
+}
+
+#[test]
+fn check_json_includes_context_related_explanation() {
+    let out = cs()
+        .arg("check")
+        .arg(bad_ld())
+        .arg("--json")
+        .assert()
+        .code(1);
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let diag = &v["files"][0]["diagnostics"][0];
+    // Three new agent-facing fields. context/related are serialised
+    // with `skip_serializing_if = "Vec::is_empty"`, so an empty array
+    // doesn't appear on the wire — we treat absent OR array as fine.
+    if !diag["context"].is_null() {
+        assert!(diag["context"].is_array());
+    }
+    if !diag["related"].is_null() {
+        assert!(diag["related"].is_array());
+    }
+    let expl = diag["explanation"]
+        .as_str()
+        .expect("ironplc P-codes must carry an embedded explanation");
+    assert!(
+        expl.to_lowercase().contains("variable"),
+        "explanation should describe the error: {expl}"
+    );
+    // For P4007 we definitely expect a context entry naming `nope`.
+    let ctx = diag["context"]
+        .as_array()
+        .expect("P4007 always carries a `variable=…` context line");
+    assert!(
+        ctx.iter().any(|c| c.as_str().unwrap_or("").contains("nope")),
+        "expected `variable=nope` in context, got: {ctx:?}"
+    );
+}
+
+#[test]
 fn check_unknown_extension_is_usage_error() {
     let tmp = tempfile::NamedTempFile::with_suffix(".plc").unwrap();
     cs().arg("check")

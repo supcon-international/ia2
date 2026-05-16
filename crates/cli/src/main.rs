@@ -78,6 +78,12 @@ enum Command {
     /// confirm a change is well-formed before invoking `compile` or
     /// reporting success to the human. Cheap (no codegen) — call it
     /// liberally.
+    ///
+    /// `--explain` adds the full RST explanation from ironplc's problem
+    /// documentation under each diagnostic — useful when you don't
+    /// recognise the error code. (`--json` always includes the
+    /// explanation in the payload; `--explain` only affects human
+    /// output.)
     #[command(verbatim_doc_comment)]
     Check {
         /// POU file(s) — `.st` or `.ld.json`.
@@ -86,6 +92,12 @@ enum Command {
         /// Output JSON diagnostics on stdout (one array, all files).
         #[arg(long)]
         json: bool,
+        /// In human mode, append each diagnostic's full RST
+        /// explanation. Ignored in `--json` mode (explanation is
+        /// always present in the JSON payload as the `explanation`
+        /// field).
+        #[arg(long)]
+        explain: bool,
     },
 
     /// Show the Structured Text a graphical POU compiles to.
@@ -114,6 +126,21 @@ enum Command {
     /// one containing `project.toml`), not individual files.
     #[command(subcommand)]
     Project(ProjectCmd),
+
+    /// Print the full RST documentation for an ironplc problem code.
+    ///
+    /// Looks up `P0001` / `P4007` / `P9001` etc. in ironplc's embedded
+    /// problem registry — same source `cs check --explain` pulls from
+    /// when it appends explanations to diagnostics. Useful when an
+    /// agent has a code but no diagnostic context yet, or when a human
+    /// wants to read the full RST page.
+    ///
+    /// Exit code: 0 if the code exists, 1 if it doesn't.
+    #[command(verbatim_doc_comment)]
+    Explain {
+        /// Problem code (case-sensitive; ironplc uses upper-case `P`).
+        code: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -149,10 +176,11 @@ enum ProjectCmd {
 fn main() {
     let args = Cli::parse();
     let result = match args.command {
-        Command::Check { files, json } => cmd_check(&files, json),
+        Command::Check { files, json, explain } => cmd_check(&files, json, explain),
         Command::Transpile { file, with_map } => cmd_transpile(&file, with_map),
         Command::Project(ProjectCmd::Check { path, json }) => cmd_project_check(&path, json),
         Command::Project(ProjectCmd::Info { path, json }) => cmd_project_info(&path, json),
+        Command::Explain { code } => cmd_explain(&code),
     };
     match result {
         Ok(exit) => std::process::exit(exit),
@@ -169,7 +197,7 @@ fn main() {
 //   Subcommand: check
 // =================================================================
 
-fn cmd_check(files: &[PathBuf], json: bool) -> Result<i32> {
+fn cmd_check(files: &[PathBuf], json: bool, explain: bool) -> Result<i32> {
     let mut all: Vec<FileDiagnostics> = Vec::with_capacity(files.len());
     let mut any_errors = false;
 
@@ -198,7 +226,7 @@ fn cmd_check(files: &[PathBuf], json: bool) -> Result<i32> {
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
         for f in &all {
-            print_diagnostics_human(&f.file, &f.diagnostics);
+            print_diagnostics_human(&f.file, &f.diagnostics, explain);
         }
         let total: usize = all.iter().map(|f| f.diagnostics.len()).sum();
         if total == 0 {
@@ -222,7 +250,7 @@ struct FileDiagnostics {
     diagnostics: Vec<CheckDiagnostic>,
 }
 
-fn print_diagnostics_human(file: &Path, diags: &[CheckDiagnostic]) {
+fn print_diagnostics_human(file: &Path, diags: &[CheckDiagnostic], explain: bool) {
     if diags.is_empty() {
         return;
     }
@@ -244,6 +272,34 @@ fn print_diagnostics_human(file: &Path, diags: &[CheckDiagnostic]) {
             "{f}:{}:{}: {} {}{loc_hint}: {}",
             d.start_line, d.start_column, d.severity, d.code, d.message,
         );
+        // Context lines under the primary message, indented. These
+        // are ironplc's `described` entries — almost always one short
+        // structured fragment like `variable=foo` or `type=BOOL`.
+        for c in &d.context {
+            eprintln!("    {c}");
+        }
+        // Related labels — point at secondary locations like "did you
+        // mean: bar?" or "first declared here". We print them as
+        // file:line:col-prefixed notes so they're parseable by the
+        // same regex an editor would use to jump.
+        for r in &d.related {
+            eprintln!(
+                "    note: {f}:{}:{}: {}",
+                r.start_line, r.start_column, r.message,
+            );
+        }
+        // Full explanation when `--explain` is set. Indent every
+        // line by two spaces so the prose is visually nested under
+        // the diagnostic rather than competing with it.
+        if explain {
+            if let Some(expl) = &d.explanation {
+                eprintln!();
+                for line in expl.lines() {
+                    eprintln!("  {line}");
+                }
+                eprintln!();
+            }
+        }
     }
 }
 
@@ -428,6 +484,32 @@ fn cmd_project_info(path: &Path, json: bool) -> Result<i32> {
     }
 
     Ok(0)
+}
+
+// =================================================================
+//   Subcommand: explain
+// =================================================================
+
+fn cmd_explain(code: &str) -> Result<i32> {
+    match ironplc_bridge::lookup_problem_doc(code) {
+        Some((rst, title)) => {
+            // Print the title line first so a quick `cs explain P4007`
+            // tells you what the code is for without scanning the body.
+            // The full RST follows verbatim — agents and humans can
+            // both read it. (rST format is text-friendly so we don't
+            // try to render it.)
+            println!("{code} — {title}");
+            println!();
+            print!("{rst}");
+            Ok(0)
+        }
+        None => {
+            eprintln!(
+                "error: no documentation for `{code}` — not in ironplc's problem registry"
+            );
+            Ok(1)
+        }
+    }
 }
 
 // =================================================================

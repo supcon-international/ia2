@@ -9,6 +9,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react"
 
 import { checkProgram } from "@/lib/api"
+import { DiagnosticsBanner } from "@/components/editor/DiagnosticsBanner"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import {
@@ -199,6 +200,7 @@ export function LDEditor({
       {diagnostics.length > 0 && (
         <DiagnosticsBanner
           diagnostics={diagnostics}
+          formatLocation={(d) => describeLocation(d.ld_location)}
           onJump={(d) => {
             // Jump to the rung containing the diagnostic. We don't dive
             // into the LD logic tree yet (that would require a node
@@ -328,47 +330,8 @@ function describeLocation(loc: LdLocation | null | undefined): string {
   }
 }
 
-function DiagnosticsBanner({
-  diagnostics,
-  onJump,
-}: {
-  diagnostics: CheckDiagnostic[]
-  onJump: (d: CheckDiagnostic) => void
-}) {
-  return (
-    <div className="border-b border-destructive/30 bg-destructive/5 text-xs">
-      <div className="flex items-center gap-2 px-3 py-1.5">
-        <span className="font-mono font-medium text-destructive">
-          {diagnostics.length} {diagnostics.length === 1 ? "error" : "errors"}
-        </span>
-      </div>
-      <ul className="divide-y divide-destructive/15">
-        {diagnostics.slice(0, 8).map((d, i) => (
-          <li key={i}>
-            <button
-              type="button"
-              onClick={() => onJump(d)}
-              className="flex w-full items-start gap-2 px-3 py-1 text-left hover:bg-destructive/10"
-            >
-              <span className="font-mono text-[10px] text-destructive">
-                {d.code}
-              </span>
-              <span className="flex-1 text-foreground">{d.message}</span>
-              <span className="font-mono text-[10px] text-muted-foreground">
-                {describeLocation(d.ld_location)}
-              </span>
-            </button>
-          </li>
-        ))}
-        {diagnostics.length > 8 && (
-          <li className="px-3 py-1 text-muted-foreground">
-            +{diagnostics.length - 8} more…
-          </li>
-        )}
-      </ul>
-    </div>
-  )
-}
+// (DiagnosticsBanner moved to its own module — same component is
+//  shared with FBDEditor and SFCEditor. See ./DiagnosticsBanner.tsx.)
 
 function Header({ prog }: { prog: LdProgram }) {
   return (

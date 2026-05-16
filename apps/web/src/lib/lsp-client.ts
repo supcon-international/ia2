@@ -47,6 +47,14 @@ function lspToCheck(diag: LspDiagnostic): CheckDiagnostic {
     ld_location: null,
     fbd_location: null,
     sfc_location: null,
+    // LSP `relatedInformation` and `data` carry the same shape as
+    // our `related` / `context` / `explanation` fields, but plumbing
+    // them through requires upstream LSP work (Phase 2). For now the
+    // HTTP `/api/check` path remains the source of truth for the
+    // "thick" diagnostics on ST POUs; LSP markers stay shallow.
+    context: [],
+    related: [],
+    explanation: null,
   }
 }
 

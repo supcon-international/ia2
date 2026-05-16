@@ -35,6 +35,7 @@ import { Plus, Trash2, X } from "lucide-react"
 import { useEffect, useMemo, useState } from "react"
 
 import { checkProgram } from "@/lib/api"
+import { DiagnosticsBanner } from "@/components/editor/DiagnosticsBanner"
 import { Input } from "@/components/ui/input"
 import {
   Select,
@@ -187,7 +188,12 @@ export function SFCEditor({
           setSel({ kind: "transition", index: next.transitions.length - 1 })
         }}
       />
-      {diagnostics.length > 0 && <DiagnosticsBanner diagnostics={diagnostics} />}
+      {diagnostics.length > 0 && (
+        <DiagnosticsBanner
+          diagnostics={diagnostics}
+          formatLocation={(d) => describeLocation(d.sfc_location)}
+        />
+      )}
       <div className="flex-1 overflow-auto bg-background">
         <VariablePanel prog={prog} diagIndex={diagIndex} />
         {prog.steps.length === 0 ? (
@@ -1139,35 +1145,9 @@ function describeLocation(loc: SfcLocation | null | undefined): string {
   }
 }
 
-function DiagnosticsBanner({ diagnostics }: { diagnostics: CheckDiagnostic[] }) {
-  return (
-    <div className="border-b border-destructive/30 bg-destructive/5 text-xs">
-      <div className="flex items-center gap-2 px-3 py-1.5">
-        <span className="font-mono font-medium text-destructive">
-          {diagnostics.length} {diagnostics.length === 1 ? "error" : "errors"}
-        </span>
-      </div>
-      <ul className="divide-y divide-destructive/15">
-        {diagnostics.slice(0, 8).map((d, i) => (
-          <li key={i} className="flex items-start gap-2 px-3 py-1">
-            <span className="font-mono text-[10px] text-destructive">
-              {d.code}
-            </span>
-            <span className="flex-1 text-foreground">{d.message}</span>
-            <span className="font-mono text-[10px] text-muted-foreground">
-              {describeLocation(d.sfc_location)}
-            </span>
-          </li>
-        ))}
-        {diagnostics.length > 8 && (
-          <li className="px-3 py-1 text-muted-foreground">
-            +{diagnostics.length - 8} more…
-          </li>
-        )}
-      </ul>
-    </div>
-  )
-}
+// (DiagnosticsBanner moved to ./DiagnosticsBanner.tsx — shared with
+//  LDEditor and FBDEditor. We keep describeLocation here because the
+//  formatter is SFC-specific.)
 
 // =================================================================
 //   Helpers

@@ -1728,6 +1728,58 @@ mod tests {
     }
 
     #[test]
+    fn end_to_end_diagnostic_carries_problem_doc_explanation() {
+        // ironplc's P4007 ("Variable not defined") has a doc page in
+        // vendor/ironplc/docs/reference/compiler/problems/P4007.rst.
+        // Confirm the bridge embeds it into the diagnostic so agents
+        // and humans both see the explanation alongside the message.
+        let prog = LdProgram {
+            name: "explained".into(),
+            pou_type: LdPouType::Program,
+            variables: vec![LdVariable {
+                name: "btn".into(),
+                type_name: "BOOL".into(),
+                section: LdVarSection::Input,
+                init: None,
+            }],
+            rungs: vec![LdRung {
+                id: "r".into(),
+                label: None,
+                logic: LdNode::Contact {
+                    var: "btn".into(),
+                    negated: false,
+                },
+                coils: vec![LdCoil {
+                    var: "nope".into(),
+                    kind: LdCoilKind::Standard,
+                }],
+            }],
+        };
+        let src = serde_json::to_string(&prog).unwrap();
+        let diags = crate::check_pou_source(&src, project::PouLanguage::Ld);
+        let p4007 = diags
+            .iter()
+            .find(|d| d.code == "P4007")
+            .expect("expected P4007 in diagnostics");
+        let explanation = p4007
+            .explanation
+            .as_ref()
+            .expect("P4007 must carry the embedded RST explanation");
+        // The RST body talks about "variable" + provides an example.
+        assert!(
+            explanation.to_lowercase().contains("variable"),
+            "explanation should mention 'variable'; got: {explanation}",
+        );
+        // Context should include the offending variable name as
+        // ironplc's `described` entry.
+        assert!(
+            p4007.context.iter().any(|c| c.contains("nope")),
+            "expected `variable=nope` in context, got: {:?}",
+            p4007.context,
+        );
+    }
+
+    #[test]
     fn end_to_end_ld_malformed_json_returns_parse_diagnostic() {
         // A user mid-edit can save broken JSON. Rather than the LSP
         // endpoint going silent, surface a synthetic LD-PARSE diagnostic

@@ -29,6 +29,7 @@ import { Plus, Trash2, X } from "lucide-react"
 import { useEffect, useMemo, useRef, useState } from "react"
 
 import { checkProgram } from "@/lib/api"
+import { DiagnosticsBanner } from "@/components/editor/DiagnosticsBanner"
 import {
   addBlock,
   blockBoolOutputs,
@@ -207,7 +208,10 @@ export function FBDEditor({
         }}
       />
       {diagnostics.length > 0 && (
-        <DiagnosticsBanner diagnostics={diagnostics} />
+        <DiagnosticsBanner
+          diagnostics={diagnostics}
+          formatLocation={(d) => describeLocation(d.fbd_location)}
+        />
       )}
       <div className="flex-1 overflow-auto bg-background">
         <VariablePanel prog={prog} diagIndex={diagIndex} />
@@ -1471,35 +1475,9 @@ function describeLocation(loc: FbdLocation | null | undefined): string {
   }
 }
 
-function DiagnosticsBanner({ diagnostics }: { diagnostics: CheckDiagnostic[] }) {
-  return (
-    <div className="border-b border-destructive/30 bg-destructive/5 text-xs">
-      <div className="flex items-center gap-2 px-3 py-1.5">
-        <span className="font-mono font-medium text-destructive">
-          {diagnostics.length} {diagnostics.length === 1 ? "error" : "errors"}
-        </span>
-      </div>
-      <ul className="divide-y divide-destructive/15">
-        {diagnostics.slice(0, 8).map((d, i) => (
-          <li key={i} className="flex items-start gap-2 px-3 py-1">
-            <span className="font-mono text-[10px] text-destructive">
-              {d.code}
-            </span>
-            <span className="flex-1 text-foreground">{d.message}</span>
-            <span className="font-mono text-[10px] text-muted-foreground">
-              {describeLocation(d.fbd_location)}
-            </span>
-          </li>
-        ))}
-        {diagnostics.length > 8 && (
-          <li className="px-3 py-1 text-muted-foreground">
-            +{diagnostics.length - 8} more…
-          </li>
-        )}
-      </ul>
-    </div>
-  )
-}
+// (DiagnosticsBanner moved to ./DiagnosticsBanner.tsx — shared with
+//  LDEditor and SFCEditor. We keep `describeLocation` local because
+//  the formatter is FBD-specific.)
 
 // =================================================================
 //   Helpers
