@@ -1,7 +1,5 @@
 import { useMemo, useState } from "react"
 import {
-  Cable,
-  Clock,
   ChevronDown,
   ChevronRight,
   Cpu,
@@ -294,37 +292,27 @@ export function ProjectTree() {
         />
       )}
 
-      <button
-        type="button"
-        onClick={() => void openTasks()}
-        className={cn(
-          "mt-1 flex w-full items-center gap-1.5 border-t border-border px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent/40",
-          view === "tasks" && "bg-highlight/10",
-        )}
-        style={{ paddingLeft: 12 }}
-      >
-        <Clock className="size-3.5 shrink-0 text-muted-foreground" />
-        <span className="flex-1 truncate font-medium">Tasks</span>
-        <span className="font-mono text-[9px] uppercase text-muted-foreground">
-          {project.tasks.tasks.length}/{project.tasks.programs.length}
-        </span>
-      </button>
+      {/* Tasks and IO Mapping are project-level singletons (one
+          tasks.toml and one iomap.toml per project), so they don't
+          carry the toggle / "+ item" / "+ folder" affordances the
+          three sections above do. But they ARE the same kind of
+          first-class project content as POUs / Devices / Edges, so
+          their header row sits at the same visual weight. */}
+      <SingletonSectionHeader
+        label="Tasks"
+        count={`${project.tasks.tasks.length}·${project.tasks.programs.length}`}
+        countTitle={`${project.tasks.tasks.length} tasks · ${project.tasks.programs.length} program bindings`}
+        active={view === "tasks"}
+        onOpen={() => void openTasks()}
+      />
 
-      <button
-        type="button"
-        onClick={() => void openIoMap()}
-        className={cn(
-          "flex w-full items-center gap-1.5 px-2 py-1.5 text-left text-sm transition-colors hover:bg-accent/40",
-          view === "iomap" && "bg-highlight/10",
-        )}
-        style={{ paddingLeft: 12 }}
-      >
-        <Cable className="size-3.5 shrink-0 text-muted-foreground" />
-        <span className="flex-1 truncate font-medium">IO Mapping</span>
-        <span className="font-mono text-[9px] uppercase text-muted-foreground">
-          {project.iomap.mappings.length}
-        </span>
-      </button>
+      <SingletonSectionHeader
+        label="IO Mapping"
+        count={project.iomap.mappings.length}
+        countTitle={`${project.iomap.mappings.length} variable ↔ channel bindings`}
+        active={view === "iomap"}
+        onOpen={() => void openIoMap()}
+      />
 
       {/* Controlled dialogs popped open by folder context menus. */}
       {folderDialog && (
@@ -502,6 +490,54 @@ function SectionHeader({
         </span>
       </button>
       {action}
+    </div>
+  )
+}
+
+/**
+ * Section header for project-level singletons (Tasks, IO Mapping).
+ * Same visual weight as `SectionHeader` so the five top-level concepts
+ * (POUs / Devices / Edges / Tasks / IO Mapping) read as peers, but
+ * with no toggle / "+ item" / "+ folder" — those wouldn't make sense
+ * for a one-off project resource.
+ *
+ * The chevron slot is occupied by a spacer so the labels still line
+ * up vertically with the expandable sections above.
+ */
+function SingletonSectionHeader({
+  label,
+  count,
+  countTitle,
+  active,
+  onOpen,
+}: {
+  label: string
+  count: number | string
+  countTitle?: string
+  active: boolean
+  onOpen: () => void
+}) {
+  return (
+    <div className="flex items-center justify-between pl-1 pr-1.5">
+      <button
+        type="button"
+        onClick={onOpen}
+        className={cn(
+          "flex flex-1 items-center gap-1 py-1 text-left text-[11px] font-medium uppercase tracking-wider hover:text-foreground",
+          active ? "text-foreground" : "text-muted-foreground",
+        )}
+      >
+        {/* Spacer matching the chevron in SectionHeader so the labels
+            line up vertically with the expandable sections above. */}
+        <span className="size-3 shrink-0" />
+        {label}
+        <span
+          className="font-mono text-[10px] tracking-normal opacity-60"
+          title={countTitle}
+        >
+          {count}
+        </span>
+      </button>
     </div>
   )
 }
