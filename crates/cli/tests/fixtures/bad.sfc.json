@@ -1,0 +1,18 @@
+{
+  "name": "bad_sfc",
+  "pou_type": "program",
+  "variables": [
+    { "name": "btn", "type": "BOOL", "section": "input" }
+  ],
+  "initial_step": "idle",
+  "steps": [
+    { "name": "idle",   "actions": [] },
+    { "name": "running", "actions": [
+      { "qualifier": "N", "body": "ghost := TRUE" }
+    ]}
+  ],
+  "transitions": [
+    { "from": "idle",    "to": "running", "condition": "btn"     },
+    { "from": "running", "to": "idle",    "condition": "NOT btn" }
+  ]
+}

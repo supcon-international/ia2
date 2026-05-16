@@ -181,6 +181,10 @@ impl ProjectStore {
         if fbd.exists() {
             return Some((fbd, PouLanguage::Fbd));
         }
+        let sfc = dir.join(format!("{slug}.sfc.json"));
+        if sfc.exists() {
+            return Some((sfc, PouLanguage::Sfc));
+        }
         None
     }
 
@@ -261,6 +265,10 @@ impl ProjectStore {
             PouLanguage::Fbd => (
                 self.root.join("pous").join(format!("{path}.fbd.json")),
                 template_for_fbd(leaf, type_),
+            ),
+            PouLanguage::Sfc => (
+                self.root.join("pous").join(format!("{path}.sfc.json")),
+                template_for_sfc(leaf, type_),
             ),
             other => {
                 return Err(StoreError::UnsupportedLanguage(format!("{other:?}")));
@@ -882,6 +890,8 @@ fn walk_pou_files(
             (s, PouLanguage::Ld)
         } else if let Some(s) = name.strip_suffix(".fbd.json") {
             (s, PouLanguage::Fbd)
+        } else if let Some(s) = name.strip_suffix(".sfc.json") {
+            (s, PouLanguage::Sfc)
         } else if let Some(s) = name.strip_suffix(".st") {
             (s, PouLanguage::St)
         } else {
@@ -1085,6 +1095,68 @@ fn template_for_fbd(name: &str, type_: PouType) -> String {
         outputs: vec![],
     };
     serde_json::to_string_pretty(&prog).expect("FBD template serialises")
+}
+
+fn template_for_sfc(name: &str, type_: PouType) -> String {
+    use crate::ld::{LdPouType, LdVarSection, LdVariable};
+    use crate::sfc::{SfcAction, SfcProgram, SfcQualifier, SfcStep, SfcTransition};
+    let pou_type = match type_ {
+        PouType::Program => LdPouType::Program,
+        PouType::FunctionBlock => LdPouType::FunctionBlock,
+        PouType::Function => LdPouType::Program,
+    };
+    // Seed with the canonical "idle → running → idle" loop driven by
+    // a `start` input. New users see the shape of an SFC POU at a
+    // glance (steps + transitions + actions), and `cs check` returns
+    // clean immediately.
+    let prog = SfcProgram {
+        name: name.into(),
+        pou_type,
+        variables: vec![
+            LdVariable {
+                name: "start".into(),
+                type_name: "BOOL".into(),
+                section: LdVarSection::Input,
+                init: None,
+            },
+            LdVariable {
+                name: "running_lamp".into(),
+                type_name: "BOOL".into(),
+                section: LdVarSection::Output,
+                init: Some("FALSE".into()),
+            },
+        ],
+        initial_step: "idle".into(),
+        steps: vec![
+            SfcStep {
+                name: "idle".into(),
+                actions: vec![SfcAction {
+                    qualifier: SfcQualifier::R,
+                    body: "running_lamp := FALSE".into(),
+                }],
+            },
+            SfcStep {
+                name: "running".into(),
+                actions: vec![SfcAction {
+                    qualifier: SfcQualifier::N,
+                    body: "running_lamp := TRUE".into(),
+                }],
+            },
+        ],
+        transitions: vec![
+            SfcTransition {
+                from: "idle".into(),
+                to: "running".into(),
+                condition: "start".into(),
+            },
+            SfcTransition {
+                from: "running".into(),
+                to: "idle".into(),
+                condition: "NOT start".into(),
+            },
+        ],
+    };
+    serde_json::to_string_pretty(&prog).expect("SFC template serialises")
 }
 
 fn default_config_for(protocol: Protocol) -> ProtocolConfig {

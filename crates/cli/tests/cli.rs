@@ -41,6 +41,21 @@ fn bad_fbd() -> PathBuf {
     p
 }
 
+/// Path to a valid SFC POU: idle → filling → draining → idle.
+fn good_sfc() -> PathBuf {
+    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    p.push("tests/fixtures/good.sfc.json");
+    p
+}
+
+/// Path to an SFC POU whose `running` step's N action references an
+/// undeclared variable `ghost` — exercises the sfc_location wiring.
+fn bad_sfc() -> PathBuf {
+    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    p.push("tests/fixtures/bad.sfc.json");
+    p
+}
+
 fn cs() -> Command {
     Command::cargo_bin("cs").expect("compiled cs binary should exist")
 }
@@ -230,6 +245,67 @@ fn fbd_transpile_emits_topo_sorted_calls() {
     assert!(edge < counter, "edge block must execute before counter");
     // Output binding lands at the end
     assert!(stdout.contains("done := cu.Q;"), "got:\n{stdout}");
+}
+
+#[test]
+fn sfc_check_clean_file_exits_zero() {
+    cs().arg("check")
+        .arg(good_sfc())
+        .assert()
+        .success()
+        .stderr(contains("clean"));
+}
+
+#[test]
+fn sfc_check_dirty_file_reports_sfc_location() {
+    let out = cs()
+        .arg("check")
+        .arg(bad_sfc())
+        .arg("--json")
+        .assert()
+        .code(1);
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let diag = &v["files"][0]["diagnostics"][0];
+    // The `ghost` reference is inside the `running` step's action[0]
+    // body; ironplc reports the error on that emitted action line, so
+    // sfc_location should be Action(running, 0) — NOT ld/fbd.
+    assert!(diag["ld_location"].is_null());
+    assert!(diag["fbd_location"].is_null());
+    assert_eq!(diag["sfc_location"]["kind"], "action");
+    assert_eq!(diag["sfc_location"]["step"], "running");
+    assert_eq!(diag["sfc_location"]["action_index"], 0);
+}
+
+#[test]
+fn sfc_transpile_emits_step_dispatch_and_transition_cascade() {
+    let out = cs().arg("transpile").arg(good_sfc()).assert().success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    // SFC bookkeeping variables
+    assert!(
+        stdout.contains("__sfc_step : STRING[31] := 'idle';"),
+        "got:\n{stdout}"
+    );
+    // Per-step IF dispatch
+    assert!(
+        stdout.contains("IF __sfc_step = 'filling' THEN"),
+        "got:\n{stdout}"
+    );
+    assert!(stdout.contains("inlet := TRUE;"), "got:\n{stdout}");
+    // Transition cascade — IF/ELSIF chain in author order
+    assert!(
+        stdout.contains("IF __sfc_step = 'idle' AND (start_btn) THEN"),
+        "got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("ELSIF __sfc_step = 'filling' AND (tank_full) THEN"),
+        "got:\n{stdout}"
+    );
+    // Prev snapshot sits between actions and transitions
+    let actions_pos = stdout.find("(* === SFC actions === *)").unwrap();
+    let snap_pos = stdout.find("__sfc_prev := __sfc_step;").unwrap();
+    let trans_pos = stdout.find("(* === SFC transitions === *)").unwrap();
+    assert!(actions_pos < snap_pos && snap_pos < trans_pos);
 }
 
 #[test]

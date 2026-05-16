@@ -228,13 +228,15 @@ fn print_diagnostics_human(file: &Path, diags: &[CheckDiagnostic]) {
     }
     let f = file.display();
     for d in diags {
-        // Exactly one of ld_location / fbd_location is populated for
-        // graphical POUs; both are None for ST. Order doesn't matter —
+        // Exactly one of ld / fbd / sfc location is populated for
+        // graphical POUs; all are None for ST. Order doesn't matter —
         // they're mutually exclusive by construction.
         let loc_hint = if let Some(loc) = &d.ld_location {
             format!(" [{}]", describe_ld_location(loc))
         } else if let Some(loc) = &d.fbd_location {
             format!(" [{}]", describe_fbd_location(loc))
+        } else if let Some(loc) = &d.sfc_location {
+            format!(" [{}]", describe_sfc_location(loc))
         } else {
             String::new()
         };
@@ -261,6 +263,16 @@ fn describe_fbd_location(loc: &ironplc_bridge::FbdLocation) -> String {
         Variable { name } => format!("var {name}"),
         Block { block_id } => format!("block {block_id}"),
         Output { variable } => format!("output {variable}"),
+    }
+}
+
+fn describe_sfc_location(loc: &ironplc_bridge::SfcLocation) -> String {
+    use ironplc_bridge::SfcLocation::*;
+    match loc {
+        Variable { name } => format!("var {name}"),
+        Step { name } => format!("step {name}"),
+        Action { step, action_index } => format!("step {step} · action {action_index}"),
+        Transition { index } => format!("transition #{index}"),
     }
 }
 
@@ -307,6 +319,22 @@ fn cmd_transpile(file: &Path, with_map: bool) -> Result<i32> {
             let prog: project::FbdProgram = serde_json::from_str(&source)
                 .with_context(|| format!("parsing FBD JSON in {}", file.display()))?;
             let (st, map) = ironplc_bridge::transpile_fbd_to_st_with_map(&prog)
+                .with_context(|| format!("transpiling {}", file.display()))?;
+            if with_map {
+                let payload = serde_json::json!({
+                    "st": st,
+                    "source_map": map.lines,
+                });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                print!("{st}");
+            }
+            Ok(0)
+        }
+        PouLanguage::Sfc => {
+            let prog: project::SfcProgram = serde_json::from_str(&source)
+                .with_context(|| format!("parsing SFC JSON in {}", file.display()))?;
+            let (st, map) = ironplc_bridge::transpile_sfc_to_st_with_map(&prog)
                 .with_context(|| format!("transpiling {}", file.display()))?;
             if with_map {
                 let payload = serde_json::json!({
@@ -415,14 +443,17 @@ fn language_for_path(path: &Path) -> Result<PouLanguage> {
         .file_name()
         .and_then(|s| s.to_str())
         .with_context(|| format!("invalid filename: {}", path.display()))?;
+    // Order: longest known suffix first (`.ld.json` must beat `.st`'s
+    // would-be ".json" eyeball check; `.fbd.json` and `.sfc.json` must
+    // not collide with a generic `.json`).
     if name.ends_with(".ld.json") {
         Ok(PouLanguage::Ld)
-    } else if name.ends_with(".st") {
-        Ok(PouLanguage::St)
     } else if name.ends_with(".fbd.json") {
         Ok(PouLanguage::Fbd)
     } else if name.ends_with(".sfc.json") {
         Ok(PouLanguage::Sfc)
+    } else if name.ends_with(".st") {
+        Ok(PouLanguage::St)
     } else {
         bail!(
             "can't infer language from filename {name:?} — expected .st, .ld.json, .fbd.json, or .sfc.json"

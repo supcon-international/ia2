@@ -663,6 +663,7 @@ pub async fn check(
     let language = match q.language.as_deref().map(str::to_ascii_lowercase).as_deref() {
         Some("ld") => PouLanguage::Ld,
         Some("fbd") => PouLanguage::Fbd,
+        Some("sfc") => PouLanguage::Sfc,
         _ => PouLanguage::St,
     };
     Json(ironplc_bridge::check_pou_source(&body, language))
@@ -697,6 +698,7 @@ pub async fn validate_project(
                 end_column: 1,
                 ld_location: None,
                 fbd_location: None,
+                sfc_location: None,
             }]),
         }
     })

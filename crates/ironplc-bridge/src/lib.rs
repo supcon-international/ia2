@@ -6,6 +6,7 @@ mod errors;
 mod fbd_transpile;
 mod ld_transpile;
 mod runtime;
+mod sfc_transpile;
 
 pub use ld_transpile::transpile_to_st as transpile_ld_to_st;
 pub use ld_transpile::{
@@ -14,6 +15,10 @@ pub use ld_transpile::{
 pub use fbd_transpile::transpile_to_st as transpile_fbd_to_st;
 pub use fbd_transpile::{
     transpile_to_st_with_map as transpile_fbd_to_st_with_map, FbdLocation, FbdSourceMap,
+};
+pub use sfc_transpile::transpile_to_st as transpile_sfc_to_st;
+pub use sfc_transpile::{
+    transpile_to_st_with_map as transpile_sfc_to_st_with_map, SfcLocation, SfcSourceMap,
 };
 
 pub use errors::BridgeError;
@@ -162,6 +167,11 @@ fn source_to_st(
                 .map_err(|e| BridgeError::Parse(format!("FBD JSON parse: {e}")))?;
             fbd_transpile::transpile_to_st(&prog)
         }
+        project::PouLanguage::Sfc => {
+            let prog: project::SfcProgram = serde_json::from_str(source)
+                .map_err(|e| BridgeError::Parse(format!("SFC JSON parse: {e}")))?;
+            sfc_transpile::transpile_to_st(&prog)
+        }
         other => Err(BridgeError::Parse(format!(
             "{other:?} not yet supported by the bridge"
         ))),
@@ -247,15 +257,19 @@ pub struct CheckDiagnostic {
     pub end_line: u32,
     pub end_column: u32,
     /// For LD POUs only: which LD element this diagnostic originated
-    /// from. `None` for ST / FBD POUs and for diagnostics on
+    /// from. `None` for ST / FBD / SFC POUs and for diagnostics on
     /// boilerplate lines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ld_location: Option<ld_transpile::LdLocation>,
     /// For FBD POUs only: which block / output binding / variable
-    /// declaration this diagnostic originated from. `None` for ST / LD
-    /// POUs and for diagnostics on boilerplate lines.
+    /// declaration this diagnostic originated from. `None` for other
+    /// languages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fbd_location: Option<fbd_transpile::FbdLocation>,
+    /// For SFC POUs only: which step / action / transition / variable
+    /// the diagnostic originated from. `None` for other languages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sfc_location: Option<sfc_transpile::SfcLocation>,
 }
 
 /// Parse + analyse a Structured Text source and return all diagnostics
@@ -302,17 +316,29 @@ pub fn check_pou_source(
             };
             check_inner(&st, SourceMapKind::Fbd(&map))
         }
+        project::PouLanguage::Sfc => {
+            let prog: project::SfcProgram = match serde_json::from_str(source) {
+                Ok(p) => p,
+                Err(e) => return vec![synthetic_parse_diag("SFC-PARSE", "SFC", &e)],
+            };
+            let (st, map) = match sfc_transpile::transpile_to_st_with_map(&prog) {
+                Ok(pair) => pair,
+                Err(e) => return vec![synthetic_transpile_diag("SFC-TRANSPILE", &e)],
+            };
+            check_inner(&st, SourceMapKind::Sfc(&map))
+        }
         _ => Vec::new(),
     }
 }
 
-/// One of: no map, an LD map, an FBD map. Used by `check_inner` to
-/// route diagnostics through the right reverse-mapping helper without
-/// growing the public API.
+/// One of: no map, or a map for each graphical language. Used by
+/// `check_inner` to route diagnostics through the right reverse-mapping
+/// helper without growing the public API.
 enum SourceMapKind<'a> {
     None,
     Ld(&'a ld_transpile::LdSourceMap),
     Fbd(&'a fbd_transpile::FbdSourceMap),
+    Sfc(&'a sfc_transpile::SfcSourceMap),
 }
 
 fn synthetic_parse_diag(
@@ -330,6 +356,7 @@ fn synthetic_parse_diag(
         end_column: (e.column() as u32).saturating_add(1),
         ld_location: None,
         fbd_location: None,
+        sfc_location: None,
     }
 }
 
@@ -344,6 +371,7 @@ fn synthetic_transpile_diag(code: &str, e: &BridgeError) -> CheckDiagnostic {
         end_column: 1,
         ld_location: None,
         fbd_location: None,
+        sfc_location: None,
     }
 }
 
@@ -405,6 +433,7 @@ pub struct VariableInfo {
 ///   built from the `LdProgram`'s name + pou_type. LD files are
 ///   single-declaration by design (see `crates/project/src/ld.rs`).
 /// - `Fbd` — same idea as LD but for `.fbd.json`.
+/// - `Sfc` — same idea as LD but for `.sfc.json`.
 /// - others — returns empty (no parser yet). The new-POU dialog
 ///   prevents these from existing on disk, but be defensive.
 pub fn extract_pou_declarations(
@@ -435,6 +464,20 @@ pub fn extract_pou_declarations(
                 }
             }
         }
+        PouLanguage::Sfc => match serde_json::from_str::<project::SfcProgram>(source) {
+            Ok(prog) => vec![PouDecl {
+                name: prog.name,
+                type_: match prog.pou_type {
+                    project::LdPouType::Program => PouType::Program,
+                    project::LdPouType::FunctionBlock => PouType::FunctionBlock,
+                },
+                language: PouLanguage::Sfc,
+            }],
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to parse SFC source for declarations");
+                vec![]
+            }
+        },
         PouLanguage::Ld => {
             // Tolerant: if the JSON is malformed (mid-edit save, say)
             // we just return no decls rather than blowing up the
@@ -572,10 +615,11 @@ fn diag_to_dto_with_map(
     let start = LineColumn::from_offset(source, d.primary.location.start);
     let end = LineColumn::from_offset(source, d.primary.location.end);
     let start_line = start.line + 1;
-    let (ld_location, fbd_location) = match map {
-        SourceMapKind::None => (None, None),
-        SourceMapKind::Ld(m) => (m.lookup(start_line as usize).cloned(), None),
-        SourceMapKind::Fbd(m) => (None, m.lookup(start_line as usize).cloned()),
+    let (ld_location, fbd_location, sfc_location) = match map {
+        SourceMapKind::None => (None, None, None),
+        SourceMapKind::Ld(m) => (m.lookup(start_line as usize).cloned(), None, None),
+        SourceMapKind::Fbd(m) => (None, m.lookup(start_line as usize).cloned(), None),
+        SourceMapKind::Sfc(m) => (None, None, m.lookup(start_line as usize).cloned()),
     };
     CheckDiagnostic {
         severity: "error".into(),
@@ -587,5 +631,6 @@ fn diag_to_dto_with_map(
         end_column: end.column + 1,
         ld_location,
         fbd_location,
+        sfc_location,
     }
 }

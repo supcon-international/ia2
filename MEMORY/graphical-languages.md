@@ -241,10 +241,11 @@ them at ST and explain ST replaces IL with a real expression syntax.
 | **1. LD** | Schema + transpiler + read-only SVG render + write path. | 1–2 weeks | "Author a motor seal-in circuit by editing JSON, see it render as a ladder, Run it, watch the coil flip in Monitor." | ✅ shipped |
 | **2. LD editing** | Drag/drop add contacts; rung edit. | 1 week | Click-to-add contact, change variable from a dropdown. | ✅ shipped (incl. Compare blocks, standard FB library, source map) |
 | **3a. FBD backend** | JSON schema + topological-sort transpiler + source map + bridge dispatch + `cs check/transpile` integration. | done 2026-05-16 | `cs check pou.fbd.json` returns structured diagnostics with `fbd_location`; `cs transpile` dumps topo-ordered ST. | ✅ shipped |
-| **3b. FBD renderer** | react-flow + dagre read-only renderer, editor coming in 3c. | next | "Render `click_counter.fbd.json` and `cascade_pid.fbd.json` as block-and-wire diagrams in the IDE." | 🚧 pending |
-| **3c. FBD authoring** | Drag blocks, draw wires, pick FB types. | later | Build the demo above with the mouse, not by hand-editing JSON. | 🚧 pending |
-| **4. FBD position persistence (= CFC)** | Save dragged positions to JSON. Nothing else changes. | 2 days | Same demo as Phase 3, but rearranging blocks survives reload. | (gated on 3c) |
-| **5. SFC** | Schema + transpiler + vertical-flow renderer. | 2 weeks | Batch process: idle → filling → draining → idle. Watch `current_step` change in Monitor. | 🚧 pending |
+| **3b. FBD renderer** | Hand-rolled SVG layered layout (no react-flow yet — editor comes in 3c). | done 2026-05-16 | `click_counter.fbd.json` renders as block-and-wire in the IDE. | ✅ shipped |
+| **3c. FBD authoring** | Drag blocks, draw wires, pick FB types. Likely brings in react-flow + dagre. | next | Build a 3-block pipeline with the mouse, not by hand-editing JSON. | 🚧 pending |
+| **4. FBD position persistence (= CFC)** | Save dragged positions to JSON. Nothing else changes — `FbdPosition` field is already in the schema. | 2 days | Same demo as Phase 3, but rearranging blocks survives reload. | (gated on 3c) |
+| **5a. SFC backend + CLI** | JSON schema (steps/transitions/actions, N/S/R qualifiers) + lower-to-ST transpiler emitting per-step IF dispatch + transition cascade + STRING-based `__sfc_step` state. Source map + bridge + store + `cs check / transpile`. | done 2026-05-16 | `cs check batch_sequence.sfc.json` returns clean; `cs transpile` dumps a CASE-style ST. | ✅ shipped |
+| **5b. SFC renderer** | Read-only vertical-flow renderer: step boxes + outbound transition bars + online-mode active-step highlight via `__sfc_step` variable. | done 2026-05-16 | `batch_sequence.sfc.json` renders as a 5-step state machine with safety transitions to a `faulted` branch. | ✅ shipped |
 
 Each phase **ships independently**. Don't gate Phase 3 on Phase 2 being
 "polished". A read-only renderer with JSON-edit-only authoring is a

@@ -3,6 +3,7 @@ import { useState } from "react"
 
 import { FBDEditor } from "@/components/editor/FBDEditor"
 import { LDEditor } from "@/components/editor/LDEditor"
+import { SFCEditor } from "@/components/editor/SFCEditor"
 import { STEditor } from "@/components/editor/STEditor"
 import { cn } from "@/lib/utils"
 import { useRuntime } from "@/state/runtime"
@@ -201,6 +202,8 @@ export function ProgramPane() {
             <LDEditor value={source} onChange={setSource} />
           ) : currentPou.declarations[0]?.language === "fbd" ? (
             <FBDEditor value={source} onChange={setSource} />
+          ) : currentPou.declarations[0]?.language === "sfc" ? (
+            <SFCEditor value={source} onChange={setSource} />
           ) : (
             <STEditor
               value={source}

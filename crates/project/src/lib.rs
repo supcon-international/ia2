@@ -16,6 +16,7 @@ mod errors;
 mod fbd;
 mod ld;
 mod paths;
+mod sfc;
 mod store;
 mod types;
 
@@ -27,6 +28,7 @@ pub use ld::{
     LdCoil, LdCoilKind, LdComparator, LdFbInput, LdNode, LdOperand, LdPouType, LdProgram,
     LdRung, LdVarSection, LdVariable,
 };
+pub use sfc::{SfcAction, SfcProgram, SfcQualifier, SfcStep, SfcTransition};
 pub use paths::{
     default_projects_dir, default_state_path, load_last_opened, save_last_opened,
 };

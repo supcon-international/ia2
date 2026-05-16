@@ -67,7 +67,9 @@ export function NewPouDialog(props: Props) {
       ? "ld.json"
       : language === "fbd"
         ? "fbd.json"
-        : "st"
+        : language === "sfc"
+          ? "sfc.json"
+          : "st"
 
   const submit = async () => {
     if (!trimmed) return
@@ -141,6 +143,7 @@ export function NewPouDialog(props: Props) {
                   <SelectItem value="st">Structured Text</SelectItem>
                   <SelectItem value="ld">Ladder Diagram</SelectItem>
                   <SelectItem value="fbd">Function Block Diagram</SelectItem>
+                  <SelectItem value="sfc">Sequential Function Chart</SelectItem>
                 </SelectContent>
               </Select>
             </div>

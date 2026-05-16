@@ -1,0 +1,37 @@
+{
+  "name": "good_sfc",
+  "pou_type": "program",
+  "variables": [
+    { "name": "start_btn",  "type": "BOOL", "section": "input"                  },
+    { "name": "tank_full",  "type": "BOOL", "section": "input"                  },
+    { "name": "tank_empty", "type": "BOOL", "section": "input"                  },
+    { "name": "inlet",      "type": "BOOL", "section": "output", "init": "FALSE"},
+    { "name": "drain",      "type": "BOOL", "section": "output", "init": "FALSE"}
+  ],
+  "initial_step": "idle",
+  "steps": [
+    {
+      "name": "idle",
+      "actions": [
+        { "qualifier": "R", "body": "inlet := FALSE;\ndrain := FALSE" }
+      ]
+    },
+    {
+      "name": "filling",
+      "actions": [
+        { "qualifier": "N", "body": "inlet := TRUE" }
+      ]
+    },
+    {
+      "name": "draining",
+      "actions": [
+        { "qualifier": "N", "body": "drain := TRUE" }
+      ]
+    }
+  ],
+  "transitions": [
+    { "from": "idle",     "to": "filling",  "condition": "start_btn"  },
+    { "from": "filling",  "to": "draining", "condition": "tank_full"  },
+    { "from": "draining", "to": "idle",     "condition": "tank_empty" }
+  ]
+}

@@ -245,7 +245,7 @@ export async function updateIomap(iomap: IoMap): Promise<RunResponse> {
 
 export async function checkProgram(
   source: string,
-  language: "st" | "ld" | "fbd" = "st",
+  language: "st" | "ld" | "fbd" | "sfc" = "st",
 ): Promise<CheckDiagnostic[]> {
   // ST source is plain text; LD / FBD source is JSON. Different
   // Content-Type plus a `?language=` query so the bridge knows what
