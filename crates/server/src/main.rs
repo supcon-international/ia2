@@ -136,6 +136,15 @@ async fn main() -> anyhow::Result<()> {
         // Synchronous runtime queries — agent-friendly alternatives to SSE.
         .route("/api/runtime/snapshot", get(routes::runtime_snapshot))
         .route("/api/runtime/status", get(routes::runtime_status))
+        // Debug control trio
+        .route("/api/runtime/pause", post(routes::runtime_pause))
+        .route("/api/runtime/resume", post(routes::runtime_resume))
+        .route("/api/runtime/step", post(routes::runtime_step))
+        .route("/api/runtime/forces", get(routes::list_runtime_forces))
+        .route(
+            "/api/runtime/forces/{name}",
+            post(routes::force_runtime_variable).delete(routes::unforce_runtime_variable),
+        )
         .route(
             "/api/runtime/variables/{name}",
             post(routes::write_runtime_variable),

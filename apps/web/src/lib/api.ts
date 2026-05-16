@@ -373,6 +373,65 @@ export async function writeVariable(
   )
 }
 
+// ---------- Runtime debug controls ----------
+
+/** Halt the scan loop. IO is frozen; the program does not advance.
+ *  Variable writes and forces still apply while paused. */
+export async function pauseRuntime(): Promise<void> {
+  await jsonOrThrow(
+    await fetch(`/api/runtime/pause`, { method: "POST" }),
+    "POST /api/runtime/pause",
+  )
+}
+
+/** Resume continuous scanning. */
+export async function resumeRuntime(): Promise<void> {
+  await jsonOrThrow(
+    await fetch(`/api/runtime/resume`, { method: "POST" }),
+    "POST /api/runtime/resume",
+  )
+}
+
+/** Run `cycles` scan rounds then auto-pause (default 1). */
+export async function stepRuntime(cycles: number = 1): Promise<void> {
+  await jsonOrThrow(
+    await fetch(`/api/runtime/step`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cycles }),
+    }),
+    "POST /api/runtime/step",
+  )
+}
+
+/** Pin a variable to a value across scans (force). The IEC-style i32
+ *  encoding is the same as writeVariable. */
+export async function forceVariable(
+  name: string,
+  value: number,
+  typeName: string = "",
+): Promise<void> {
+  const i32 = encodeForWrite(value, typeName)
+  await jsonOrThrow(
+    await fetch(`/api/runtime/forces/${encodeURIComponent(name)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value: i32 }),
+    }),
+    `POST /api/runtime/forces/${name}`,
+  )
+}
+
+/** Release a forced variable. Idempotent — no-op if not currently forced. */
+export async function unforceVariable(name: string): Promise<void> {
+  await jsonOrThrow(
+    await fetch(`/api/runtime/forces/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }),
+    `DELETE /api/runtime/forces/${name}`,
+  )
+}
+
 function encodeForWrite(value: number, typeName: string): number {
   const t = typeName.toUpperCase()
   if (t === "REAL") {

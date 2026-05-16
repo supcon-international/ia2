@@ -142,6 +142,13 @@ enum Command {
         code: String,
     },
 
+    /// Runtime debug commands: pause / resume / step / force / unforce
+    /// against a running server. These talk to `localhost:3001` (or
+    /// `--server`) over HTTP — agents and humans share the same
+    /// surface as the GUI's debug controls.
+    #[command(subcommand)]
+    Runtime(RuntimeCmd),
+
     /// List the symbols declared in a POU — variables, FB instances,
     /// program-level declarations.
     ///
@@ -165,6 +172,64 @@ enum Command {
         /// JSON output on stdout.
         #[arg(long)]
         json: bool,
+    },
+}
+
+/// Subcommands under `cs runtime`. Each one POSTs / GETs a single
+/// HTTP endpoint on the running server; defaults to
+/// `http://127.0.0.1:3001` and accepts `--server URL` to point elsewhere
+/// (e.g. an edge box reachable via SSH-forwarded port).
+#[derive(Subcommand, Debug)]
+enum RuntimeCmd {
+    /// Halt the scan loop. IO is frozen and `run_round` is skipped
+    /// until `resume` or `step`. Variable writes / forces still apply.
+    Pause {
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+    /// Resume continuous scanning.
+    Resume {
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+    /// Run N scan cycles then auto-pause.
+    Step {
+        /// Number of cycles to advance (default 1).
+        #[arg(default_value_t = 1)]
+        cycles: u32,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+    /// Print the current mode (running / paused / step{N}) and the
+    /// list of currently-forced variables.
+    Status {
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+    /// Pin a variable to a value — applied every scan until unforced.
+    /// Use a one-shot `cs runtime write` if you want the program to
+    /// be able to overwrite it next cycle.
+    Force {
+        name: String,
+        value: i32,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+    /// Release a forced variable.
+    Unforce {
+        name: String,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+    /// One-shot write (overwritable by the program next cycle). For a
+    /// persistent override use `force`.
+    Write {
+        name: String,
+        value: i32,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
     },
 }
 
@@ -207,6 +272,7 @@ fn main() {
         Command::Project(ProjectCmd::Info { path, json }) => cmd_project_info(&path, json),
         Command::Explain { code } => cmd_explain(&code),
         Command::Symbols { file, name, json } => cmd_symbols(&file, name.as_deref(), json),
+        Command::Runtime(r) => cmd_runtime(r),
     };
     match result {
         Ok(exit) => std::process::exit(exit),
@@ -572,6 +638,144 @@ fn cmd_symbols(file: &Path, name_filter: Option<&str>, json: bool) -> Result<i32
         );
     }
     Ok(if syms.is_empty() && name_filter.is_some() { 1 } else { 0 })
+}
+
+// =================================================================
+//   Subcommand: runtime (debug control trio)
+// =================================================================
+
+fn cmd_runtime(cmd: RuntimeCmd) -> Result<i32> {
+    match cmd {
+        RuntimeCmd::Pause { server } => {
+            let resp = post_json(&format!("{server}/api/runtime/pause"), &())?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+            Ok(0)
+        }
+        RuntimeCmd::Resume { server } => {
+            let resp = post_json(&format!("{server}/api/runtime/resume"), &())?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+            Ok(0)
+        }
+        RuntimeCmd::Step { cycles, server } => {
+            let body = serde_json::json!({ "cycles": cycles });
+            let resp = post_json(&format!("{server}/api/runtime/step"), &body)?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+            Ok(0)
+        }
+        RuntimeCmd::Status { json, server } => {
+            // Status is on /api/runtime/status — full picture including
+            // mode + forces. We don't try to render it prettily here;
+            // the JSON is what agents actually want and humans can pipe
+            // it through `jq` if needed.
+            let status = get_json(&format!("{server}/api/runtime/status"))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&status)?);
+            } else {
+                // A minimal human summary; full status is one --json
+                // away.
+                let mode = status.get("mode").cloned().unwrap_or(serde_json::Value::Null);
+                let forces = status
+                    .get("forces")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let running = status
+                    .get("running")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                println!(
+                    "running: {running}  mode: {}  forces: {}",
+                    serde_json::to_string(&mode)?,
+                    forces.len(),
+                );
+                for f in &forces {
+                    if let (Some(n), Some(v)) =
+                        (f.get("name").and_then(|v| v.as_str()), f.get("value"))
+                    {
+                        println!("  {n} := {v}");
+                    }
+                }
+            }
+            Ok(0)
+        }
+        RuntimeCmd::Force { name, value, server } => {
+            let body = serde_json::json!({ "value": value });
+            let resp = post_json(
+                &format!("{server}/api/runtime/forces/{}", url_encode(&name)),
+                &body,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+            Ok(0)
+        }
+        RuntimeCmd::Unforce { name, server } => {
+            let resp = delete_json(&format!(
+                "{server}/api/runtime/forces/{}",
+                url_encode(&name)
+            ))?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+            Ok(0)
+        }
+        RuntimeCmd::Write { name, value, server } => {
+            let body = serde_json::json!({ "value": value });
+            let resp = post_json(
+                &format!("{server}/api/runtime/variables/{}", url_encode(&name)),
+                &body,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+            Ok(0)
+        }
+    }
+}
+
+/// Tiny URL-component escaper. Variable names should be IEC identifiers
+/// (alphanumeric + `_`), but operators sometimes write `instance.pin`
+/// in `cs runtime force foo.bar` — the dot is safe but slashes
+/// wouldn't be. Cover the common cases without pulling a full
+/// percent-encoding crate.
+fn url_encode(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-' | '~') {
+                c.to_string()
+            } else {
+                format!("%{:02X}", c as u32)
+            }
+        })
+        .collect()
+}
+
+fn post_json(
+    url: &str,
+    body: &impl serde::Serialize,
+) -> Result<serde_json::Value> {
+    let resp = ureq::post(url)
+        .set("Content-Type", "application/json")
+        .send_json(body)
+        .map_err(|e| anyhow::anyhow!("POST {url}: {e}"))?;
+    let value: serde_json::Value = resp
+        .into_json()
+        .map_err(|e| anyhow::anyhow!("decode JSON from {url}: {e}"))?;
+    Ok(value)
+}
+
+fn get_json(url: &str) -> Result<serde_json::Value> {
+    let resp = ureq::get(url)
+        .call()
+        .map_err(|e| anyhow::anyhow!("GET {url}: {e}"))?;
+    let value: serde_json::Value = resp
+        .into_json()
+        .map_err(|e| anyhow::anyhow!("decode JSON from {url}: {e}"))?;
+    Ok(value)
+}
+
+fn delete_json(url: &str) -> Result<serde_json::Value> {
+    let resp = ureq::delete(url)
+        .call()
+        .map_err(|e| anyhow::anyhow!("DELETE {url}: {e}"))?;
+    let value: serde_json::Value = resp
+        .into_json()
+        .map_err(|e| anyhow::anyhow!("decode JSON from {url}: {e}"))?;
+    Ok(value)
 }
 
 // =================================================================

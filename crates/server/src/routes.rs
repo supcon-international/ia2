@@ -25,7 +25,8 @@ use futures_util::{SinkExt, StreamExt as FuturesStreamExt};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use ironplc_bridge::{
-    CheckDiagnostic, DeviceSpec, ProgramHandle, RuntimeWriteError, VarSnapshot, VariableInfo,
+    CheckDiagnostic, DeviceSpec, ProgramHandle, RuntimeMode, RuntimeWriteError, VarSnapshot,
+    VariableInfo,
 };
 use project::{
     Device, Edge, IoMap, MigrationReport, Pou, PouFile, PouLanguage, PouType, ProgramInstance,
@@ -1012,6 +1013,20 @@ pub struct RuntimeStatus {
     /// cleared on /api/stop and on close-project. `None` here just
     /// means nothing is currently running.
     pub running_info: Option<RunningInfo>,
+    /// Current scan-loop mode (`running` / `paused` / `step{remaining}`).
+    /// `None` when nothing's running.
+    pub mode: Option<RuntimeMode>,
+    /// Currently-forced variables in `name=value` pairs, sorted by name.
+    /// Empty when no force is active. The shape matches the in-memory
+    /// HashMap snapshot from `ProgramHandle::forces()`.
+    pub forces: Vec<ForceEntry>,
+}
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct ForceEntry {
+    pub name: String,
+    pub value: i32,
 }
 
 /// One-shot overview of the runtime — designed for agents who want
@@ -1045,6 +1060,23 @@ pub async fn runtime_status(
     let last_error = state.last_error.lock().expect("last_error").clone();
     let running_info = state.running_info.lock().expect("running_info").clone();
     let _ = project_open; // suppress unused — kept for symmetry with runtime
+    // Mode + forces come from the live ProgramHandle, when there is
+    // one. Clone the handle out of the mutex briefly to avoid holding
+    // the sync lock across the calls.
+    let (mode, forces) = {
+        let guard = state.program.lock().expect("program");
+        match guard.as_ref() {
+            Some(h) => {
+                let forces = h
+                    .forces()
+                    .into_iter()
+                    .map(|(name, value)| ForceEntry { name, value })
+                    .collect();
+                (Some(h.mode()), forces)
+            }
+            None => (None, vec![]),
+        }
+    };
     Json(RuntimeStatus {
         running,
         project: project_name,
@@ -1054,6 +1086,8 @@ pub async fn runtime_status(
         last_snapshot_us: snap.as_ref().map(|s| s.timestamp_us).unwrap_or(0),
         last_error,
         running_info,
+        mode,
+        forces,
     })
 }
 
@@ -1101,6 +1135,142 @@ pub async fn write_runtime_variable(
         }
         Err(RuntimeWriteError::Vm(e)) => Err(ApiError::Internal(e)),
     }
+}
+
+// ============================================================
+//  Debug control trio: pause / resume / step + force / unforce
+//
+//  All four endpoints share the same "look up the live handle, 409
+//  if nothing running" pattern as `write_runtime_variable`. Mode
+//  toggles are synchronous on the bridge side (just a mutex write);
+//  force commands round-trip through the cmd channel so the scan
+//  loop can validate the variable name before the ack comes back.
+// ============================================================
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct StepRequest {
+    /// How many scan cycles to run before re-pausing. Defaults to 1
+    /// when missing — "step" without a count is the common case.
+    #[serde(default = "default_step_cycles")]
+    pub cycles: u32,
+}
+
+fn default_step_cycles() -> u32 {
+    1
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct ForceRequest {
+    pub value: i32,
+}
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct ModeResponse {
+    pub mode: RuntimeMode,
+}
+
+/// Look up the live program handle or return 409. Used by every
+/// debug-control endpoint below.
+fn live_program(state: &AppState) -> Result<ProgramHandle, ApiError> {
+    state
+        .program
+        .lock()
+        .expect("program")
+        .as_ref()
+        .cloned()
+        .ok_or(ApiError::Conflict("no program running".into()))
+}
+
+pub async fn runtime_pause(State(state): State<AppState>) -> Result<Json<ModeResponse>, ApiError> {
+    let handle = live_program(&state)?;
+    handle.pause();
+    Ok(Json(ModeResponse { mode: handle.mode() }))
+}
+
+pub async fn runtime_resume(State(state): State<AppState>) -> Result<Json<ModeResponse>, ApiError> {
+    let handle = live_program(&state)?;
+    handle.resume();
+    Ok(Json(ModeResponse { mode: handle.mode() }))
+}
+
+pub async fn runtime_step(
+    State(state): State<AppState>,
+    body: Option<Json<StepRequest>>,
+) -> Result<Json<ModeResponse>, ApiError> {
+    let handle = live_program(&state)?;
+    let cycles = body.map(|Json(r)| r.cycles).unwrap_or(1);
+    handle.step(cycles);
+    Ok(Json(ModeResponse { mode: handle.mode() }))
+}
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct ForceResponse {
+    pub name: String,
+    pub value: i32,
+}
+
+/// Pin a variable's value. The scan loop applies it on every cycle
+/// until `unforce_runtime_variable` is called. 404 if the variable
+/// isn't declared in this POU; 409 if nothing's running.
+pub async fn force_runtime_variable(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+    Json(req): Json<ForceRequest>,
+) -> Result<Json<ForceResponse>, ApiError> {
+    let handle = live_program(&state)?;
+    match handle.force_variable(&name, req.value).await {
+        Ok(value) => Ok(Json(ForceResponse { name, value })),
+        Err(RuntimeWriteError::UnknownVariable(n)) => {
+            Err(ApiError::NotFound(format!("variable '{n}' not declared")))
+        }
+        Err(RuntimeWriteError::Disconnected) => {
+            Err(ApiError::Conflict("scan loop has stopped".into()))
+        }
+        Err(RuntimeWriteError::Vm(e)) => Err(ApiError::Internal(e)),
+    }
+}
+
+/// Release a forced variable. No-op (200) if the variable wasn't
+/// forced — convenient for idempotent agent retries.
+pub async fn unforce_runtime_variable(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let handle = live_program(&state)?;
+    handle
+        .unforce_variable(&name)
+        .await
+        .map_err(|e| match e {
+            RuntimeWriteError::Disconnected => {
+                ApiError::Conflict("scan loop has stopped".into())
+            }
+            other => ApiError::Internal(format!("{other:?}")),
+        })?;
+    Ok(Json(serde_json::json!({ "name": name, "forced": false })))
+}
+
+/// List currently-forced variables. Returns `[]` when nothing's
+/// running (rather than 409) — easier for clients to render.
+pub async fn list_runtime_forces(
+    State(state): State<AppState>,
+) -> Json<Vec<ForceEntry>> {
+    let forces = state
+        .program
+        .lock()
+        .expect("program")
+        .as_ref()
+        .map(|h| {
+            h.forces()
+                .into_iter()
+                .map(|(name, value)| ForceEntry { name, value })
+                .collect()
+        })
+        .unwrap_or_default();
+    Json(forces)
 }
 
 // ============================================================

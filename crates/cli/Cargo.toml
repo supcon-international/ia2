@@ -19,6 +19,11 @@ clap = { version = "4", features = ["derive"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
+# Sync HTTP client for the runtime debug subcommands. ureq is the
+# smallest mainstream option that doesn't drag tokio into the CLI's
+# dependency closure; the CLI is already mostly synchronous and we
+# only need request-response semantics.
+ureq = { version = "2", default-features = false, features = ["json"] }
 
 ironplc-bridge = { path = "../ironplc-bridge" }
 project = { path = "../project" }

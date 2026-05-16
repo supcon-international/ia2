@@ -25,7 +25,9 @@ pub use sfc_transpile::{
 };
 
 pub use errors::BridgeError;
-pub use runtime::{DeviceSpec, ProgramHandle, RuntimeWriteError, VarSnapshot, VarValue, spawn};
+pub use runtime::{
+    DeviceSpec, ProgramHandle, RuntimeMode, RuntimeWriteError, VarSnapshot, VarValue, spawn,
+};
 
 
 use ironplc_container::Container;

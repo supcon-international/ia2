@@ -1,10 +1,17 @@
-import { Pin } from "lucide-react"
-import { useEffect, useMemo, useRef, useState } from "react"
+import { Lock, Pause, Pin, Play, StepForward, Unlock } from "lucide-react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import { Sparkline } from "@/components/charts/Sparkline"
 import { TrendChart } from "@/components/charts/TrendChart"
 import { cn } from "@/lib/utils"
-import { writeVariable } from "@/lib/api"
+import {
+  forceVariable,
+  pauseRuntime,
+  resumeRuntime,
+  stepRuntime,
+  unforceVariable,
+  writeVariable,
+} from "@/lib/api"
 import {
   classifyType,
   colorFor,
@@ -24,6 +31,37 @@ export function MonitorPane() {
   // remote edge runtime we don't (yet) proxy writes — disable the
   // controls in that case to avoid silently losing the user's input.
   const canWrite = isRunning && !attached
+
+  // Debug control state. We poll /api/runtime/status on a 1s timer
+  // when the program is running so the toolbar reflects external
+  // changes (e.g. `cs runtime pause` from a shell). Optimistic local
+  // updates keep clicks feeling instant.
+  const [mode, setMode] = useState<"running" | "paused" | "step">("running")
+  const [forces, setForces] = useState<Set<string>>(new Set())
+  useEffect(() => {
+    if (!isRunning) return
+    let cancelled = false
+    const tick = async () => {
+      try {
+        const r = await fetch("/api/runtime/status")
+        if (!r.ok) return
+        const data = await r.json()
+        if (cancelled) return
+        const m = data?.mode?.kind as string | undefined
+        if (m === "running" || m === "paused" || m === "step") setMode(m)
+        const fs: Array<{ name: string }> = data?.forces ?? []
+        setForces(new Set(fs.map((f) => f.name)))
+      } catch {
+        /* ignore */
+      }
+    }
+    void tick()
+    const id = setInterval(tick, 1000)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
+  }, [isRunning])
 
   // History buffers (mutated in place; re-rendered via a tick counter).
   const historyRef = useRef<Map<string, number[]>>(new Map())
@@ -79,12 +117,66 @@ export function MonitorPane() {
   const vars = lastSnapshot?.vars ?? []
   const stale = !!lastSnapshot && !isRunning
 
+  // Optimistic-update wrappers: flip local state immediately for
+  // responsiveness, then issue the API call. The 1s status poll
+  // reconciles any drift from external changes.
+  const onPause = useCallback(async () => {
+    setMode("paused")
+    try { await pauseRuntime() } catch { /* status poll will re-sync */ }
+  }, [])
+  const onResume = useCallback(async () => {
+    setMode("running")
+    try { await resumeRuntime() } catch { /* */ }
+  }, [])
+  const onStep = useCallback(async () => {
+    setMode("step")
+    try { await stepRuntime(1) } catch { /* */ }
+  }, [])
+
+  const onToggleForce = useCallback(
+    async (v: VarValue) => {
+      if (forces.has(v.name)) {
+        setForces((p) => {
+          const n = new Set(p)
+          n.delete(v.name)
+          return n
+        })
+        try { await unforceVariable(v.name) } catch { /* */ }
+      } else {
+        // Pin to the *current* value — operator's intent is usually
+        // "lock this where it is now" rather than picking a fresh
+        // value. They can change it via the inline numeric editor /
+        // BOOL toggle once forced.
+        setForces((p) => new Set(p).add(v.name))
+        try {
+          const cat = classifyType(v.type_name)
+          let i32 = 0
+          if (cat === "bool") {
+            i32 = v.value === "TRUE" ? 1 : 0
+          } else if (cat === "numeric") {
+            i32 = parseInt(v.value, 10) || 0
+          }
+          await forceVariable(v.name, i32, v.type_name)
+        } catch { /* */ }
+      }
+    },
+    [forces],
+  )
+
   return (
     <section className="flex h-full min-h-0 min-w-0 flex-col border-t border-border bg-muted/20">
       <div className="flex h-7 items-center justify-between gap-3 border-b border-border px-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
         <span className="flex shrink-0 items-center gap-2">
           <span>Monitor</span>
           <RunningPill running={running} isRunning={isRunning} />
+          {isRunning && !attached && (
+            <DebugToolbar
+              mode={mode}
+              onPause={onPause}
+              onResume={onResume}
+              onStep={onStep}
+            />
+          )}
         </span>
         {lastSnapshot && (
           <span
@@ -129,6 +221,8 @@ export function MonitorPane() {
                 onPin={togglePin}
                 stale={stale}
                 canWrite={canWrite}
+                forced={forces.has(v.name)}
+                onToggleForce={onToggleForce}
               />
             ))}
           </ul>
@@ -203,6 +297,62 @@ function RunningPill({
   )
 }
 
+/**
+ * Inline pause / step / resume control + mode badge for the Monitor
+ * header. Three icon buttons total — operators recognise the play /
+ * pause / step pattern from every media UI they've ever used. The
+ * mode badge ("PAUSED" / "STEP") shows up only when off the default
+ * Running state, so the toolbar stays quiet during normal operation.
+ */
+function DebugToolbar({
+  mode,
+  onPause,
+  onResume,
+  onStep,
+}: {
+  mode: "running" | "paused" | "step"
+  onPause: () => void
+  onResume: () => void
+  onStep: () => void
+}) {
+  return (
+    <span className="ml-2 flex items-center gap-0.5">
+      {mode === "running" ? (
+        <button
+          type="button"
+          onClick={onPause}
+          title="Pause scan loop (freeze IO + program)"
+          className="rounded p-0.5 text-muted-foreground hover:bg-accent/40 hover:text-foreground"
+        >
+          <Pause className="size-3" />
+        </button>
+      ) : (
+        <button
+          type="button"
+          onClick={onResume}
+          title="Resume continuous scanning"
+          className="rounded p-0.5 text-highlight hover:bg-highlight/15"
+        >
+          <Play className="size-3" />
+        </button>
+      )}
+      <button
+        type="button"
+        onClick={onStep}
+        title="Step one scan cycle (auto-pause after)"
+        className="rounded p-0.5 text-muted-foreground hover:bg-accent/40 hover:text-foreground"
+      >
+        <StepForward className="size-3" />
+      </button>
+      {mode !== "running" && (
+        <Tag color="muted" title={`scan mode: ${mode}`}>
+          {mode}
+        </Tag>
+      )}
+    </span>
+  )
+}
+
 function Tag({
   color,
   title,
@@ -244,6 +394,10 @@ interface VarRowProps {
   onPin: (name: string) => void
   stale: boolean
   canWrite: boolean
+  /** Whether this variable is currently forced (pinned across scans). */
+  forced: boolean
+  /** Toggle the force state for this variable. */
+  onToggleForce: (v: VarValue) => void
 }
 
 function VarRow({
@@ -254,6 +408,8 @@ function VarRow({
   onPin,
   stale,
   canWrite,
+  forced,
+  onToggleForce,
 }: VarRowProps) {
   const cat: VarCategory = classifyType(v.type_name)
   const trendable = cat === "numeric" || cat === "bool" || cat === "bits"
@@ -296,6 +452,31 @@ function VarRow({
         <span className="hidden font-mono text-[9px] text-muted-foreground sm:inline">
           {v.type_name}
         </span>
+      )}
+
+      {canWrite && (cat === "bool" || cat === "numeric" || cat === "bits") && (
+        <button
+          type="button"
+          onClick={() => onToggleForce(v)}
+          className={cn(
+            "shrink-0 rounded p-0.5 transition-colors",
+            forced
+              ? "text-destructive hover:text-destructive/80"
+              : "text-muted-foreground/30 hover:text-muted-foreground",
+          )}
+          title={
+            forced
+              ? `Unforce ${v.name} (resume normal program-driven behaviour)`
+              : `Force ${v.name} = current value (pin across scans)`
+          }
+        >
+          {forced ? <Lock className="size-3" /> : <Unlock className="size-3" />}
+        </button>
+      )}
+      {/* Reserve width so rows align even when the force button is
+          hidden (read-only categories or remote attach mode). */}
+      {!(canWrite && (cat === "bool" || cat === "numeric" || cat === "bits")) && (
+        <span className="size-4 shrink-0" />
       )}
 
       <ValueCell v={v} cat={cat} canWrite={canWrite} />
