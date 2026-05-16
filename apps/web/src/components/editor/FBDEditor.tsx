@@ -32,6 +32,7 @@ import { checkProgram } from "@/lib/api"
 import {
   addBlock,
   blockBoolOutputs,
+  connectWire,
   parseProgram,
   removeBlock,
   removeOutputBinding,
@@ -58,6 +59,30 @@ import type { FbdBlock } from "@/types/generated/FbdBlock"
 import type { FbdInputSource } from "@/types/generated/FbdInputSource"
 import type { FbdLocation } from "@/types/generated/FbdLocation"
 import type { FbdProgram } from "@/types/generated/FbdProgram"
+
+// =================================================================
+//   Wire-drag state (port-to-port connection gesture)
+// =================================================================
+
+/** Snapshot of an in-flight wire-drag. `fromBlockId` / `fromPin` are
+ *  the source endpoint locked at drag-start; `currentX` / `currentY`
+ *  follow the cursor in SVG-space and drive the preview line. */
+interface WireDrag {
+  fromBlockId: string
+  fromPin: string
+  /** Source-end SVG coordinate (right edge of the source pin's dot). */
+  fromX: number
+  fromY: number
+  /** Cursor SVG coordinate, updated on every pointermove. */
+  currentX: number
+  currentY: number
+}
+
+/** Target endpoint of a wire-drag drop. */
+interface WireDropTarget {
+  blockId: string
+  pin: string
+}
 
 // =================================================================
 //   Layout constants — also used by the drag math
@@ -121,9 +146,17 @@ export function FBDEditor({
   // ---- Selection ----
   const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null)
 
+  // ---- Wire-drag (port-to-port) state ----
+  // Set when the user pointer-downs on a block's output dot. While
+  // active, the canvas paints a preview line from the source pin
+  // following the cursor; on pointerup we look for a target input
+  // pin near the release point and either connect or cancel.
+  const [wireDrag, setWireDrag] = useState<WireDrag | null>(null)
+
   // Reset selection if the source changed externally.
   useEffect(() => {
     setSelectedBlockId(null)
+    setWireDrag(null)
   }, [value])
 
   if (parsed.kind === "error") {
@@ -182,8 +215,27 @@ export function FBDEditor({
             diagIndex={diagIndex}
             selectedBlockId={selectedBlockId}
             readOnly={readOnly}
+            wireDrag={wireDrag}
             onSelectBlock={setSelectedBlockId}
             onMoveBlock={(id, pos) => commit(setBlockPosition(prog, id, pos))}
+            onStartWireDrag={setWireDrag}
+            onUpdateWireDrag={(pos) =>
+              setWireDrag((d) => (d ? { ...d, currentX: pos.x, currentY: pos.y } : d))
+            }
+            onEndWireDrag={(target) => {
+              if (wireDrag && target) {
+                commit(
+                  connectWire(
+                    prog,
+                    target.blockId,
+                    target.pin,
+                    wireDrag.fromBlockId,
+                    wireDrag.fromPin,
+                  ),
+                )
+              }
+              setWireDrag(null)
+            }}
           />
         </div>
       </div>
@@ -450,8 +502,12 @@ function FbdCanvas({
   diagIndex,
   selectedBlockId,
   readOnly,
+  wireDrag,
   onSelectBlock,
   onMoveBlock,
+  onStartWireDrag,
+  onUpdateWireDrag,
+  onEndWireDrag,
 }: {
   prog: FbdProgram
   layout: FbdLayout
@@ -459,13 +515,14 @@ function FbdCanvas({
   diagIndex: DiagIndex
   selectedBlockId: string | null
   readOnly: boolean
+  wireDrag: WireDrag | null
   onSelectBlock: (id: string | null) => void
   onMoveBlock: (id: string, pos: { x: number; y: number }) => void
+  onStartWireDrag: (drag: WireDrag) => void
+  onUpdateWireDrag: (pos: { x: number; y: number }) => void
+  onEndWireDrag: (target: WireDropTarget | null) => void
 }) {
-  // Drag state lives here so the move handler can read it without
-  // re-rendering on every pointer event. We commit position only on
-  // pointermove (which is fine — onMoveBlock writes back through
-  // onChange and the editor re-parses on the next tick).
+  // Block drag state — same as before.
   const dragRef = useRef<{
     id: string
     origX: number
@@ -476,19 +533,77 @@ function FbdCanvas({
   } | null>(null)
   const svgRef = useRef<SVGSVGElement | null>(null)
 
+  /** Convert a client-space (px) point to SVG-space (layout units),
+   *  using the viewBox-to-rendered-size scale. */
+  const clientToSvg = (clientX: number, clientY: number): { x: number; y: number } => {
+    const svg = svgRef.current
+    if (!svg) return { x: clientX, y: clientY }
+    const rect = svg.getBoundingClientRect()
+    const scaleX = layout.width / rect.width
+    const scaleY = layout.height / rect.height
+    return {
+      x: (clientX - rect.left) * scaleX,
+      y: (clientY - rect.top) * scaleY,
+    }
+  }
+
   const onCanvasPointerMove = (e: React.PointerEvent) => {
+    // Block drag takes precedence (it's the more common gesture).
     const drag = dragRef.current
-    if (!drag) return
-    const dx = (e.clientX - drag.startClientX) / drag.scale
-    const dy = (e.clientY - drag.startClientY) / drag.scale
-    onMoveBlock(drag.id, {
-      x: Math.round(drag.origX + dx),
-      y: Math.round(drag.origY + dy),
-    })
+    if (drag) {
+      const dx = (e.clientX - drag.startClientX) / drag.scale
+      const dy = (e.clientY - drag.startClientY) / drag.scale
+      onMoveBlock(drag.id, {
+        x: Math.round(drag.origX + dx),
+        y: Math.round(drag.origY + dy),
+      })
+      return
+    }
+    if (wireDrag) {
+      const p = clientToSvg(e.clientX, e.clientY)
+      onUpdateWireDrag(p)
+    }
+  }
+
+  /** Attempt to find an input pin dot near the cursor on pointerup.
+   *  Returns the {blockId, pin} pair if hit within HIT_RADIUS px, or
+   *  null otherwise. Iterates all input pins of all blocks; n is small
+   *  enough this is fine. */
+  const findDropTarget = (svgX: number, svgY: number): WireDropTarget | null => {
+    const HIT_RADIUS = 14 // forgiving by design — small dots need a big target
+    for (const block of prog.blocks) {
+      // Don't self-loop
+      if (wireDrag && block.id === wireDrag.fromBlockId) continue
+      const lay = layout.blockById.get(block.id)
+      if (!lay) return null
+      for (let i = 0; i < Math.max(block.inputs.length, 1); i++) {
+        const input = block.inputs[i]
+        if (!input) continue
+        const x = lay.x
+        const y = lay.y + HEADER_H + i * PIN_ROW_H + PIN_ROW_H / 2
+        const d = Math.hypot(svgX - x, svgY - y)
+        if (d <= HIT_RADIUS) {
+          return { blockId: block.id, pin: input.pin }
+        }
+      }
+    }
+    return null
+  }
+
+  const onCanvasPointerUp = (e: React.PointerEvent) => {
+    // End block drag.
+    dragRef.current = null
+    // Resolve wire drag.
+    if (wireDrag) {
+      const p = clientToSvg(e.clientX, e.clientY)
+      const target = findDropTarget(p.x, p.y)
+      onEndWireDrag(target)
+    }
   }
 
   const endDrag = () => {
     dragRef.current = null
+    if (wireDrag) onEndWireDrag(null)
   }
 
   return (
@@ -499,7 +614,7 @@ function FbdCanvas({
       height={layout.height}
       className="block max-w-full select-none"
       onPointerMove={onCanvasPointerMove}
-      onPointerUp={endDrag}
+      onPointerUp={onCanvasPointerUp}
       onPointerCancel={endDrag}
       onPointerLeave={endDrag}
       onMouseDown={(e) => {
@@ -571,8 +686,49 @@ function FbdCanvas({
             }
             ;(e.currentTarget as Element).setPointerCapture(e.pointerId)
           }}
+          onOutputPinPointerDown={(pin, e) => {
+            e.stopPropagation()
+            if (readOnly) return
+            const lay = layout.blockById.get(b.id)!
+            const outs = blockBoolOutputs(b)
+            const pinIdx = outs.indexOf(pin)
+            const total = Math.max(outs.length, 1)
+            const yOffset =
+              HEADER_H + ((pinIdx + 0.5) * (lay.h - HEADER_H)) / total
+            onStartWireDrag({
+              fromBlockId: b.id,
+              fromPin: pin,
+              fromX: lay.x + lay.w,
+              fromY: lay.y + yOffset,
+              currentX: lay.x + lay.w,
+              currentY: lay.y + yOffset,
+            })
+          }}
         />
       ))}
+
+      {/* Wire-drag preview line */}
+      {wireDrag && (
+        <g pointerEvents="none">
+          <path
+            d={(() => {
+              const dx = Math.max(20, (wireDrag.currentX - wireDrag.fromX) / 2)
+              return `M ${wireDrag.fromX} ${wireDrag.fromY} C ${wireDrag.fromX + dx} ${wireDrag.fromY}, ${wireDrag.currentX - dx} ${wireDrag.currentY}, ${wireDrag.currentX} ${wireDrag.currentY}`
+            })()}
+            fill="none"
+            className="stroke-highlight"
+            strokeWidth={1.5}
+            strokeDasharray="4 3"
+            vectorEffect="non-scaling-stroke"
+          />
+          <circle
+            cx={wireDrag.currentX}
+            cy={wireDrag.currentY}
+            r={3}
+            className="fill-highlight"
+          />
+        </g>
+      )}
 
       {prog.outputs.map((o, i) => {
         const from = layout.blockById.get(o.from_block)
@@ -620,6 +776,7 @@ function BlockGlyph({
   selected,
   readOnly,
   onPointerDown,
+  onOutputPinPointerDown,
 }: {
   block: FbdBlock
   layout: BlockLayout
@@ -628,7 +785,9 @@ function BlockGlyph({
   selected: boolean
   readOnly: boolean
   onPointerDown: (e: React.PointerEvent) => void
+  onOutputPinPointerDown: (pin: string, e: React.PointerEvent) => void
 }) {
+  const boolOutputs = blockBoolOutputs(block)
   return (
     <g>
       {/* Background rect — handles click on the body */}
@@ -725,17 +884,50 @@ function BlockGlyph({
         )
       })}
 
-      {/* Output pin marker on the right edge */}
-      <circle
-        cx={layout.x + layout.w}
-        cy={layout.y + layout.h / 2}
-        r={3}
-        className={powerClass(
-          liveValues
-            ? liveValues.bools[`${block.instance}.Q`] === true
-            : null,
-        ).replace("stroke-", "fill-")}
-      />
+      {/* Output pin markers on the right edge. One per BOOL output;
+          each is a drag handle for the wire-creation gesture (mousedown
+          → drag to a target input pin → release). Non-BOOL outputs
+          (ET on a timer, CV on a counter) are not rendered here —
+          they can't legally feed a BOOL input network anyway. */}
+      {(boolOutputs.length > 0 ? boolOutputs : ["Q"]).map((pin, i, arr) => {
+        const cy = layout.y + HEADER_H + ((i + 0.5) * (layout.h - HEADER_H)) / arr.length
+        const live = liveValues
+          ? liveValues.bools[`${block.instance}.${pin}`] === true
+          : null
+        return (
+          <g key={pin}>
+            {/* Larger transparent hit area — small dots are awful targets. */}
+            <circle
+              cx={layout.x + layout.w}
+              cy={cy}
+              r={9}
+              fill="transparent"
+              style={{ cursor: readOnly ? "default" : "crosshair" }}
+              onPointerDown={(e) => onOutputPinPointerDown(pin, e)}
+            />
+            <circle
+              cx={layout.x + layout.w}
+              cy={cy}
+              r={3.5}
+              className={powerClass(live).replace("stroke-", "fill-")}
+              pointerEvents="none"
+            />
+            {/* Label for blocks with more than one BOOL output */}
+            {arr.length > 1 && (
+              <text
+                x={layout.x + layout.w - 4}
+                y={cy + 3}
+                textAnchor="end"
+                className="fill-muted-foreground pointer-events-none"
+                fontSize="9"
+                fontFamily="ui-monospace, monospace"
+              >
+                {pin}
+              </text>
+            )}
+          </g>
+        )
+      })}
     </g>
   )
 }
