@@ -120,79 +120,130 @@ export function SFCEditor({
                 )
               return (
                 <div key={step.name} className="flex flex-col items-stretch">
-                  {/* Step box */}
+                  {/* Vertical connector line drops in from the
+                      transition above (or the canvas edge for the
+                      first step). Drawn separately so we can vary
+                      its colour by activity. */}
+                  {i > 0 && (
+                    <div
+                      className={cn(
+                        "mx-auto h-4 w-px",
+                        isActive ? "bg-highlight" : "bg-foreground",
+                      )}
+                    />
+                  )}
+
+                  {/* Step box — Codesys / TIA convention:
+                       - square corners, foreground-coloured border,
+                         no shadow, no header strip;
+                       - initial step gets a second border outside
+                         (the classic "double frame");
+                       - currently active step inverts colours
+                         (filled with highlight, white text). */}
                   <div
                     className={cn(
-                      "rounded-md border bg-card shadow-sm",
-                      hasError
-                        ? "border-destructive"
-                        : isActive
-                          ? "border-highlight ring-2 ring-highlight/40"
-                          : "border-border",
+                      isInitial
+                        ? "border-2 border-foreground p-[3px]"
+                        : "p-0",
+                      hasError && "border-destructive",
                     )}
                   >
                     <div
                       className={cn(
-                        "flex items-center justify-between border-b px-3 py-1.5 font-mono text-xs",
-                        isActive
-                          ? "border-highlight/40 bg-highlight/10 text-foreground"
-                          : "border-border bg-muted/30 text-foreground",
+                        "border-2",
+                        hasError
+                          ? "border-destructive"
+                          : isActive
+                            ? "border-highlight bg-highlight"
+                            : "border-foreground bg-card",
                       )}
                     >
-                      <span>
-                        <strong>{step.name}</strong>
-                        {isInitial && (
-                          <span className="ml-2 rounded border border-border bg-muted/50 px-1 py-0.5 text-[9px] uppercase text-muted-foreground">
-                            initial
-                          </span>
+                      <div
+                        className={cn(
+                          "px-4 py-2 text-center font-mono text-sm font-semibold",
+                          isActive
+                            ? "text-background"
+                            : "text-foreground",
                         )}
-                      </span>
-                      {isActive && (
-                        <span className="rounded bg-highlight/30 px-1.5 py-0.5 text-[9px] font-medium uppercase text-foreground">
-                          active
-                        </span>
+                      >
+                        {step.name}
+                      </div>
+                      {step.actions.length > 0 && (
+                        <ul
+                          className={cn(
+                            "space-y-0.5 border-t-2 px-3 py-1.5 font-mono text-[11px]",
+                            isActive
+                              ? "border-highlight bg-background text-foreground"
+                              : "border-foreground/40 text-foreground",
+                          )}
+                        >
+                          {step.actions.map((a, ai) => (
+                            <li
+                              key={ai}
+                              className="flex items-start gap-2"
+                            >
+                              <span
+                                className="inline-block w-4 text-center font-bold text-foreground"
+                                title={qualifierTooltip(a.qualifier)}
+                              >
+                                {a.qualifier}
+                              </span>
+                              <pre className="flex-1 whitespace-pre-wrap text-foreground">
+                                {a.body}
+                              </pre>
+                            </li>
+                          ))}
+                        </ul>
                       )}
                     </div>
-                    {step.actions.length > 0 ? (
-                      <ul className="space-y-0.5 px-3 py-2 font-mono text-[11px]">
-                        {step.actions.map((a, ai) => (
-                          <li key={ai} className="flex items-start gap-2">
-                            <span
-                              className="rounded bg-muted px-1 text-[10px] font-medium text-foreground"
-                              title={qualifierTooltip(a.qualifier)}
-                            >
-                              {a.qualifier}
-                            </span>
-                            <pre className="flex-1 whitespace-pre-wrap text-foreground">
-                              {a.body}
-                            </pre>
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <div className="px-3 py-2 font-mono text-[11px] italic text-muted-foreground">
-                        (no actions)
-                      </div>
-                    )}
                   </div>
 
-                  {/* Outbound transitions */}
-                  {outbound.length > 0 && (
-                    <div className="my-1 flex flex-col items-stretch gap-0.5">
-                      {outbound.map((t) => (
-                        <TransitionBar
-                          key={`${t.from}→${t.to}-${t.condition}`}
-                          transition={t}
-                          active={activeStep === t.from}
+                  {/* Outbound transitions — render as a thick
+                       horizontal bar (IEC's "transition cross") with
+                       the condition text to the right and the target
+                       step name dimmed underneath. A bar with no
+                       transitions still drops a connector line if
+                       there's a next step. */}
+                  {outbound.length > 0 ? (
+                    outbound.map((t, ti) => (
+                      <div
+                        key={`${t.from}→${t.to}-${t.condition}-${ti}`}
+                        className="flex flex-col items-stretch"
+                      >
+                        <div
+                          className={cn(
+                            "mx-auto h-3 w-px",
+                            activeStep === t.from
+                              ? "bg-highlight"
+                              : "bg-foreground",
+                          )}
                         />
-                      ))}
-                    </div>
-                  )}
-
-                  {/* Connector line down to next step (visual hint) */}
-                  {i < prog.steps.length - 1 && outbound.length === 0 && (
-                    <div className="mx-auto h-4 w-px bg-border" />
-                  )}
+                        <div className="flex items-center gap-2">
+                          <div className="flex-1" />
+                          <div className="relative w-32">
+                            <div
+                              className={cn(
+                                "h-[3px] w-full",
+                                activeStep === t.from
+                                  ? "bg-highlight"
+                                  : "bg-foreground",
+                              )}
+                            />
+                          </div>
+                          <div className="flex-1 font-mono text-[11px]">
+                            <span className="text-foreground">
+                              {t.condition}
+                            </span>
+                            <span className="ml-2 text-muted-foreground">
+                              → {t.to}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    ))
+                  ) : i < prog.steps.length - 1 ? (
+                    <div className="mx-auto h-4 w-px bg-foreground" />
+                  ) : null}
                 </div>
               )
             })}
@@ -301,35 +352,8 @@ function VariablePanel({
   )
 }
 
-// =================================================================
-//   Transition bar
-// =================================================================
-
-function TransitionBar({
-  transition,
-  active,
-}: {
-  transition: SfcTransition
-  active: boolean
-}) {
-  return (
-    <div
-      className={cn(
-        "mx-auto flex w-[90%] items-center gap-2 rounded border bg-card px-2 py-0.5 font-mono text-[10px]",
-        active
-          ? "border-highlight text-foreground"
-          : "border-border text-muted-foreground",
-      )}
-      title={`${transition.from} → ${transition.to}\nwhen ${transition.condition}`}
-    >
-      <span className="rounded bg-muted px-1 text-foreground">→</span>
-      <span className="font-medium text-foreground">{transition.to}</span>
-      <span className="ml-auto rounded bg-muted/60 px-1 text-foreground/80">
-        {transition.condition}
-      </span>
-    </div>
-  )
-}
+// (TransitionBar removed — transitions are now rendered inline as
+//  thick horizontal bars in the main SFC stack to match IEC convention.)
 
 // =================================================================
 //   Diagnostics

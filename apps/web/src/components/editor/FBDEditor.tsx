@@ -94,6 +94,10 @@ const HEADER_H = 26
 const LAYER_GAP = 80
 const ROW_GAP = 20
 const CANVAS_PAD = 24
+/** Length of the connector stub that pokes out from the block edge,
+ *  in SVG units. Wires terminate at the outer end of the stub (the
+ *  dot), not at the block edge — same as Codesys / TIA. */
+const STUB_LEN = 8
 
 // =================================================================
 //   Top-level component
@@ -579,7 +583,9 @@ function FbdCanvas({
       for (let i = 0; i < Math.max(block.inputs.length, 1); i++) {
         const input = block.inputs[i]
         if (!input) continue
-        const x = lay.x
+        // Hit-test against the stub dot (outside the left edge), where
+        // the user expects the connection point to be.
+        const x = lay.x - STUB_LEN
         const y = lay.y + HEADER_H + i * PIN_ROW_H + PIN_ROW_H / 2
         const d = Math.hypot(svgX - x, svgY - y)
         if (d <= HIT_RADIUS) {
@@ -634,9 +640,10 @@ function FbdCanvas({
             if (!from || !to) return null
             const targetPinIdx = b.inputs.findIndex((x) => x.pin === inp.pin)
             const sourcePinIdx = approxOutputPinIndex(prog.blocks, src.block_id, src.pin)
-            const x1 = from.x + from.w
+            // Wires terminate at the STUB dots, not at the block edge.
+            const x1 = from.x + from.w + STUB_LEN
             const y1 = from.y + HEADER_H + sourcePinIdx * PIN_ROW_H + PIN_ROW_H / 2
-            const x2 = to.x
+            const x2 = to.x - STUB_LEN
             const y2 = to.y + HEADER_H + targetPinIdx * PIN_ROW_H + PIN_ROW_H / 2
             const dx = Math.max(20, (x2 - x1) / 2)
             const d = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`
@@ -695,12 +702,15 @@ function FbdCanvas({
             const total = Math.max(outs.length, 1)
             const yOffset =
               HEADER_H + ((pinIdx + 0.5) * (lay.h - HEADER_H)) / total
+            // Source anchor for the preview line = the stub dot, not
+            // the block edge. Matches the rendered output-pin
+            // position so the rubber-band line attaches visually.
             onStartWireDrag({
               fromBlockId: b.id,
               fromPin: pin,
-              fromX: lay.x + lay.w,
+              fromX: lay.x + lay.w + STUB_LEN,
               fromY: lay.y + yOffset,
-              currentX: lay.x + lay.w,
+              currentX: lay.x + lay.w + STUB_LEN,
               currentY: lay.y + yOffset,
             })
           }}
@@ -734,7 +744,7 @@ function FbdCanvas({
         const from = layout.blockById.get(o.from_block)
         if (!from) return null
         const srcPinIdx = approxOutputPinIndex(prog.blocks, o.from_block, o.from_pin)
-        const x1 = from.x + from.w
+        const x1 = from.x + from.w + STUB_LEN
         const y1 = from.y + HEADER_H + srcPinIdx * PIN_ROW_H + PIN_ROW_H / 2
         const x2 = x1 + 40
         const srcBlock = prog.blocks.find((b) => b.id === o.from_block)
@@ -788,15 +798,39 @@ function BlockGlyph({
   onOutputPinPointerDown: (pin: string, e: React.PointerEvent) => void
 }) {
   const boolOutputs = blockBoolOutputs(block)
+  // Industrial-FBD convention (Codesys / TIA / Step7):
+  //   - **Instance name** sits ABOVE the block (regular weight, small).
+  //     It's the variable name; the rest of the program references it.
+  //   - **FB type** is BOLD at the top inside the box. The type tells
+  //     you what the block does, so it gets the most visual weight.
+  //   - **Input pin names** left-aligned just inside the left edge.
+  //   - **Output pin names** right-aligned just inside the right edge.
+  //   - **Input values** (vars / literals / `inst.pin`) printed in a
+  //     fainter colour after the pin name — present only when the
+  //     pin isn't being wired by another block, since wired inputs
+  //     are visually obvious from the connecting line.
+  //   - The box is a plain rectangle, square corners. No header strip,
+  //     no rounded corners, no "card shadow".
   return (
     <g>
-      {/* Background rect — handles click on the body */}
+      {/* Instance label above the box. Stays outside the click/drag
+          target so a quick click doesn't accidentally start a drag. */}
+      <text
+        x={layout.x + layout.w / 2}
+        y={layout.y - 6}
+        textAnchor="middle"
+        className="fill-foreground pointer-events-none"
+        fontSize="10"
+        fontFamily="ui-monospace, monospace"
+      >
+        {block.instance}
+      </text>
+      {/* The box. Square corners, single-weight border. */}
       <rect
         x={layout.x}
         y={layout.y}
         width={layout.w}
         height={layout.h}
-        rx={4}
         className={cn(
           "fill-card",
           hasError
@@ -805,90 +839,118 @@ function BlockGlyph({
               ? "stroke-highlight"
               : "stroke-foreground",
         )}
-        strokeWidth={selected || hasError ? 2 : 1.5}
+        strokeWidth={selected || hasError ? 2 : 1.25}
         vectorEffect="non-scaling-stroke"
         onPointerDown={onPointerDown}
         style={{ cursor: readOnly ? "default" : "move" }}
       />
-      {/* Header strip — same drag handle as body */}
+      {/* FB type — bold, centred, top of the inner area. The hit-test
+          rect above the body keeps drag working over this region. */}
       <rect
         x={layout.x}
         y={layout.y}
         width={layout.w}
         height={HEADER_H}
-        rx={4}
-        className={
-          hasError
-            ? "fill-destructive/15"
-            : selected
-              ? "fill-highlight/15"
-              : "fill-muted/40"
-        }
+        fill="transparent"
         onPointerDown={onPointerDown}
         style={{ cursor: readOnly ? "default" : "move" }}
       />
       <text
         x={layout.x + layout.w / 2}
-        y={layout.y + 16}
+        y={layout.y + 17}
         textAnchor="middle"
         className="fill-foreground pointer-events-none"
-        fontSize="12"
+        fontSize="13"
         fontFamily="ui-monospace, monospace"
+        fontWeight={700}
       >
-        {block.instance}
-        <tspan className="fill-muted-foreground"> : {block.fb_type}</tspan>
+        {block.fb_type}
       </text>
 
-      {/* Input pins (left) */}
+      {/* Input pins (left side, inside the box) */}
       {(block.inputs.length > 0 ? block.inputs : [null]).map((input, i) => {
         const y = layout.y + HEADER_H + i * PIN_ROW_H + PIN_ROW_H / 2
         if (!input) {
           return (
             <text
               key="empty"
-              x={layout.x + 8}
+              x={layout.x + 6}
               y={y + 3}
               className="fill-muted-foreground pointer-events-none"
               fontSize="10"
               fontFamily="ui-monospace, monospace"
+              fontStyle="italic"
             >
-              (no inputs)
+              no inputs
             </text>
           )
         }
-        const text =
-          input.value.kind === "var"
-            ? input.value.name
-            : input.value.kind === "literal"
-              ? input.value.value
-              : `${input.value.block_id}.${input.value.pin}`
+        // Wired inputs show only the pin name — the value is visible
+        // from the wire itself, no need to clutter the box with it.
+        // For var/literal we print the operand in muted text after
+        // the pin name. The narrow `if/else` (vs. ternary) keeps
+        // TypeScript's discriminated-union narrowing happy.
+        let valueText: string | null = null
+        if (input.value.kind === "var") {
+          valueText = input.value.name
+        } else if (input.value.kind === "literal") {
+          valueText = input.value.value
+        }
         return (
           <g key={input.pin}>
+            {/* Connector stub: short horizontal line poking out from
+                the block edge with a dot at its far end (Codesys /
+                TIA convention). Wires terminate at the dot, not at
+                the block edge. */}
+            <line
+              x1={layout.x - STUB_LEN}
+              y1={y}
+              x2={layout.x}
+              y2={y}
+              className="stroke-foreground pointer-events-none"
+              strokeWidth={1}
+              vectorEffect="non-scaling-stroke"
+            />
             <circle
-              cx={layout.x}
+              cx={layout.x - STUB_LEN}
               cy={y}
-              r={2}
+              r={2.5}
               className="fill-foreground pointer-events-none"
             />
+            {/* Pin name, inside-left, bold. */}
             <text
-              x={layout.x + 8}
+              x={layout.x + 5}
               y={y + 3}
               className="fill-foreground pointer-events-none"
               fontSize="10"
               fontFamily="ui-monospace, monospace"
+              fontWeight={600}
             >
-              {input.pin}:
-              <tspan className="fill-muted-foreground"> {text}</tspan>
+              {input.pin}
             </text>
+            {/* Value to the right of the pin name, smaller + muted. */}
+            {valueText && (
+              <text
+                x={layout.x + 5 + input.pin.length * 6.5 + 6}
+                y={y + 3}
+                className="fill-muted-foreground pointer-events-none"
+                fontSize="9"
+                fontFamily="ui-monospace, monospace"
+              >
+                {valueText}
+              </text>
+            )}
           </g>
         )
       })}
 
-      {/* Output pin markers on the right edge. One per BOOL output;
-          each is a drag handle for the wire-creation gesture (mousedown
-          → drag to a target input pin → release). Non-BOOL outputs
-          (ET on a timer, CV on a counter) are not rendered here —
-          they can't legally feed a BOOL input network anyway. */}
+      {/* Output pins on the right side. Same pattern as inputs:
+          pin name INSIDE right-aligned, bold, with a connector stub
+          (short line + dot) reaching outside the box. Each dot is a
+          drag handle for the wire-creation gesture. Non-BOOL outputs
+          (ET / CV) are also rendered as labels but without a drag
+          stub — they can't feed a BOOL network so they don't get
+          wires here. */}
       {(boolOutputs.length > 0 ? boolOutputs : ["Q"]).map((pin, i, arr) => {
         const cy = layout.y + HEADER_H + ((i + 0.5) * (layout.h - HEADER_H)) / arr.length
         const live = liveValues
@@ -896,9 +958,32 @@ function BlockGlyph({
           : null
         return (
           <g key={pin}>
-            {/* Larger transparent hit area — small dots are awful targets. */}
+            {/* Pin name, inside-right, bold — matches the input
+                pattern visually. */}
+            <text
+              x={layout.x + layout.w - 5}
+              y={cy + 3}
+              textAnchor="end"
+              className="fill-foreground pointer-events-none"
+              fontSize="10"
+              fontFamily="ui-monospace, monospace"
+              fontWeight={600}
+            >
+              {pin}
+            </text>
+            {/* Connector stub outside the right edge. */}
+            <line
+              x1={layout.x + layout.w}
+              y1={cy}
+              x2={layout.x + layout.w + STUB_LEN}
+              y2={cy}
+              className="stroke-foreground pointer-events-none"
+              strokeWidth={1}
+              vectorEffect="non-scaling-stroke"
+            />
+            {/* Larger transparent hit area for the wire-drag gesture. */}
             <circle
-              cx={layout.x + layout.w}
+              cx={layout.x + layout.w + STUB_LEN}
               cy={cy}
               r={9}
               fill="transparent"
@@ -906,25 +991,12 @@ function BlockGlyph({
               onPointerDown={(e) => onOutputPinPointerDown(pin, e)}
             />
             <circle
-              cx={layout.x + layout.w}
+              cx={layout.x + layout.w + STUB_LEN}
               cy={cy}
-              r={3.5}
+              r={2.5}
               className={powerClass(live).replace("stroke-", "fill-")}
               pointerEvents="none"
             />
-            {/* Label for blocks with more than one BOOL output */}
-            {arr.length > 1 && (
-              <text
-                x={layout.x + layout.w - 4}
-                y={cy + 3}
-                textAnchor="end"
-                className="fill-muted-foreground pointer-events-none"
-                fontSize="9"
-                fontFamily="ui-monospace, monospace"
-              >
-                {pin}
-              </text>
-            )}
           </g>
         )
       })}

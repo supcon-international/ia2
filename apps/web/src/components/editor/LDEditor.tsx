@@ -1511,11 +1511,12 @@ function ConstGlyph({
   )
 }
 
-/** Compare block — rendered as a rectangle in the rung with the
- *  comparison expression as its label. Same wire-in / wire-out shape
- *  as a contact, so it slots into series/parallel networks the same
- *  way. Powered → FX-Green stroke; not powered → muted; static (not
- *  running) → neutral foreground.
+/** Compare block — rendered as a **square-cornered** rectangle in
+ *  three rows: left operand on top, comparator in the middle (bigger,
+ *  bold), right operand on the bottom. This is the canonical IEC /
+ *  Codesys / TIA shape for in-network comparison blocks — engineers
+ *  reading the rung can resolve "is `temperature` < `50.0`?" in a
+ *  single glance because the operands stack vertically.
  *
  *  This is the IEC 61131-3 mechanism for bridging numeric variables
  *  into the boolean network — without it, an LD POU has no way to
@@ -1541,12 +1542,12 @@ function CompareGlyph({
   powered: boolean | null
   onClick: () => void
 }) {
-  // The rectangle occupies the middle ~70% of the cell width; short
-  // lead-in / lead-out wires connect it to the surrounding contacts.
-  const pad = 12
+  // Square box, three rows. Height slightly larger than a contact so
+  // the three operand rows can breathe.
+  const pad = 10
   const boxX = x + pad
   const boxW = width - pad * 2
-  const boxH = 26
+  const boxH = 38
   const boxY = y - boxH / 2
   const cls = powerClass(powered)
   const labelClass =
@@ -1560,12 +1561,12 @@ function CompareGlyph({
       {/* hit target covers full cell */}
       <rect
         x={x + 2}
-        y={y - 18}
+        y={y - 22}
         width={width - 4}
-        height={36}
+        height={44}
         fill="transparent"
       />
-      {/* lead-in / lead-out wires */}
+      {/* lead-in / lead-out wires — meet the box at its vertical centre */}
       <line
         x1={x}
         y1={y}
@@ -1584,29 +1585,50 @@ function CompareGlyph({
         strokeWidth={1}
         vectorEffect="non-scaling-stroke"
       />
-      {/* the rectangle */}
+      {/* Square-cornered rectangle (rx=0) — matches IEC compare-block
+          convention from Codesys / TIA / Step7. */}
       <rect
         x={boxX}
         y={boxY}
         width={boxW}
         height={boxH}
-        rx={3}
         fill="none"
         className={cls}
-        strokeWidth={1.5}
+        strokeWidth={1.25}
         vectorEffect="non-scaling-stroke"
       />
-      {/* label — "left CMP right". Centered. Mono so var names and
-          symbols line up consistently. */}
+      {/* Three rows: left operand / comparator / right operand. The
+          comparator is bold so the eye finds it first. */}
       <text
         x={boxX + boxW / 2}
-        y={y + 4}
+        y={boxY + 11}
+        textAnchor="middle"
+        className={labelClass}
+        fontSize="10"
+        fontFamily="ui-monospace, monospace"
+      >
+        {left}
+      </text>
+      <text
+        x={boxX + boxW / 2}
+        y={boxY + 22}
         textAnchor="middle"
         className={labelClass}
         fontSize="11"
         fontFamily="ui-monospace, monospace"
+        fontWeight={700}
       >
-        {left} {cmp} {right}
+        {cmp}
+      </text>
+      <text
+        x={boxX + boxW / 2}
+        y={boxY + 33}
+        textAnchor="middle"
+        className={labelClass}
+        fontSize="10"
+        fontFamily="ui-monospace, monospace"
+      >
+        {right}
       </text>
       {selected && (
         <rect
@@ -1618,7 +1640,6 @@ function CompareGlyph({
           className="stroke-highlight"
           strokeWidth={1.5}
           vectorEffect="non-scaling-stroke"
-          rx={4}
         />
       )}
     </g>
@@ -1646,14 +1667,22 @@ function FbCallGlyph({
   powered: boolean | null
   onClick: () => void
 }) {
-  // Same geometry as a Compare block — short lead-in / lead-out wires
-  // flanking a central rectangle. The rectangle is stylistically
-  // heavier (thicker border + a small type tag floating above) to
-  // distinguish FB calls from compare blocks at a glance.
-  const pad = 12
+  // Industrial-LD convention for an inline FB-call glyph:
+  //   - **instance name** sits above the box (small, regular weight).
+  //     This is the variable name the rest of the program references.
+  //   - **FB type** is the BIG label inside the box, bold and centred
+  //     ("TON", "CTU", "R_TRIG"). The type is what tells you what the
+  //     block DOES, so it gets the prime real estate.
+  //   - **.outputPin** is a small bottom-right annotation, indicating
+  //     which output feeds the network. Only printed when the FB has
+  //     more than one BOOL output (CTUD); for single-output FBs ".Q"
+  //     is implicit and we omit it for readability.
+  //   - Square corners (rx=0), 1.25px border — matches Compare block
+  //     so a mixed rung reads as a single visual family.
+  const pad = 10
   const boxX = x + pad
   const boxW = width - pad * 2
-  const boxH = 26
+  const boxH = 38
   const boxY = y - boxH / 2
   const cls = powerClass(powered)
   const labelClass =
@@ -1662,27 +1691,31 @@ function FbCallGlyph({
       : powered
         ? "fill-highlight"
         : "fill-muted-foreground"
+  // Hide `.Q` (the universal default) to reduce noise; show alternate
+  // outputs explicitly.
+  const showPinTag = outputPin !== "Q"
   return (
     <g onClick={onClick} className="cursor-pointer">
-      {/* hit target covers full cell */}
+      {/* hit target */}
       <rect
         x={x + 2}
-        y={y - 22}
+        y={y - 24}
         width={width - 4}
-        height={44}
+        height={48}
         fill="transparent"
       />
-      {/* FB type tag above the box — small caption so you can read "TON"
-          / "CTU" / "R_TRIG" without opening the detail bar. */}
+      {/* Instance name above the box, like a label on a real-world
+          relay or component. Always foreground colour — independent
+          of power state, because it's identity, not behaviour. */}
       <text
         x={boxX + boxW / 2}
-        y={boxY - 3}
+        y={boxY - 4}
         textAnchor="middle"
-        className="fill-muted-foreground"
-        fontSize="9"
+        className="fill-foreground"
+        fontSize="10"
         fontFamily="ui-monospace, monospace"
       >
-        [{fbType}]
+        {instance}
       </text>
       {/* lead-in / lead-out wires */}
       <line
@@ -1703,31 +1736,42 @@ function FbCallGlyph({
         strokeWidth={1}
         vectorEffect="non-scaling-stroke"
       />
-      {/* the rectangle — slightly heavier border than Compare to make
-          FB blocks visually distinct in a mixed network. */}
+      {/* The rectangle — square corners, same border weight as Compare. */}
       <rect
         x={boxX}
         y={boxY}
         width={boxW}
         height={boxH}
-        rx={3}
         fill="none"
         className={cls}
-        strokeWidth={2}
+        strokeWidth={1.25}
         vectorEffect="non-scaling-stroke"
       />
-      {/* primary label: `instance.outputPin`. This is what the rest of
-          the rung is logically reading, so it deserves the most space. */}
+      {/* FB type — the headline, bold + centred. */}
       <text
         x={boxX + boxW / 2}
-        y={y + 4}
+        y={y + 5}
         textAnchor="middle"
         className={labelClass}
-        fontSize="11"
+        fontSize="13"
         fontFamily="ui-monospace, monospace"
+        fontWeight={700}
       >
-        {instance}.{outputPin}
+        {fbType}
       </text>
+      {/* Output-pin annotation, bottom-right, only when non-default. */}
+      {showPinTag && (
+        <text
+          x={boxX + boxW - 4}
+          y={boxY + boxH - 4}
+          textAnchor="end"
+          className={labelClass}
+          fontSize="9"
+          fontFamily="ui-monospace, monospace"
+        >
+          .{outputPin}
+        </text>
+      )}
       {selected && (
         <rect
           x={boxX - 2}
@@ -1738,7 +1782,6 @@ function FbCallGlyph({
           className="stroke-highlight"
           strokeWidth={1.5}
           vectorEffect="non-scaling-stroke"
-          rx={4}
         />
       )}
     </g>
