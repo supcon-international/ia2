@@ -588,6 +588,82 @@ fn extract_st_declarations(source: &str) -> Vec<project::PouDecl> {
     out
 }
 
+/// Language-agnostic symbol extraction. Same role as `extract_variables`
+/// but works for ST / LD / FBD / SFC and adds FB instances (FBD blocks)
+/// as synthetic VAR rows. Drives Monaco hover + variable completion
+/// in the editor and the `cs symbols` CLI subcommand.
+///
+/// Returns `[]` for unsupported languages and for malformed sources —
+/// callers shouldn't fall over when the user is mid-edit and the JSON
+/// is briefly invalid.
+pub fn extract_symbols(
+    source: &str,
+    language: project::PouLanguage,
+) -> Vec<VariableInfo> {
+    use project::PouLanguage;
+    match language {
+        PouLanguage::St => extract_variables(source),
+        PouLanguage::Ld => match serde_json::from_str::<project::LdProgram>(source) {
+            Ok(prog) => prog
+                .variables
+                .into_iter()
+                .map(|v| VariableInfo {
+                    name: v.name,
+                    type_name: v.type_name,
+                    direction: ld_section_str(v.section).into(),
+                })
+                .collect(),
+            Err(_) => vec![],
+        },
+        PouLanguage::Fbd => match serde_json::from_str::<project::FbdProgram>(source) {
+            Ok(prog) => {
+                let mut out: Vec<VariableInfo> = prog
+                    .variables
+                    .iter()
+                    .map(|v| VariableInfo {
+                        name: v.name.clone(),
+                        type_name: v.type_name.clone(),
+                        direction: ld_section_str(v.section).into(),
+                    })
+                    .collect();
+                // FB instances are first-class symbols too — Monaco's
+                // hover on `myT1` should reveal `TON`, not pretend it
+                // doesn't exist.
+                for b in &prog.blocks {
+                    out.push(VariableInfo {
+                        name: b.instance.clone(),
+                        type_name: b.fb_type.clone(),
+                        direction: "fb_instance".into(),
+                    });
+                }
+                out
+            }
+            Err(_) => vec![],
+        },
+        PouLanguage::Sfc => match serde_json::from_str::<project::SfcProgram>(source) {
+            Ok(prog) => prog
+                .variables
+                .into_iter()
+                .map(|v| VariableInfo {
+                    name: v.name,
+                    type_name: v.type_name,
+                    direction: ld_section_str(v.section).into(),
+                })
+                .collect(),
+            Err(_) => vec![],
+        },
+        _ => vec![],
+    }
+}
+
+fn ld_section_str(s: project::LdVarSection) -> &'static str {
+    match s {
+        project::LdVarSection::Input => "input",
+        project::LdVarSection::Output => "output",
+        project::LdVarSection::Internal => "internal",
+    }
+}
+
 /// Parse an ST source (no full compile required) and pull out the declared
 /// variables of any PROGRAM or FUNCTION_BLOCK at the top level. Returns an
 /// empty list if parsing fails — the frontend can fall back to free text.

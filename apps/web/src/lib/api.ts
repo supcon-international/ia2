@@ -243,6 +243,35 @@ export async function updateIomap(iomap: IoMap): Promise<RunResponse> {
 
 // ---------- Runtime ----------
 
+/**
+ * Symbol extraction — variables + FB instances visible to the POU.
+ * Drives Monaco's hover & variable completion providers in
+ * STEditor; the graphical editors mostly use their own JSON-derived
+ * variable lists, but this endpoint is the language-agnostic
+ * supply.
+ *
+ * Same content-type / language conventions as `checkProgram`.
+ */
+export async function fetchSymbols(
+  source: string,
+  language: "st" | "ld" | "fbd" | "sfc" = "st",
+): Promise<import("@/types/generated/VariableInfo").VariableInfo[]> {
+  const url =
+    language === "st"
+      ? `/api/symbols`
+      : `/api/symbols?language=${language}`
+  const contentType =
+    language === "st" ? "text/plain" : "application/json"
+  return jsonOrThrow(
+    await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": contentType },
+      body: source,
+    }),
+    "POST /api/symbols",
+  )
+}
+
 export async function checkProgram(
   source: string,
   language: "st" | "ld" | "fbd" | "sfc" = "st",

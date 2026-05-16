@@ -651,6 +651,26 @@ pub struct CheckQuery {
     pub language: Option<String>,
 }
 
+/// Symbol extraction for the editor's hover / completion providers
+/// and the `cs symbols` CLI subcommand. Takes the raw source on the
+/// wire (so unsaved edits work) + a `language` query param identical
+/// to `/api/check`.
+///
+/// Returns `[]` on parse failure — the front-end falls back to its
+/// hard-coded keyword / FB-type lists.
+pub async fn symbols(
+    Query(q): Query<CheckQuery>,
+    body: String,
+) -> Json<Vec<ironplc_bridge::VariableInfo>> {
+    let language = match q.language.as_deref().map(str::to_ascii_lowercase).as_deref() {
+        Some("ld") => PouLanguage::Ld,
+        Some("fbd") => PouLanguage::Fbd,
+        Some("sfc") => PouLanguage::Sfc,
+        _ => PouLanguage::St,
+    };
+    Json(ironplc_bridge::extract_symbols(&body, language))
+}
+
 pub async fn check(
     Query(q): Query<CheckQuery>,
     body: String,

@@ -208,6 +208,58 @@ fn check_json_includes_context_related_explanation() {
 }
 
 #[test]
+fn symbols_lists_variables_and_fb_instances() {
+    let out = cs()
+        .arg("symbols")
+        .arg(good_fbd())
+        .arg("--json")
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let arr = v.as_array().unwrap();
+    // good.fbd.json declares: tick (input BOOL), rst (input BOOL),
+    // done (output BOOL), plus blocks `rt: R_TRIG` and `cu: CTU` →
+    // those instances surface as fb_instance symbols too.
+    let names: Vec<&str> = arr.iter().map(|s| s["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"tick"));
+    assert!(names.contains(&"rst"));
+    assert!(names.contains(&"done"));
+    assert!(names.contains(&"rt"));
+    assert!(names.contains(&"cu"));
+    let directions: Vec<&str> =
+        arr.iter().map(|s| s["direction"].as_str().unwrap()).collect();
+    assert!(directions.contains(&"fb_instance"));
+}
+
+#[test]
+fn symbols_name_filter_narrows_results() {
+    let out = cs()
+        .arg("symbols")
+        .arg(good_fbd())
+        .arg("--name")
+        .arg("tick")
+        .arg("--json")
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let arr = v.as_array().unwrap();
+    assert_eq!(arr.len(), 1, "expected one match for 'tick': {arr:?}");
+    assert_eq!(arr[0]["name"], "tick");
+}
+
+#[test]
+fn symbols_filter_with_no_match_exits_one() {
+    cs().arg("symbols")
+        .arg(good_fbd())
+        .arg("--name")
+        .arg("XX-NO-SUCH-SYMBOL")
+        .assert()
+        .code(1);
+}
+
+#[test]
 fn check_unknown_extension_is_usage_error() {
     let tmp = tempfile::NamedTempFile::with_suffix(".plc").unwrap();
     cs().arg("check")

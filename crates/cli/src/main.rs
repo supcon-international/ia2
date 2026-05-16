@@ -141,6 +141,31 @@ enum Command {
         /// Problem code (case-sensitive; ironplc uses upper-case `P`).
         code: String,
     },
+
+    /// List the symbols declared in a POU — variables, FB instances,
+    /// program-level declarations.
+    ///
+    /// Powered by the same extraction the editor's hover and
+    /// completion providers use, so what an agent sees here matches
+    /// what shows up under the cursor in the GUI. Use it to confirm
+    /// "is there a variable named `temp_setpoint`?" without opening
+    /// the editor, or to filter by name when looking for a specific
+    /// FB instance.
+    ///
+    /// Output is the same `VariableInfo` shape `POST /api/symbols`
+    /// returns: `{ name, type_name, direction }`. Direction is
+    /// `input` / `output` / `internal` / `fb_instance` / `local`.
+    #[command(verbatim_doc_comment)]
+    Symbols {
+        /// POU file (`.st`, `.ld.json`, `.fbd.json`, `.sfc.json`).
+        file: PathBuf,
+        /// Filter to symbols whose name contains this substring.
+        #[arg(long)]
+        name: Option<String>,
+        /// JSON output on stdout.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -181,6 +206,7 @@ fn main() {
         Command::Project(ProjectCmd::Check { path, json }) => cmd_project_check(&path, json),
         Command::Project(ProjectCmd::Info { path, json }) => cmd_project_info(&path, json),
         Command::Explain { code } => cmd_explain(&code),
+        Command::Symbols { file, name, json } => cmd_symbols(&file, name.as_deref(), json),
     };
     match result {
         Ok(exit) => std::process::exit(exit),
@@ -510,6 +536,42 @@ fn cmd_explain(code: &str) -> Result<i32> {
             Ok(1)
         }
     }
+}
+
+// =================================================================
+//   Subcommand: symbols
+// =================================================================
+
+fn cmd_symbols(file: &Path, name_filter: Option<&str>, json: bool) -> Result<i32> {
+    let language = language_for_path(file)?;
+    let source = std::fs::read_to_string(file)
+        .with_context(|| format!("reading {}", file.display()))?;
+    let mut syms = ironplc_bridge::extract_symbols(&source, language);
+    if let Some(needle) = name_filter {
+        syms.retain(|s| s.name.contains(needle));
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&syms)?);
+    } else {
+        // Tabular: aligned `direction  name : type_name`. Direction
+        // pads to the widest width so columns line up.
+        let pad = syms.iter().map(|s| s.direction.len()).max().unwrap_or(0);
+        for s in &syms {
+            println!(
+                "{:<pad$}  {} : {}",
+                s.direction,
+                s.name,
+                s.type_name,
+                pad = pad,
+            );
+        }
+        eprintln!(
+            "{} symbol{}",
+            syms.len(),
+            if syms.len() == 1 { "" } else { "s" },
+        );
+    }
+    Ok(if syms.is_empty() && name_filter.is_some() { 1 } else { 0 })
 }
 
 // =================================================================

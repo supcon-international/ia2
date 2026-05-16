@@ -129,6 +129,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/project/migrate-tasks", post(routes::migrate_tasks))
         // Compile / runtime
         .route("/api/check", post(routes::check))
+        .route("/api/symbols", post(routes::symbols))
         .route("/api/run", post(routes::run))
         .route("/api/stop", post(routes::stop))
         .route("/api/events", get(routes::events))

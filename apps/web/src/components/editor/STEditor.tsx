@@ -2,8 +2,10 @@ import Editor, { type Monaco, type OnMount } from "@monaco-editor/react"
 import type { editor } from "monaco-editor"
 import { useCallback, useEffect, useRef } from "react"
 
+import { fetchSymbols } from "@/lib/api"
 import { useDarkMode } from "@/lib/dark-mode"
 import type { CheckDiagnostic } from "@/types/generated/CheckDiagnostic"
+import type { VariableInfo } from "@/types/generated/VariableInfo"
 import {
   LANGUAGE_ID,
   builtins,
@@ -28,6 +30,12 @@ export function STEditor({ value, onChange, diagnostics }: Props) {
   const dark = useDarkMode()
   const theme = dark === "dark" ? "vs-dark" : "light"
 
+  // Live symbol table — repopulated whenever the source settles (350ms
+  // debounce, same cadence as our diagnostics poll). The completion
+  // and hover providers read this via a ref so they don't need React
+  // re-renders to pick up new variables.
+  const symbolsRef = useRef<VariableInfo[]>([])
+
   const handleMount: OnMount = useCallback((editorInstance, monaco) => {
     editorRef.current = editorInstance
     monacoRef.current = monaco
@@ -36,9 +44,6 @@ export function STEditor({ value, onChange, diagnostics }: Props) {
     monaco.languages.setMonarchTokensProvider(LANGUAGE_ID, monarch)
     monaco.languages.setLanguageConfiguration(LANGUAGE_ID, languageConfiguration)
 
-    // Keyword / type / builtin completion. Variable-name completion
-    // would need parsing current source — left for when the ironplc LSP
-    // advertises a completionProvider capability (today it doesn't).
     const Kind = monaco.languages.CompletionItemKind
     const detailKeyword = "keyword"
     const detailType = "IEC type"
@@ -58,8 +63,23 @@ export function STEditor({ value, onChange, diagnostics }: Props) {
           kind: number,
           detail: string,
         ) => ({ label, kind, insertText: label, detail, range })
+        // Variables / FB instances — extracted from the current
+        // source by the bridge. ironplc doesn't advertise a
+        // completionProvider, but our HTTP /api/symbols extraction
+        // gives equivalent coverage for the cases that matter
+        // (variables + FB instances declared in the file).
+        const varSuggestions = symbolsRef.current.map((s) => {
+          const kind =
+            s.direction === "fb_instance"
+              ? Kind.Class
+              : s.type_name.toUpperCase().startsWith("BOOL")
+                ? Kind.Variable
+                : Kind.Variable
+          return make(s.name, kind, `${s.direction} : ${s.type_name}`)
+        })
         return {
           suggestions: [
+            ...varSuggestions,
             ...keywords.map((k) => make(k, Kind.Keyword, detailKeyword)),
             ...typeKeywords.map((t) =>
               make(t, Kind.TypeParameter, detailType),
@@ -69,26 +89,99 @@ export function STEditor({ value, onChange, diagnostics }: Props) {
         }
       },
     })
+
+    // Hover provider: when the cursor sits on an identifier, look it
+    // up in the live symbol table and produce a markdown card showing
+    // its IEC type + section. Falls back to the keyword/type list so
+    // hovering `TON` reveals "standard function block", not nothing.
+    monaco.languages.registerHoverProvider(LANGUAGE_ID, {
+      provideHover(model: editor.ITextModel, position: { lineNumber: number; column: number }) {
+        const word = model.getWordAtPosition(position)
+        if (!word) return null
+        const sym = symbolsRef.current.find((s) => s.name === word.word)
+        if (sym) {
+          return {
+            range: {
+              startLineNumber: position.lineNumber,
+              endLineNumber: position.lineNumber,
+              startColumn: word.startColumn,
+              endColumn: word.endColumn,
+            },
+            contents: [
+              {
+                value: `**${sym.name}** : \`${sym.type_name}\``,
+              },
+              { value: `*${sym.direction}*` },
+            ],
+          }
+        }
+        // Keyword / builtin / type fallback. Useful for "what is TON?"
+        // — we don't have docs inline, but we name the category.
+        if (keywords.includes(word.word as never)) {
+          return makeHover(position, word, "**keyword**")
+        }
+        if (typeKeywords.includes(word.word as never)) {
+          return makeHover(position, word, `**IEC type** \`${word.word}\``)
+        }
+        if (builtins.includes(word.word as never)) {
+          return makeHover(
+            position,
+            word,
+            `**Standard library** — \`${word.word}\`. See \`cs explain\` if a diagnostic refers to it.`,
+          )
+        }
+        return null
+      },
+    })
+
     languageRegistered = true
   }, [])
 
+  // Refetch symbols whenever the source settles. Same 350ms debounce
+  // as the diagnostics path; if symbols fetch fails we just keep the
+  // last good list (network blip shouldn't kill completion).
+  useEffect(() => {
+    const handle = setTimeout(async () => {
+      try {
+        symbolsRef.current = await fetchSymbols(value, "st")
+      } catch (e) {
+        console.warn("ST symbols fetch failed:", e)
+      }
+    }, 350)
+    return () => clearTimeout(handle)
+  }, [value])
+
   // Push diagnostics into Monaco's marker pool whenever they change.
+  // We also forward Monaco's `relatedInformation` field so the
+  // "did you mean: foo?" hints show up under the error squiggle —
+  // ironplc Diagnostic.secondary populates `related[]` upstream.
   useEffect(() => {
     const editor = editorRef.current
     const monaco = monacoRef.current
     if (!editor || !monaco) return
     const model = editor.getModel()
     if (!model) return
-    const markers = diagnostics.map((d) => ({
-      severity: monaco.MarkerSeverity.Error,
-      message: `${d.code}: ${d.message}`,
-      startLineNumber: d.start_line,
-      startColumn: d.start_column,
-      endLineNumber: d.end_line,
-      endColumn: Math.max(d.end_column, d.start_column + 1),
-      code: d.code,
-      source: "ironplc",
-    }))
+    const markers = diagnostics.map((d) => {
+      const ctx = d.context.length > 0 ? ` — ${d.context.join(", ")}` : ""
+      return {
+        severity: monaco.MarkerSeverity.Error,
+        message: `${d.code}: ${d.message}${ctx}`,
+        startLineNumber: d.start_line,
+        startColumn: d.start_column,
+        endLineNumber: d.end_line,
+        endColumn: Math.max(d.end_column, d.start_column + 1),
+        code: d.code,
+        source: "ironplc",
+        relatedInformation: d.related.map((r) => ({
+          resource: model.uri,
+          message: r.message,
+          startLineNumber: r.start_line,
+          startColumn: r.start_column,
+          endLineNumber: r.end_line,
+          endColumn: Math.max(r.end_column, r.start_column + 1),
+        })),
+      }
+    })
     monaco.editor.setModelMarkers(model, "iec61131", markers)
   }, [diagnostics])
 
@@ -104,4 +197,23 @@ export function STEditor({ value, onChange, diagnostics }: Props) {
       options={editorOptions}
     />
   )
+}
+
+/** Small helper to assemble a Monaco hover object from a single
+ *  markdown string. Used by the keyword / builtin / type fallback
+ *  branches in the hover provider above. */
+function makeHover(
+  position: { lineNumber: number; column: number },
+  word: { word: string; startColumn: number; endColumn: number },
+  markdown: string,
+) {
+  return {
+    range: {
+      startLineNumber: position.lineNumber,
+      endLineNumber: position.lineNumber,
+      startColumn: word.startColumn,
+      endColumn: word.endColumn,
+    },
+    contents: [{ value: markdown }],
+  }
 }
