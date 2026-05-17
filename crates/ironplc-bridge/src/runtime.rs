@@ -8,10 +8,12 @@
 //! `VmRunning::run_round` itself is sync.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::retain;
 use iocore::{ChannelValue, IoDevice};
 use ironplc_container::debug_format::{build_var_debug_map, format_variable_value, VarDebugInfo};
 use ironplc_container::debug_section::iec_type_tag;
@@ -252,6 +254,31 @@ impl ProgramHandle {
 /// snapshot fan-out without giving the user faster perception.
 pub const DEFAULT_SCAN_INTERVAL_MS: u64 = 100;
 
+/// How often to flush retained variable values to disk during normal
+/// operation. Power loss between flushes loses up to this much state.
+/// 5 s strikes a balance between disk churn and worst-case data loss
+/// for typical setpoints / counters / accumulators.
+pub const RETAIN_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
+
+/// All knobs the run path can set when starting a scan loop. The old
+/// `spawn` / `spawn_with_interval` entry points stay as thin wrappers
+/// for code that doesn't care about retain persistence.
+#[derive(Debug, Clone, Default)]
+pub struct SpawnOptions {
+    /// Cycle period in milliseconds. `0` (or omitted) falls back to
+    /// `DEFAULT_SCAN_INTERVAL_MS`.
+    pub scan_interval_ms: u64,
+    /// IEC variable names declared `VAR RETAIN` — extracted from the
+    /// AST by `ironplc_bridge::compile_with_metadata`. Empty means "no
+    /// retain persistence".
+    pub retain_vars: Vec<String>,
+    /// Where to load/save retain values. `None` disables persistence
+    /// (in-memory only) — useful for the IDE's ephemeral demo runs.
+    /// The runtime crate points this at `<install_dir>/state/retain.json`
+    /// so values survive systemd restarts and redeploys.
+    pub state_path: Option<PathBuf>,
+}
+
 pub fn spawn(
     container: Container,
     devices: Vec<DeviceSpec>,
@@ -260,11 +287,30 @@ pub fn spawn(
     spawn_with_interval(container, devices, mappings, DEFAULT_SCAN_INTERVAL_MS)
 }
 
-/// Like `spawn`, but throttles the scan loop to `scan_interval_ms`
-/// regardless of what (if anything) the compiled CONFIGURATION
-/// requested. Use this when the caller knows the desired period —
-/// e.g. `compile_project_with_tasks` reads `tasks.toml` and passes
-/// the bound program's task interval through.
+/// Compatibility wrapper — preserves the old API for callers that
+/// don't need retain options. New code should call `spawn_with_options`
+/// directly.
+pub fn spawn_with_interval(
+    container: Container,
+    device_specs: Vec<DeviceSpec>,
+    mappings: Vec<Mapping>,
+    scan_interval_ms: u64,
+) -> ProgramHandle {
+    spawn_with_options(
+        container,
+        device_specs,
+        mappings,
+        SpawnOptions {
+            scan_interval_ms,
+            ..Default::default()
+        },
+    )
+}
+
+/// Like `spawn`, but throttles the scan loop to
+/// `options.scan_interval_ms` regardless of what (if anything) the
+/// compiled CONFIGURATION requested, AND persists RETAIN variables
+/// across runs when `options.state_path` is set.
 ///
 /// Why we throttle in the bridge rather than letting the VM
 /// scheduler do it: as of the currently-vendored ironplc, codegen
@@ -276,12 +322,22 @@ pub fn spawn(
 /// upstream wires CONFIGURATION → task_table, this bridge-level
 /// throttle is the source of truth for "the scan period the user
 /// asked for in tasks.toml."
-pub fn spawn_with_interval(
+pub fn spawn_with_options(
     container: Container,
-    devices: Vec<DeviceSpec>,
+    device_specs: Vec<DeviceSpec>,
     mappings: Vec<Mapping>,
-    scan_interval_ms: u64,
+    options: SpawnOptions,
 ) -> ProgramHandle {
+    let SpawnOptions {
+        scan_interval_ms,
+        retain_vars,
+        state_path,
+    } = options;
+    let scan_interval_ms = if scan_interval_ms == 0 {
+        DEFAULT_SCAN_INTERVAL_MS
+    } else {
+        scan_interval_ms
+    };
     let stop = Arc::new(AtomicBool::new(false));
     let (snapshot_tx, _) = broadcast::channel(64);
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -305,17 +361,68 @@ pub fn spawn_with_interval(
                 return;
             }
         };
-        rt.block_on(run_loop_async(
-            container,
-            devices,
-            mappings,
-            stop_clone,
-            snapshot_tx_clone,
-            cmd_rx,
-            mode_clone,
-            forces_clone,
-            scan_interval,
-        ));
+        rt.block_on(async move {
+            // Connect devices OUTSIDE the panic-guarded run_loop so
+            // that, no matter how the loop exits (clean stop, VM trap,
+            // or panic), we still own the `devices` vec and can drive
+            // every output to its safe state.
+            let mut devices = connect_devices(device_specs).await;
+
+            // Wrap the scan loop in catch_unwind so a panic in the VM
+            // glue / iomap / snapshot fan-out doesn't skip failsafe.
+            // `AssertUnwindSafe` is needed because `&mut Vec<...>` is
+            // not auto-UnwindSafe; we accept that risk because the
+            // only failure mode here is "panic in async code", and
+            // we're about to discard `running` anyway.
+            use futures_util::FutureExt;
+            use std::panic::AssertUnwindSafe;
+            let result = AssertUnwindSafe(run_loop_async(
+                container,
+                &mut devices,
+                mappings,
+                stop_clone,
+                snapshot_tx_clone,
+                cmd_rx,
+                mode_clone,
+                forces_clone,
+                scan_interval,
+                retain_vars,
+                state_path,
+            ))
+            .catch_unwind()
+            .await;
+
+            // Always-run failsafe before the thread dies. Drive every
+            // device's outputs to zero so a hung / panicked / stopped
+            // program doesn't leave actuators energized.
+            let dev_count = devices.len();
+            for dev in devices.iter_mut() {
+                if let Err(e) = dev.enter_failsafe().await {
+                    tracing::warn!(device = %dev.name(), %e, "failsafe call failed");
+                }
+            }
+            // Give real EtherCAT one extra cycle to actually push the
+            // zeros onto the bus before its worker thread exits via
+            // Drop. Conservative 50 ms covers cycle_us up to 25 ms; we
+            // never run faster than that in practice and the latency
+            // is only paid once on shutdown.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            match &result {
+                Ok(()) => tracing::info!(
+                    devices = dev_count,
+                    "scan loop exited cleanly; failsafe applied"
+                ),
+                Err(_) => tracing::error!(
+                    devices = dev_count,
+                    "scan loop PANICKED; failsafe applied before re-panic"
+                ),
+            }
+            if let Err(panic) = result {
+                // Re-raise so the thread dies with a useful backtrace
+                // in tests / logs. Outputs are already safe.
+                std::panic::resume_unwind(panic);
+            }
+        });
     });
 
     ProgramHandle {
@@ -327,24 +434,13 @@ pub fn spawn_with_interval(
     }
 }
 
-// Bundling these into a single config struct would hide what each piece
-// actually does; the long arg list is the most readable form here.
-#[allow(clippy::too_many_arguments)]
-async fn run_loop_async(
-    container: Container,
-    device_specs: Vec<DeviceSpec>,
-    // ↓ all subsequent args are passed through from spawn_with_interval —
-    // see that function's doc-comment for why scan_interval lives here
-    // rather than coming from the VM's task scheduler.
-    mappings: Vec<Mapping>,
-    stop: Arc<AtomicBool>,
-    snapshot_tx: broadcast::Sender<VarSnapshot>,
-    mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<RuntimeCommand>,
-    mode: Arc<std::sync::Mutex<RuntimeMode>>,
-    forces: Arc<std::sync::Mutex<HashMap<String, i32>>>,
-    scan_interval: Duration,
-) {
-    // ---- Connect devices (skip the ones that fail rather than abort) ----
+/// Connect every `DeviceSpec` into a live `IoDevice` adapter. A
+/// connect failure for one device is logged and the device is skipped
+/// rather than aborting the whole scan — partial bus connectivity is
+/// a common operational state and we'd rather run the rest of the
+/// program than refuse to start. The bridge's `enter_failsafe` pass
+/// at shutdown only touches devices that DID connect.
+async fn connect_devices(device_specs: Vec<DeviceSpec>) -> Vec<Box<dyn IoDevice>> {
     let mut devices: Vec<Box<dyn IoDevice>> = Vec::with_capacity(device_specs.len());
     for spec in device_specs {
         match &spec.config {
@@ -368,7 +464,36 @@ async fn run_loop_async(
             }
         }
     }
+    devices
+}
 
+/// Trip the watchdog after this many consecutive scan deadline overruns.
+/// Each overrun means the scan body didn't finish within `scan_interval`.
+/// 5 in a row → the simulation has lost real-time guarantees; engage
+/// failsafe and don't re-arm until the program is restarted.
+const WATCHDOG_OVERRUN_THRESHOLD: u32 = 5;
+
+#[allow(clippy::too_many_arguments)]
+async fn run_loop_async(
+    container: Container,
+    // Devices are borrowed so the outer wrapper retains ownership for
+    // its always-run failsafe pass (see `spawn_with_interval`'s async
+    // block).
+    devices: &mut Vec<Box<dyn IoDevice>>,
+    mappings: Vec<Mapping>,
+    stop: Arc<AtomicBool>,
+    snapshot_tx: broadcast::Sender<VarSnapshot>,
+    mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<RuntimeCommand>,
+    mode: Arc<std::sync::Mutex<RuntimeMode>>,
+    forces: Arc<std::sync::Mutex<HashMap<String, i32>>>,
+    scan_interval: Duration,
+    // RETAIN persistence — names extracted from VAR RETAIN blocks,
+    // plus the disk path to load/save them from. Both empty / None
+    // disables persistence with no behavioral change vs the
+    // pre-retain code path.
+    retain_vars: Vec<String>,
+    state_path: Option<PathBuf>,
+) {
     // ---- Start the VM ----
     let mut bufs = VmBuffers::from_container(&container);
     let mut running = match Vm::new().load(&container, &mut bufs).start() {
@@ -429,12 +554,67 @@ async fn run_loop_async(
         inputs = inputs.len(),
         outputs = outputs.len(),
         devices = devices.len(),
+        retain_vars = retain_vars.len(),
+        state_path = ?state_path,
         "scan loop ready"
     );
+
+    // ---- Resolve RETAIN names → var indices (drop unknowns loudly) ----
+    let retain_indices: Vec<(String, u16)> = retain_vars
+        .iter()
+        .filter_map(|name| match var_index_by_name.get(name) {
+            Some(&idx) => Some((name.clone(), idx)),
+            None => {
+                // Possible if the user removed a RETAIN var from
+                // source between runs but the state file still
+                // references it. Skip silently in the loud-warn map
+                // step; the next save will rewrite the file without
+                // the stale entry.
+                tracing::warn!(var = %name, "retain var not in debug map; skipping");
+                None
+            }
+        })
+        .collect();
+
+    // ---- Restore RETAIN values from disk before scanning starts ----
+    if !retain_indices.is_empty() {
+        if let Some(path) = state_path.as_ref() {
+            match retain::load(path) {
+                Ok(Some(state)) => {
+                    let mut restored = 0;
+                    for (name, idx) in &retain_indices {
+                        if let Some(&value) = state.vars.get(name) {
+                            if running.write_variable(VarIndex::new(*idx), value).is_ok() {
+                                restored += 1;
+                            } else {
+                                tracing::warn!(var = %name, "restore write trapped; skipping");
+                            }
+                        }
+                    }
+                    tracing::info!(
+                        restored,
+                        total = retain_indices.len(),
+                        saved_at_us = state.saved_at_us,
+                        "restored retain variables from state file"
+                    );
+                }
+                Ok(None) => {
+                    tracing::info!(?path, "no retain state file yet; starting fresh");
+                }
+                Err(e) => {
+                    // Don't refuse to start on a corrupt state file —
+                    // log and continue with defaults. Operator can
+                    // inspect or delete the file out-of-band.
+                    tracing::warn!(?path, %e, "failed to read retain state file; using defaults");
+                }
+            }
+        }
+    }
 
     // ---- Scan loop ----
     let start = Instant::now();
     let mut last_snapshot = Instant::now() - Duration::from_secs(1);
+    let mut last_retain_flush = Instant::now();
     let mut scan_count: u64 = 0;
     // Cadence anchor: when the *next* scan should start. Each cycle
     // sleeps until this instant, then advances it by one
@@ -444,6 +624,13 @@ async fn run_loop_async(
     // overrun is logged via a one-shot warning.
     let mut next_scan_at = Instant::now() + scan_interval;
     let mut warned_overrun = false;
+    // Watchdog: counts consecutive overruns. Reset to 0 on any in-
+    // time scan. When it reaches WATCHDOG_OVERRUN_THRESHOLD we fire
+    // failsafe once and disarm — keeps the loop running but never
+    // re-fires; the user has to restart the program after a watchdog
+    // trip (industrial convention).
+    let mut consecutive_overruns: u32 = 0;
+    let mut watchdog_armed = true;
 
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -585,6 +772,25 @@ async fn run_loop_async(
             last_snapshot = Instant::now();
         }
 
+        // Persist RETAIN values on a coarse cadence. The window of
+        // potential loss on power-cut is bounded by RETAIN_FLUSH_INTERVAL.
+        // Writes are atomic (tmp + rename) so a crash during flush
+        // can't corrupt the file. Skipped entirely when no retain
+        // vars are declared or no path was configured.
+        if !retain_indices.is_empty()
+            && state_path.is_some()
+            && last_retain_flush.elapsed() >= RETAIN_FLUSH_INTERVAL
+        {
+            persist_retain_values(
+                state_path.as_deref().unwrap(),
+                &retain_indices,
+                &running,
+                now_us,
+                scan_count,
+            );
+            last_retain_flush = Instant::now();
+        }
+
         // Sleep until the next scan deadline. The VM's `next_due_us`
         // would also work in theory, but as of the vendored ironplc
         // codegen doesn't populate the container's task_table from
@@ -594,9 +800,13 @@ async fn run_loop_async(
         // sourced from `tasks.toml` via spawn_with_interval.
         let now = Instant::now();
         if now < next_scan_at {
+            // Reset the watchdog counter on any in-time scan — a single
+            // recovery clears prior near-misses.
+            consecutive_overruns = 0;
             tokio::time::sleep(next_scan_at - now).await;
             next_scan_at += scan_interval;
         } else {
+            consecutive_overruns = consecutive_overruns.saturating_add(1);
             if !warned_overrun {
                 let overrun = now - next_scan_at;
                 tracing::warn!(
@@ -608,7 +818,38 @@ async fn run_loop_async(
                 );
                 warned_overrun = true;
             }
+            // Watchdog trip: N consecutive misses → engage failsafe
+            // exactly once. We keep scanning afterward (don't break)
+            // so the operator can see live state via the snapshot
+            // stream, but outputs stay safe until the program is
+            // restarted.
+            if watchdog_armed && consecutive_overruns >= WATCHDOG_OVERRUN_THRESHOLD {
+                tracing::error!(
+                    consecutive = consecutive_overruns,
+                    threshold = WATCHDOG_OVERRUN_THRESHOLD,
+                    interval_us = scan_interval.as_micros() as u64,
+                    "watchdog tripped — engaging failsafe (outputs zeroed; \
+                     restart the program to re-arm)"
+                );
+                for dev in devices.iter_mut() {
+                    if let Err(e) = dev.enter_failsafe().await {
+                        tracing::warn!(device = %dev.name(), %e, "watchdog failsafe call failed");
+                    }
+                }
+                watchdog_armed = false;
+            }
             next_scan_at = now + scan_interval;
+        }
+    }
+
+    // Final RETAIN flush on graceful exit. Captures whatever the
+    // last completed scan produced — that's the right "checkpoint"
+    // value to reload on next startup.
+    if !retain_indices.is_empty() {
+        if let Some(path) = state_path.as_deref() {
+            let now_us = start.elapsed().as_micros() as u64;
+            persist_retain_values(path, &retain_indices, &running, now_us, scan_count);
+            tracing::info!(?path, "final retain flush on stop");
         }
     }
 
@@ -622,6 +863,32 @@ fn value_for_type(raw: u64, type_tag: u8) -> ChannelValue {
             ChannelValue::U16(raw as u16)
         }
         _ => ChannelValue::I32(raw as i32),
+    }
+}
+
+/// Snapshot every RETAIN variable's current VM value and atomically
+/// write the state file. Errors are logged but don't crash the scan
+/// loop — losing one flush window is acceptable; halting the program
+/// is not. The VM's `read_variable_raw` yields u64; we down-cast to
+/// i32 because that's what `write_variable` (used at restore) accepts.
+/// LREAL / LINT / LWORD lose their upper 32 bits — documented as a
+/// known limitation pending an ironplc upstream change.
+fn persist_retain_values(
+    state_path: &std::path::Path,
+    retain_indices: &[(String, u16)],
+    running: &VmRunning,
+    now_us: u64,
+    scan_count: u64,
+) {
+    let mut vars: HashMap<String, i32> = HashMap::with_capacity(retain_indices.len());
+    for (name, idx) in retain_indices {
+        if let Ok(raw) = running.read_variable_raw(VarIndex::new(*idx)) {
+            vars.insert(name.clone(), raw as i32);
+        }
+    }
+    let state = crate::retain::build(vars, now_us, scan_count);
+    if let Err(e) = crate::retain::save(state_path, &state) {
+        tracing::warn!(?state_path, %e, "retain flush failed");
     }
 }
 

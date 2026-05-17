@@ -1,11 +1,15 @@
 name: Release
 
 # Tag push (e.g. `git tag v0.1.0 && git push --tags`) triggers a full
-# release flow: build the Mac .app, package as a .dmg, upload to a
-# GitHub Release. The body of the release is left empty here so a
-# human can write the user-facing changelog after the fact; tools
-# like cliff / changelog-rs could generate one if we want to
-# automate that later.
+# release flow:
+#   - mac-dmg: build the Mac .app, package as a .dmg
+#   - linux-runtime: cross-compile the headless edge runtime
+#     (`ia2-runtime`) for x86_64 + aarch64 Linux
+#   - publish: collect all artifacts into a single GitHub Release
+#
+# The release body is left empty so a human can write the user-facing
+# changelog after the fact; tools like cliff / changelog-rs could
+# generate one if we want to automate that later.
 on:
   push:
     tags: ['v*']
@@ -17,10 +21,8 @@ on:
 
 jobs:
   mac-dmg:
-    name: Build and publish .dmg
+    name: Build .dmg (macOS arm64)
     runs-on: macos-14
-    permissions:
-      contents: write  # required for `softprops/action-gh-release`
     steps:
       - uses: actions/checkout@v4
         with:
@@ -62,9 +64,108 @@ jobs:
             -ov -format UDZO \
             "IA2-$VERSION-macos-arm64.dmg"
 
-      - name: Upload release artifact
+      - name: Upload .dmg artifact for publish job
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia2-macos-arm64
+          path: apps/mac/build/release/IA2-*-macos-arm64.dmg
+          retention-days: 1
+          if-no-files-found: error
+
+  linux-runtime:
+    name: Build ia2-runtime (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    # Strategy: build the headless edge runtime for two common edge
+    # platforms. We use `cross` (a Docker-based cross-compiler) for
+    # ARM64 — the cargo+gcc dance for `aarch64-unknown-linux-gnu` is
+    # finicky enough that `cross` is the standard answer. x86_64 has
+    # a native toolchain available so we skip the docker round-trip.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: cargo
+          - target: aarch64-unknown-linux-gnu
+            runner: cross
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry + target/
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Per-target key so the x86_64 and aarch64 builds don't
+          # invalidate each other's target/ caches.
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.runner == 'cross'
+        run: cargo install cross --git https://github.com/cross-rs/cross --rev v0.2.5
+
+      - name: Build ia2-runtime
+        run: |
+          set -e
+          if [ "${{ matrix.runner }}" = "cross" ]; then
+            cross build --release -p runtime --target ${{ matrix.target }}
+          else
+            cargo build --release -p runtime --target ${{ matrix.target }}
+          fi
+
+      - name: Stage binary with versioned name
+        run: |
+          set -e
+          VERSION="${GITHUB_REF##*/}"
+          # Map the rustc target triple to a short label the user
+          # recognizes ("amd64"/"arm64" match Docker / Debian naming).
+          case "${{ matrix.target }}" in
+            x86_64-*)  ARCH=amd64 ;;
+            aarch64-*) ARCH=arm64 ;;
+            *) echo "unsupported target ${{ matrix.target }}"; exit 1 ;;
+          esac
+          mkdir -p staged
+          cp target/${{ matrix.target }}/release/ia2-runtime \
+             "staged/ia2-runtime-${VERSION}-linux-${ARCH}"
+
+      - name: Upload binary artifact for publish job
+        uses: actions/upload-artifact@v4
+        with:
+          name: ia2-runtime-${{ matrix.target }}
+          path: staged/ia2-runtime-*
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: [mac-dmg, linux-runtime]
+    permissions:
+      contents: write  # required for softprops/action-gh-release
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          # No `name:` → download every artifact this run produced.
+          # Each artifact lands in its own subdirectory of `dist/`.
+          path: dist
+
+      - name: Flatten artifact tree
+        run: |
+          set -e
+          mkdir -p release
+          find dist -type f \( -name 'IA2-*.dmg' -o -name 'ia2-runtime-*-linux-*' \) -exec cp {} release/ \;
+          ls -lh release/
+
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          files: apps/mac/build/release/IA2-*-macos-arm64.dmg
+          files: release/*
           draft: true        # publish manually after review
           generate_release_notes: true

@@ -100,6 +100,24 @@ impl IoDevice for SimEthercat {
         self.values.insert(channel.into(), coerced);
         Ok(())
     }
+
+    /// Zero every RxPDO (output) channel. TxPDO entries are inputs from
+    /// the bus and stay untouched. Matches `RealEthercat::enter_failsafe`
+    /// semantics so sim and real behave identically from the scan
+    /// loop's perspective.
+    async fn enter_failsafe(&mut self) -> Result<(), IoError> {
+        let to_zero: Vec<(String, EthercatDataType)> = self
+            .channels
+            .values()
+            .filter(|c| c.direction == EthercatPdoDirection::RxPdo)
+            .map(|c| (c.name.clone(), c.data_type))
+            .collect();
+        for (name, ty) in to_zero {
+            self.values.insert(name, zero_for(ty));
+        }
+        tracing::info!(device = %self.name, "ethercat (sim) failsafe applied");
+        Ok(())
+    }
 }
 
 fn zero_for(ty: EthercatDataType) -> ChannelValue {

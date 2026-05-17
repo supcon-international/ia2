@@ -188,6 +188,49 @@ enum Command {
     #[command(subcommand)]
     Runtime(RuntimeCmd),
 
+    /// Push the open project to a configured edge over SSH.
+    ///
+    /// Mirrors the IDE's Edge pane "Deploy" button. The server tars the
+    /// current project, streams it to the edge over `ssh`, extracts to
+    /// a versioned directory, atomically flips the `current` symlink,
+    /// and restarts the systemd unit. Old versions are kept (rollback
+    /// = swap the symlink again).
+    ///
+    /// `name` is the edge entry in the project (visible in the Edge
+    /// pane and `project.toml`). Requires a server with the project
+    /// open — same model as `cs run`. For CI/CD: start a headless
+    /// server pointed at the project, then `cs deploy <name>`.
+    ///
+    /// Returns the assigned version timestamp and the full deploy log.
+    /// Exit code: 0 on success, 1 on remote failure (script ran but
+    /// exited non-zero), 3 on local error (no project, bad edge name).
+    #[command(verbatim_doc_comment)]
+    Deploy {
+        /// Edge name (entry in the open project's edge list).
+        name: String,
+        /// JSON output on stdout (deploy report).
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+
+    /// Probe a configured edge — quick SSH+curl reachability check.
+    ///
+    /// Same as the IDE's Edge pane status badge. Returns the
+    /// `EdgeProbe` shape: `reachable`, `scan_count`, `uptime_secs`,
+    /// `runtime_version`. Exit code: 0 if reachable, 1 if not.
+    #[command(verbatim_doc_comment)]
+    Probe {
+        /// Edge name (entry in the open project's edge list).
+        name: String,
+        /// JSON output on stdout.
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+
     /// List the symbols declared in a POU — variables, FB instances,
     /// program-level declarations.
     ///
@@ -418,6 +461,8 @@ fn main() {
         Command::Explain { code } => cmd_explain(&code),
         Command::Symbols { file, name, json } => cmd_symbols(&file, name.as_deref(), json),
         Command::Runtime(r) => cmd_runtime(r),
+        Command::Deploy { name, json, server } => cmd_deploy(&name, json, &server),
+        Command::Probe { name, json, server } => cmd_probe(&name, json, &server),
     };
     match result {
         Ok(exit) => std::process::exit(exit),
@@ -897,6 +942,85 @@ fn cmd_stop(server: &str) -> Result<i32> {
 }
 
 // =================================================================
+//   Subcommand: deploy / probe (edge orchestration)
+// =================================================================
+
+fn cmd_deploy(name: &str, json: bool, server: &str) -> Result<i32> {
+    // The server's /api/edges/{name}/deploy route owns the SSH+tar
+    // dance — see crates/server/src/edges.rs. We just trigger it and
+    // surface the report. Bigger timeout than the default agent
+    // (30s) because the tar+ssh round-trip can take minutes for a
+    // large project on a slow link.
+    let url = format!("{server}/api/edges/{}/deploy", url_encode(name));
+    let resp = http_agent()
+        .post(&url)
+        .timeout(std::time::Duration::from_secs(600))
+        .set("Content-Type", "application/json")
+        .send_json(serde_json::json!({}))
+        .map_err(|e| anyhow::anyhow!("POST {url}: {e}"))?;
+    let value: serde_json::Value = resp
+        .into_json()
+        .map_err(|e| anyhow::anyhow!("decode JSON from {url}: {e}"))?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else {
+        // Human-readable form: pull the version + the streamed deploy
+        // log so the user sees what actually happened on the box.
+        let version = value.get("version").and_then(|v| v.as_str()).unwrap_or("?");
+        let log = value.get("log").and_then(|v| v.as_str()).unwrap_or("");
+        if !log.is_empty() {
+            eprintln!("{log}");
+        }
+        eprintln!("✓ deployed to '{name}' as version {version}");
+    }
+    // ok=false means the script ran but exited non-zero (remote failure).
+    let ok = value.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    Ok(if ok { 0 } else { 1 })
+}
+
+fn cmd_probe(name: &str, json: bool, server: &str) -> Result<i32> {
+    let url = format!("{server}/api/edges/{}/probe", url_encode(name));
+    let value = get_json(&url)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else {
+        let reachable = value
+            .get("reachable")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if reachable {
+            let scans = value
+                .get("scan_count")
+                .and_then(|v| v.as_u64())
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "?".into());
+            let uptime = value
+                .get("uptime_secs")
+                .and_then(|v| v.as_u64())
+                .map(|n| format!("{n}s"))
+                .unwrap_or_else(|| "?".into());
+            let version = value
+                .get("runtime_version")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            println!("✓ {name} reachable · v{version} · {scans} scans · up {uptime}");
+        } else {
+            let err = value
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unreachable");
+            eprintln!("✗ {name}: {err}");
+        }
+    }
+    let reachable = value
+        .get("reachable")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Ok(if reachable { 0 } else { 1 })
+}
+
+// =================================================================
 //   Subcommand: symbols
 // =================================================================
 
@@ -1172,6 +1296,7 @@ fn announce_target(cmd: &Command) -> Option<(&str, &'static str)> {
         | Command::Transpile { .. }
         | Command::Explain { .. }
         | Command::Symbols { .. }
+        | Command::Probe { .. } // read-only — just a status check
         | Command::Project(ProjectCmd::Check { .. })
         | Command::Project(ProjectCmd::Info { .. })
         | Command::Runtime(RuntimeCmd::Status { .. }) => None,
@@ -1186,6 +1311,7 @@ fn announce_target(cmd: &Command) -> Option<(&str, &'static str)> {
 
         Command::Run { server, .. } => Some((server, "run")),
         Command::Stop { server } => Some((server, "stop")),
+        Command::Deploy { server, .. } => Some((server, "deploy")),
 
         Command::Runtime(RuntimeCmd::Pause { server }) => Some((server, "runtime pause")),
         Command::Runtime(RuntimeCmd::Resume { server }) => Some((server, "runtime resume")),

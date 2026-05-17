@@ -121,4 +121,57 @@ impl IoDevice for ModbusDevice {
             }
         }
     }
+
+    /// Zero every coil and holding register we know about. Discrete /
+    /// input registers are read-only on the wire and silently skipped.
+    /// We continue on per-channel errors and surface only the first —
+    /// the loop's whole job is to drive as many outputs safe as it can,
+    /// even if one slave is sick.
+    async fn enter_failsafe(&mut self) -> Result<(), IoError> {
+        // Snapshot the channel list out of the map so we don't hold a
+        // borrow across the await points below.
+        let writable: Vec<(String, ModbusChannelKind, u16)> = self
+            .channels
+            .values()
+            .filter(|c| {
+                matches!(
+                    c.kind,
+                    ModbusChannelKind::Coil | ModbusChannelKind::HoldingRegister
+                )
+            })
+            .map(|c| (c.name.clone(), c.kind, c.address))
+            .collect();
+        let mut first_err: Option<IoError> = None;
+        for (name, kind, address) in writable {
+            let result = match kind {
+                ModbusChannelKind::Coil => {
+                    match self.client.write_single_coil(address, false).await {
+                        Ok(Ok(())) => Ok(()),
+                        Ok(Err(e)) => Err(IoError::Transport(format!("modbus exception: {e}"))),
+                        Err(e) => Err(IoError::Transport(e.to_string())),
+                    }
+                }
+                ModbusChannelKind::HoldingRegister => {
+                    match self.client.write_single_register(address, 0u16).await {
+                        Ok(Ok(())) => Ok(()),
+                        Ok(Err(e)) => Err(IoError::Transport(format!("modbus exception: {e}"))),
+                        Err(e) => Err(IoError::Transport(e.to_string())),
+                    }
+                }
+                _ => Ok(()),
+            };
+            if let Err(e) = result {
+                tracing::warn!(device = %self.name, channel = %name, %e, "failsafe write failed");
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+        if let Some(e) = first_err {
+            Err(e)
+        } else {
+            tracing::info!(device = %self.name, "modbus failsafe applied (outputs zeroed)");
+            Ok(())
+        }
+    }
 }

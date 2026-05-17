@@ -50,4 +50,29 @@ pub trait IoDevice: Send {
     fn name(&self) -> &str;
     async fn read_channel(&mut self, channel: &str) -> Result<ChannelValue, IoError>;
     async fn write_channel(&mut self, channel: &str, value: ChannelValue) -> Result<(), IoError>;
+
+    /// Drive all writable outputs to a known-safe state (zero / "off").
+    ///
+    /// Called by the bridge scan loop in three situations:
+    ///   1. **Panic** during a scan round — the run-loop catches the
+    ///      unwind and triggers failsafe before the thread exits.
+    ///   2. **Consecutive scan-deadline overruns** above a threshold —
+    ///      "the simulation is no longer real-time, freeze the plant".
+    ///   3. **Graceful shutdown** — explicit stop request.
+    ///
+    /// Industrial PLCs do this via a hardware watchdog; we don't have
+    /// hardware here, so the bridge orchestrates the equivalent in
+    /// software. Implementations should:
+    ///   - Write a zero/safe value to every output channel they know
+    ///     about. Read-only channels are skipped.
+    ///   - Best-effort: a transport error on one channel should not
+    ///     stop the loop from trying the rest. Return the first error
+    ///     so the caller can log.
+    ///
+    /// Default impl is a no-op so devices that genuinely have no
+    /// writable surface (e.g. a read-only sensor adapter) need no
+    /// extra code.
+    async fn enter_failsafe(&mut self) -> Result<(), IoError> {
+        Ok(())
+    }
 }

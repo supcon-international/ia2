@@ -1570,6 +1570,7 @@ dependencies = [
 name = "ironplc-bridge"
 version = "0.0.1"
 dependencies = [
+ "futures-util",
  "iocore",
  "iomap-ethercat",
  "iomap-modbus",
@@ -1582,6 +1583,7 @@ dependencies = [
  "project",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

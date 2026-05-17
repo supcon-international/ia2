@@ -959,7 +959,7 @@ pub async fn run(
     //  - `program: Some("foo")`    → compile_project_with_tasks (synthetic
     //                                 single-instance schedule; tasks.toml
     //                                 untouched on disk)
-    let (container, scan_interval_ms, device_specs, mappings) = {
+    let (container, scan_interval_ms, device_specs, mappings, retain_vars) = {
         let store_guard = state.project.lock().expect("project mutex");
         let store = store_guard.as_ref().ok_or(ApiError::NoProject)?;
 
@@ -1011,8 +1011,8 @@ pub async fn run(
             .map(|t| t.interval_ms as u64)
             .unwrap_or(ironplc_bridge::DEFAULT_SCAN_INTERVAL_MS);
 
-        let container = match (req.program.as_deref(), req.file_path.as_deref()) {
-            (None, _) => ironplc_bridge::compile_project(store)?,
+        let (container, metadata) = match (req.program.as_deref(), req.file_path.as_deref()) {
+            (None, _) => ironplc_bridge::compile_project_full(store)?,
             (Some(name), Some(file_path)) => {
                 // Ad-hoc isolated run: compile only the named file's
                 // source + a single-PROGRAM CONFIGURATION. ironplc's
@@ -1022,7 +1022,7 @@ pub async fn run(
                 let language = store.pou_file_language(file_path)?;
                 let source = store.read_pou_source(file_path)?;
                 let tasks = single_program_tasks(name);
-                ironplc_bridge::compile_isolated_source(&source, language, &tasks)?
+                ironplc_bridge::compile_isolated_source_full(&source, language, &tasks)?
             }
             (Some(name), None) => {
                 // Ad-hoc but no file scope — fall back to whole-project
@@ -1031,7 +1031,7 @@ pub async fn run(
                 // (ironplc limitation); document this if a client hits
                 // it.
                 let tasks = single_program_tasks(name);
-                ironplc_bridge::compile_project_with_tasks(store, &tasks)?
+                ironplc_bridge::compile_project_with_tasks_full(store, &tasks)?
             }
         };
         let devices = store.list_devices()?;
@@ -1043,7 +1043,18 @@ pub async fn run(
                 config: d.config,
             })
             .collect::<Vec<_>>();
-        (container, scan_interval_ms, specs, iomap.mappings)
+        // IDE-side server runs are ephemeral — they're for the user
+        // poking values, not for persisted plant state. We leave
+        // `state_path = None`; only the headless `ia2-runtime` edge
+        // binary points it at a real disk location.
+        let retain_vars = metadata.retain_vars;
+        (
+            container,
+            scan_interval_ms,
+            specs,
+            iomap.mappings,
+            retain_vars,
+        )
     };
 
     {
@@ -1053,8 +1064,16 @@ pub async fn run(
         }
     }
 
-    let handle =
-        ironplc_bridge::spawn_with_interval(container, device_specs, mappings, scan_interval_ms);
+    let handle = ironplc_bridge::spawn_with_options(
+        container,
+        device_specs,
+        mappings,
+        ironplc_bridge::SpawnOptions {
+            scan_interval_ms,
+            retain_vars,
+            state_path: None,
+        },
+    );
     let mut rx = handle.subscribe();
     let event_tx = state.event_tx.clone();
     let last_snapshot_cache = state.last_snapshot.clone();

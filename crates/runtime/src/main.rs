@@ -38,15 +38,21 @@ use tracing_subscriber::EnvFilter;
 
 const DEFAULT_BIND: &str = "127.0.0.1:13001";
 
-/// Parsed CLI args. Manual parsing (no clap) — two flags, easy enough.
+/// Parsed CLI args. Manual parsing (no clap) — three flags, still simple.
 struct Args {
     project_dir: PathBuf,
     bind: SocketAddr,
+    /// Where to load/save RETAIN variable values. Defaults to
+    /// `<project_dir>/../state/retain.json`, matching how
+    /// `infra/install.sh` lays out a typical edge deployment
+    /// (`/opt/ia2/state/retain.json` alongside `/opt/ia2/current/`).
+    state_dir: PathBuf,
 }
 
 fn parse_args() -> Result<Args> {
     let mut project_dir: Option<PathBuf> = None;
     let mut bind = DEFAULT_BIND.to_string();
+    let mut state_dir: Option<PathBuf> = None;
 
     let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
@@ -58,6 +64,11 @@ fn parse_args() -> Result<Args> {
             }
             "--bind" => {
                 bind = iter.next().context("--bind requires a value")?;
+            }
+            "--state-dir" => {
+                state_dir = Some(PathBuf::from(
+                    iter.next().context("--state-dir requires a value")?,
+                ));
             }
             // Legacy flag from the pre-tasks-refactor builds. Accept but
             // ignore so existing systemd unit files keep launching.
@@ -80,18 +91,36 @@ fn parse_args() -> Result<Args> {
     let bind: SocketAddr = bind
         .parse()
         .with_context(|| format!("--bind '{bind}' is not a valid socket address"))?;
+    // Default: the sibling `state/` directory of the project, so a
+    // project at `/opt/ia2/current/project` gets state at
+    // `/opt/ia2/state/`. Survives `current` symlink rotations on
+    // redeploy because the path is anchored to the install root, not
+    // the version dir.
+    let state_dir = state_dir.unwrap_or_else(|| {
+        project_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|root| root.join("state"))
+            .unwrap_or_else(|| project_dir.join("state"))
+    });
 
-    Ok(Args { project_dir, bind })
+    Ok(Args {
+        project_dir,
+        bind,
+        state_dir,
+    })
 }
 
 fn print_help() {
     eprintln!(
         "ia2-runtime — headless edge runtime\n\n\
          USAGE:\n  \
-         ia2-runtime --project-dir <path> [--bind <addr>]\n\n\
+         ia2-runtime --project-dir <path> [--bind <addr>] [--state-dir <path>]\n\n\
          FLAGS:\n  \
          --project-dir <path>   Path to the project directory (containing project.toml).\n  \
-         --bind <addr>          Local socket for the monitor server (default {DEFAULT_BIND}).\n\n\
+         --bind <addr>          Local socket for the monitor server (default {DEFAULT_BIND}).\n  \
+         --state-dir <path>     Where to persist RETAIN variables (default: sibling 'state/' of\n                         \
+         the install root). Survives version swaps; safe to back up.\n\n\
          The runtime exposes:\n  \
          GET  /health           Liveness check.\n  \
          GET  /status           Project + runtime metadata + last-known scan count.\n  \
@@ -200,12 +229,14 @@ async fn main() -> Result<()> {
         );
     }
 
-    let container = ironplc_bridge::compile_project(&store).context("compiling project")?;
+    let (container, metadata) =
+        ironplc_bridge::compile_project_full(&store).context("compiling project")?;
     tracing::info!(
         devices = device_specs.len(),
         mappings = iomap.mappings.len(),
         tasks = tasks.tasks.len(),
         programs = tasks.programs.len(),
+        retain_vars = metadata.retain_vars.len(),
         "compiled"
     );
 
@@ -220,12 +251,29 @@ async fn main() -> Result<()> {
         .map(|t| t.interval_ms as u64)
         .unwrap_or(ironplc_bridge::DEFAULT_SCAN_INTERVAL_MS);
 
+    // RETAIN state file lives under the configured state dir. The
+    // bridge handles missing-file / bad-content gracefully, so we
+    // don't pre-create anything here. Skip the path entirely if the
+    // program declares no RETAIN vars — no file means no future
+    // confusion about "what's in this state.json".
+    let state_path = if metadata.retain_vars.is_empty() {
+        None
+    } else {
+        let p = args.state_dir.join("retain.json");
+        tracing::info!(state_path = %p.display(), "RETAIN state file");
+        Some(p)
+    };
+
     // ---- Spawn the bridge ----
-    let handle: ProgramHandle = ironplc_bridge::spawn_with_interval(
+    let handle: ProgramHandle = ironplc_bridge::spawn_with_options(
         container,
         device_specs,
         iomap.mappings,
-        scan_interval_ms,
+        ironplc_bridge::SpawnOptions {
+            scan_interval_ms,
+            retain_vars: metadata.retain_vars,
+            state_path,
+        },
     );
 
     // Fan out the bridge's snapshots into a runtime-owned broadcast channel,

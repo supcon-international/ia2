@@ -78,11 +78,19 @@ impl IoDevice for EthercatDevice {
             Inner::Real(r) => r.write_channel(channel, value).await,
         }
     }
+
+    async fn enter_failsafe(&mut self) -> Result<(), IoError> {
+        match &mut self.0 {
+            Inner::Sim(s) => s.enter_failsafe().await,
+            Inner::Real(r) => r.enter_failsafe().await,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use project::{EthercatChannel, EthercatDataType, EthercatPdoDirection, EthercatSlave};
 
     #[test]
     fn is_sim_nic_matches_sentinel_and_empty() {
@@ -91,5 +99,98 @@ mod tests {
         assert!(!is_sim_nic("eth0"));
         assert!(!is_sim_nic("en0"));
         assert!(!is_sim_nic("_sim_extra"));
+    }
+
+    fn sim_config_with_two_outputs_and_one_input() -> EthercatConfig {
+        EthercatConfig {
+            nic: SIM_NIC.into(),
+            cycle_us: 1_000,
+            slaves: vec![EthercatSlave {
+                index: 0,
+                name: "EL2008".into(),
+                vendor_id: 0,
+                product_id: 0,
+            }],
+            channels: vec![
+                EthercatChannel {
+                    name: "out_motor".into(),
+                    slave_index: 0,
+                    direction: EthercatPdoDirection::RxPdo,
+                    pdo_index: 0x7000,
+                    sub_index: 1,
+                    bit_length: 1,
+                    data_type: EthercatDataType::Bool,
+                    pdi_byte_offset: 0,
+                    pdi_bit_offset: 0,
+                },
+                EthercatChannel {
+                    name: "out_speed".into(),
+                    slave_index: 0,
+                    direction: EthercatPdoDirection::RxPdo,
+                    pdo_index: 0x7000,
+                    sub_index: 2,
+                    bit_length: 16,
+                    data_type: EthercatDataType::U16,
+                    pdi_byte_offset: 2,
+                    pdi_bit_offset: 0,
+                },
+                EthercatChannel {
+                    name: "in_estop".into(),
+                    slave_index: 0,
+                    direction: EthercatPdoDirection::TxPdo,
+                    pdo_index: 0x6000,
+                    sub_index: 1,
+                    bit_length: 1,
+                    data_type: EthercatDataType::Bool,
+                    pdi_byte_offset: 0,
+                    pdi_bit_offset: 0,
+                },
+            ],
+        }
+    }
+
+    #[tokio::test]
+    async fn enter_failsafe_zeroes_rxpdo_outputs_in_sim_mode() {
+        let cfg = sim_config_with_two_outputs_and_one_input();
+        let mut dev = EthercatDevice::connect("test".into(), &cfg).await.unwrap();
+
+        // Drive outputs to non-zero values.
+        dev.write_channel("out_motor", ChannelValue::Bool(true))
+            .await
+            .unwrap();
+        dev.write_channel("out_speed", ChannelValue::U16(42))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            dev.read_channel("out_motor").await.unwrap().to_i32(),
+            1,
+            "precondition: motor write took effect"
+        );
+        assert_eq!(
+            dev.read_channel("out_speed").await.unwrap().to_i32(),
+            42,
+            "precondition: speed write took effect"
+        );
+
+        // Trip failsafe.
+        dev.enter_failsafe().await.unwrap();
+
+        assert_eq!(
+            dev.read_channel("out_motor").await.unwrap().to_i32(),
+            0,
+            "motor must be zeroed after failsafe"
+        );
+        assert_eq!(
+            dev.read_channel("out_speed").await.unwrap().to_i32(),
+            0,
+            "speed must be zeroed after failsafe"
+        );
+
+        // TxPDO (input) channels remain — failsafe only touches outputs.
+        // The default sim value for the input is also 0, so we just
+        // confirm the read still succeeds (i.e. the channel still exists
+        // and wasn't accidentally deleted).
+        let _ = dev.read_channel("in_estop").await.unwrap();
     }
 }

@@ -256,6 +256,21 @@ impl IoDevice for RealEthercat {
             value,
         )
     }
+
+    /// Zero the entire output PDI mirror for every discovered slave.
+    /// The next cyclic tick on the worker thread copies these zeros
+    /// onto the bus surface and `tx_rx`'s them out — at default cycle
+    /// times that's a millisecond or two. Wait a couple of cycle
+    /// periods after returning if you need to guarantee propagation
+    /// before exiting (the bridge does this).
+    async fn enter_failsafe(&mut self) -> Result<(), IoError> {
+        let mut pdi = self.pdi.lock().expect("pdi mirror poisoned");
+        for buf in pdi.outputs.values_mut() {
+            buf.fill(0);
+        }
+        tracing::info!(device = %self.name, "ethercat output PDI zeroed for failsafe");
+        Ok(())
+    }
 }
 
 /// The entire ethercrab session lives inside this function — bus walk,

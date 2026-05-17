@@ -6,6 +6,7 @@ mod errors;
 mod fbd_transpile;
 mod ld_transpile;
 mod problem_docs;
+mod retain;
 mod runtime;
 mod sfc_transpile;
 
@@ -26,25 +27,53 @@ pub use sfc_transpile::{
 
 pub use errors::BridgeError;
 pub use runtime::{
-    spawn, spawn_with_interval, DeviceSpec, ProgramHandle, RuntimeMode, RuntimeWriteError,
-    VarSnapshot, VarValue, DEFAULT_SCAN_INTERVAL_MS,
+    spawn, spawn_with_interval, spawn_with_options, DeviceSpec, ProgramHandle, RuntimeMode,
+    RuntimeWriteError, SpawnOptions, VarSnapshot, VarValue, DEFAULT_SCAN_INTERVAL_MS,
+    RETAIN_FLUSH_INTERVAL,
 };
 
 use ironplc_container::Container;
-use ironplc_dsl::common::{InitialValueAssignmentKind, LibraryElementKind, VarDecl, VariableType};
+use ironplc_dsl::common::{
+    DeclarationQualifier, InitialValueAssignmentKind, Library, LibraryElementKind, VarDecl,
+    VariableType,
+};
 use ironplc_dsl::core::FileId;
 use ironplc_dsl::diagnostic::{Diagnostic, LineColumn};
 use ironplc_parser::options::CompilerOptions;
 use serde::Serialize;
 use ts_rs::TS;
 
+/// Per-program metadata derived from the source's AST that the runtime
+/// needs but the bytecode `Container` itself doesn't preserve.
+///
+/// Right now this is just the set of `VAR RETAIN`-qualified variable
+/// names — `ironplc`'s codegen flattens qualifiers away once it lowers
+/// to bytecode (see `vendor/ironplc/compiler/container/src/debug_format.rs`),
+/// so we re-derive them from the parsed `Library` for the persistence
+/// layer to consume.
+#[derive(Debug, Clone, Default)]
+pub struct ProgramMetadata {
+    /// IEC variable names declared with `RETAIN` (or with `retain="true"`
+    /// in PLCopen XML). Lower-cased to match `VarDebugInfo.name` which
+    /// is what the runtime looks up against. Stable across compilations
+    /// of the same source.
+    pub retain_vars: Vec<String>,
+}
+
 /// Compile an IEC 61131-3 Structured Text source string into an executable
 /// ironplc bytecode `Container`. Uses dialect Ed2 with no vendor extensions.
+///
+/// Thin convenience wrapper around `compile_with_metadata` that drops the
+/// metadata; for code paths that *do* need retain info (the run path),
+/// call `compile_with_metadata` directly.
 pub fn compile(source: &str) -> Result<Container, BridgeError> {
+    compile_with_metadata(source).map(|(c, _)| c)
+}
+
+/// Like `compile` but also returns the `ProgramMetadata` extracted from
+/// the parsed AST (retain vars and anything else the codegen drops).
+pub fn compile_with_metadata(source: &str) -> Result<(Container, ProgramMetadata), BridgeError> {
     let file_id = FileId::default();
-    // `allow_empty_var_blocks` mirrors the ironplc CLI flag. POU templates
-    // we ship intentionally start with empty VAR / VAR_INPUT / VAR_OUTPUT
-    // blocks — those should compile, not error.
     let options = CompilerOptions {
         allow_empty_var_blocks: true,
         ..Default::default()
@@ -52,6 +81,12 @@ pub fn compile(source: &str) -> Result<Container, BridgeError> {
 
     let library = ironplc_parser::parse_program(source, &file_id, &options)
         .map_err(|d| BridgeError::Parse(format!("{d:?}")))?;
+
+    // Capture retain vars BEFORE we hand the library to the analyzer,
+    // which moves/consumes parts of it. The walk is read-only and cheap.
+    let metadata = ProgramMetadata {
+        retain_vars: extract_retain_vars(&library),
+    };
 
     let (analyzed, context) = ironplc_analyzer::stages::analyze(&[&library], &options)
         .map_err(|ds| BridgeError::Analyze(format!("{ds:?}")))?;
@@ -64,7 +99,57 @@ pub fn compile(source: &str) -> Result<Container, BridgeError> {
     let container = ironplc_codegen::compile(&analyzed, &context, &codegen_options)
         .map_err(|d| BridgeError::Codegen(format!("{d:?}")))?;
 
-    Ok(container)
+    Ok((container, metadata))
+}
+
+/// Walk a parsed `Library` and collect every variable whose declaration
+/// is qualified `RETAIN`. Covers:
+///   - `PROGRAM` `VAR RETAIN` blocks
+///   - `FUNCTION_BLOCK` `VAR RETAIN` blocks (FB instance state)
+///   - Global `VAR_GLOBAL RETAIN` declarations
+///
+/// We don't currently descend into nested function-block instances
+/// (their retain qualifier is on the FB's own declaration, which we
+/// already capture). Variable names are lower-cased so the runtime
+/// can match directly against `VarDebugInfo.name` (which ironplc's
+/// debug section also stores lower-cased).
+fn extract_retain_vars(library: &Library) -> Vec<String> {
+    let mut out = Vec::new();
+    for element in &library.elements {
+        match element {
+            LibraryElementKind::ProgramDeclaration(p) => {
+                for v in &p.variables {
+                    if v.qualifier == DeclarationQualifier::Retain {
+                        if let Some(id) = v.identifier.symbolic_id() {
+                            out.push(id.lower_case().clone());
+                        }
+                    }
+                }
+            }
+            LibraryElementKind::FunctionBlockDeclaration(fb) => {
+                for v in &fb.variables {
+                    if v.qualifier == DeclarationQualifier::Retain {
+                        if let Some(id) = v.identifier.symbolic_id() {
+                            out.push(id.lower_case().clone());
+                        }
+                    }
+                }
+            }
+            LibraryElementKind::GlobalVarDeclarations(vars) => {
+                for v in vars {
+                    if v.qualifier == DeclarationQualifier::Retain {
+                        if let Some(id) = v.identifier.symbolic_id() {
+                            out.push(id.lower_case().clone());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Compile a whole project against the schedule stored in `tasks.toml`.
@@ -76,6 +161,19 @@ pub fn compile_project(store: &project::ProjectStore) -> Result<Container, Bridg
         .map_err(|e| BridgeError::Parse(format!("reading tasks.toml: {e}")))?
         .unwrap_or_default();
     compile_project_with_tasks(store, &tasks)
+}
+
+/// Like `compile_project` but returns metadata too. Run paths
+/// (server `/api/run`, headless `ia2-runtime`) call this so they can
+/// pass `retain_vars` into the spawn options.
+pub fn compile_project_full(
+    store: &project::ProjectStore,
+) -> Result<(Container, ProgramMetadata), BridgeError> {
+    let tasks = store
+        .read_tasks()
+        .map_err(|e| BridgeError::Parse(format!("reading tasks.toml: {e}")))?
+        .unwrap_or_default();
+    compile_project_with_tasks_full(store, &tasks)
 }
 
 /// Same as `compile_project` but takes an explicit `Tasks` instead of
@@ -91,6 +189,34 @@ pub fn compile_project_with_tasks(
     store: &project::ProjectStore,
     tasks: &project::Tasks,
 ) -> Result<Container, BridgeError> {
+    compile_project_with_tasks_full(store, tasks).map(|(c, _)| c)
+}
+
+/// Like `compile_project_with_tasks`, but also returns the
+/// `ProgramMetadata` (retain vars etc.) extracted from the parsed AST.
+/// Used by the run path; existing callers that only care about
+/// diagnostics keep using `compile_project_with_tasks`.
+pub fn compile_project_with_tasks_full(
+    store: &project::ProjectStore,
+    tasks: &project::Tasks,
+) -> Result<(Container, ProgramMetadata), BridgeError> {
+    let combined = build_combined_project_source(store, tasks)?;
+    tracing::debug!(
+        len = combined.len(),
+        "compile_project: combined source built"
+    );
+    compile_with_metadata(&combined)
+}
+
+/// Concatenate every POU's lowered ST + a synthesized CONFIGURATION
+/// into a single compilation unit. Factored out of
+/// `compile_project_with_tasks_full` so the two-stage compile +
+/// metadata-extract pipeline (parse → codegen, then parse again for
+/// retain) reuses the exact same input.
+fn build_combined_project_source(
+    store: &project::ProjectStore,
+    tasks: &project::Tasks,
+) -> Result<String, BridgeError> {
     let pou_paths = store
         .list_pou_paths()
         .map_err(|e| BridgeError::Parse(format!("listing pous: {e}")))?;
@@ -120,11 +246,7 @@ pub fn compile_project_with_tasks(
         }
     }
     combined.push_str(&synthesize_configuration(tasks));
-    tracing::debug!(
-        len = combined.len(),
-        "compile_project: combined source built"
-    );
-    compile(&combined)
+    Ok(combined)
 }
 
 /// Compile a single POU source + synthesized CONFIGURATION. Used by the
@@ -140,6 +262,16 @@ pub fn compile_isolated_source(
     language: project::PouLanguage,
     tasks: &project::Tasks,
 ) -> Result<Container, BridgeError> {
+    compile_isolated_source_full(source, language, tasks).map(|(c, _)| c)
+}
+
+/// Like `compile_isolated_source`, but returns the AST-derived
+/// `ProgramMetadata` alongside the bytecode container.
+pub fn compile_isolated_source_full(
+    source: &str,
+    language: project::PouLanguage,
+    tasks: &project::Tasks,
+) -> Result<(Container, ProgramMetadata), BridgeError> {
     if tasks.programs.is_empty() {
         return Err(BridgeError::Parse("no PROGRAM instance to run".into()));
     }
@@ -150,7 +282,7 @@ pub fn compile_isolated_source(
         combined.push('\n');
     }
     combined.push_str(&synthesize_configuration(tasks));
-    compile(&combined)
+    compile_with_metadata(&combined)
 }
 
 /// Lower an arbitrary POU source into ST, ready for ironplc to parse.
@@ -805,5 +937,50 @@ fn lookup_locations(
         SourceMapKind::Ld(m) => (m.lookup(line).cloned(), None, None),
         SourceMapKind::Fbd(m) => (None, m.lookup(line).cloned(), None),
         SourceMapKind::Sfc(m) => (None, None, m.lookup(line).cloned()),
+    }
+}
+
+#[cfg(test)]
+mod retain_tests {
+    use super::compile_with_metadata;
+
+    /// Wrapping the program in a CONFIGURATION is required for ironplc
+    /// to accept the source; the synthesizer the bridge uses at runtime
+    /// does the same thing.
+    fn wrap(program: &str) -> String {
+        format!(
+            "{program}\n\
+            CONFIGURATION cfg\n\
+                RESOURCE res ON PLC\n\
+                    TASK t1(INTERVAL := T#100ms, PRIORITY := 1);\n\
+                    PROGRAM p1 WITH t1 : main;\n\
+                END_RESOURCE\n\
+            END_CONFIGURATION\n"
+        )
+    }
+
+    #[test]
+    fn retain_vars_are_extracted_from_program_var_retain_block() {
+        let src = wrap(
+            "PROGRAM main\n\
+                VAR speed : INT := 0; END_VAR\n\
+                VAR RETAIN setpoint : INT := 42; counter : DINT := 0; END_VAR\n\
+                speed := setpoint;\n\
+            END_PROGRAM",
+        );
+        let (_container, meta) = compile_with_metadata(&src).unwrap();
+        assert_eq!(meta.retain_vars, vec!["counter", "setpoint"]);
+    }
+
+    #[test]
+    fn programs_without_retain_blocks_produce_empty_metadata() {
+        let src = wrap(
+            "PROGRAM main\n\
+                VAR x : INT := 1; END_VAR\n\
+                x := x + 1;\n\
+            END_PROGRAM",
+        );
+        let (_container, meta) = compile_with_metadata(&src).unwrap();
+        assert!(meta.retain_vars.is_empty());
     }
 }
