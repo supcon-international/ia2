@@ -1,4 +1,4 @@
-//! Headless edge runtime for controlsoftware.
+//! Headless edge runtime for IA2.
 //!
 //! Single binary, no IDE: load a project from disk → compile the named POU
 //! → spawn the ironplc-bridge scan loop → expose a tiny HTTP server on a
@@ -86,9 +86,9 @@ fn parse_args() -> Result<Args> {
 
 fn print_help() {
     eprintln!(
-        "controlsoftware-runtime — headless edge runtime\n\n\
+        "ia2-runtime — headless edge runtime\n\n\
          USAGE:\n  \
-         controlsoftware-runtime --project-dir <path> [--bind <addr>]\n\n\
+         ia2-runtime --project-dir <path> [--bind <addr>]\n\n\
          FLAGS:\n  \
          --project-dir <path>   Path to the project directory (containing project.toml).\n  \
          --bind <addr>          Local socket for the monitor server (default {DEFAULT_BIND}).\n\n\
@@ -132,7 +132,7 @@ async fn main() -> Result<()> {
         project_dir = %args.project_dir.display(),
         bind = %args.bind,
         version = env!("CARGO_PKG_VERSION"),
-        "controlsoftware-runtime starting"
+        "ia2-runtime starting"
     );
 
     // ---- Load + compile the whole project ----
@@ -253,7 +253,7 @@ async fn main() -> Result<()> {
     handle.stop();
     // Give the scan loop a moment to flush; it's cooperative — no hard kill.
     tokio::time::sleep(Duration::from_millis(200)).await;
-    tracing::info!("controlsoftware-runtime exiting");
+    tracing::info!("ia2-runtime exiting");
     server_result.map_err(Into::into)
 }
 
@@ -280,7 +280,7 @@ fn init_logging() {
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| {
                 EnvFilter::new(
-                    "controlsoftware_runtime=info,ironplc_bridge=info,iomap_modbus=info,iomap_ethercat=info,info",
+                    "ia2_runtime=info,ironplc_bridge=info,iomap_modbus=info,iomap_ethercat=info,info",
                 )
             }),
         )

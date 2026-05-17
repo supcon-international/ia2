@@ -1,45 +1,36 @@
-import { HeadContent, Scripts, createRootRoute } from '@tanstack/react-router'
+import { Outlet, createRootRoute } from '@tanstack/react-router'
 import { TanStackRouterDevtoolsPanel } from '@tanstack/react-router-devtools'
 import { TanStackDevtools } from '@tanstack/react-devtools'
 
-import appCss from '../styles.css?url'
+import {
+  TakeoverOverlay,
+  UserControlIndicator,
+} from '@/components/ui/TakeoverOverlay'
+
+// Root route for the SPA. We dropped the SSR `shellComponent` form
+// (which owns the entire <html>/<body> tree) because the app ships as
+// a pure client-side bundle now — head metadata lives in
+// `apps/web/index.html`, and `main.tsx` is the actual mount point.
+// Keeping just an <Outlet/> here means every child route inherits a
+// minimal wrapper without re-rendering the whole document chrome.
 
 export const Route = createRootRoute({
-  head: () => ({
-    meta: [
-      {
-        charSet: 'utf-8',
-      },
-      {
-        name: 'viewport',
-        content: 'width=device-width, initial-scale=1',
-      },
-      {
-        title: 'controlsoftware',
-      },
-    ],
-    links: [
-      {
-        rel: 'stylesheet',
-        href: appCss,
-      },
-    ],
-  }),
-  shellComponent: RootDocument,
+  component: RootDocument,
 })
 
-function RootDocument({ children }: { children: React.ReactNode }) {
+function RootDocument() {
   return (
-    <html lang="en">
-      <head>
-        <HeadContent />
-      </head>
-      <body>
-        {children}
+    <>
+      <Outlet />
+      {/* Agent-takeover overlay — the only global notification
+          surface. Toasts were removed when this landed; the overlay
+          covers all the "something is happening in the background"
+          cases and inline UI handles direct-action confirmations. */}
+      <TakeoverOverlay />
+      <UserControlIndicator />
+      {import.meta.env.DEV && (
         <TanStackDevtools
-          config={{
-            position: 'bottom-right',
-          }}
+          config={{ position: 'bottom-right' }}
           plugins={[
             {
               name: 'Tanstack Router',
@@ -47,8 +38,7 @@ function RootDocument({ children }: { children: React.ReactNode }) {
             },
           ]}
         />
-        <Scripts />
-      </body>
-    </html>
+      )}
+    </>
   )
 }

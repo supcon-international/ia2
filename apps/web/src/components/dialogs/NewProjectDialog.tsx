@@ -42,7 +42,7 @@ export function NewProjectDialog({ trigger }: Props) {
           <DialogTitle>New project</DialogTitle>
           <DialogDescription>
             Creates a new project under{" "}
-            <code className="font-mono">~/Documents/controlsoftware/</code>.
+            <code className="font-mono">~/Documents/IA2/</code>.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-2">

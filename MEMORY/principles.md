@@ -7,7 +7,7 @@ features, or "industry standard alignment", default to **reject**.
 ## 1. Simplicity is the headline feature
 
 This is **the primary product positioning**, not a footnote. The whole
-reason `controlsoftware` exists in a field already crowded with Codesys,
+reason `ia2` exists in a field already crowded with Codesys,
 TwinCAT, Step 7, Studio 5000, IEC 61131-3 plugins, etc. is that all of
 those have decades of accreted complexity. Engineers, students, agents,
 and SDE/SRE crossovers shouldn't have to learn a 5000-page reference

@@ -4,7 +4,7 @@
 # with sudo). After it succeeds, the IDE's Deploy button takes over.
 #
 # What it does:
-#   1. Creates /opt/controlsoftware/{versions,bin} owned by root.
+#   1. Creates /opt/ia2/{versions,bin} owned by root.
 #   2. Drops the systemd unit shipped alongside this script.
 #   3. Sets a "stub" current/ symlink to versions/_initial/ with the
 #      runtime binary the user supplied via $RUNTIME_BIN.
@@ -12,22 +12,22 @@
 #      happens when the IDE pushes a project.
 #
 # Usage:
-#   curl -fsSL https://.../install.sh | sudo INSTALL_DIR=/opt/controlsoftware \
-#       RUNTIME_BIN=/path/to/controlsoftware-runtime bash
+#   curl -fsSL https://.../install.sh | sudo INSTALL_DIR=/opt/ia2 \
+#       RUNTIME_BIN=/path/to/ia2-runtime bash
 # or:
-#   sudo INSTALL_DIR=/opt/controlsoftware RUNTIME_BIN=./controlsoftware-runtime \
+#   sudo INSTALL_DIR=/opt/ia2 RUNTIME_BIN=./ia2-runtime \
 #       ./install.sh
 
 set -euo pipefail
 
-INSTALL_DIR="${INSTALL_DIR:-/opt/controlsoftware}"
+INSTALL_DIR="${INSTALL_DIR:-/opt/ia2}"
 RUNTIME_BIN="${RUNTIME_BIN:-}"
-UNIT_FILE="${UNIT_FILE:-$(dirname "$0")/controlsoftware.service}"
+UNIT_FILE="${UNIT_FILE:-$(dirname "$0")/ia2.service}"
 
 if [ -z "$RUNTIME_BIN" ] || [ ! -f "$RUNTIME_BIN" ]; then
-  echo "ERROR: set RUNTIME_BIN to the path of the controlsoftware-runtime binary." >&2
+  echo "ERROR: set RUNTIME_BIN to the path of the ia2-runtime binary." >&2
   echo "       Build it on a Linux box matching the edge's arch:" >&2
-  echo "         cargo build --release -p controlsoftware-runtime" >&2
+  echo "         cargo build --release -p ia2-runtime" >&2
   echo "       or cross-compile (see docs/edge-deploy.md)." >&2
   exit 2
 fi
@@ -56,13 +56,6 @@ PROGRAM main
     END_VAR
     counter := counter + 1;
 END_PROGRAM
-
-CONFIGURATION config
-    RESOURCE plc_res ON PLC
-        TASK plc_task(INTERVAL := T#100ms, PRIORITY := 1);
-        PROGRAM plc_task_instance WITH plc_task : main;
-    END_RESOURCE
-END_CONFIGURATION
 EOF
 cat > "$INSTALL_DIR/versions/_initial/project/iomap.toml" <<'EOF'
 EOF
@@ -79,11 +72,6 @@ instance = "main_inst"
 program = "main"
 task = "plc_task"
 EOF
-# The stub main.st here doesn't have an inline CONFIGURATION — tasks.toml
-# above is the project-level scheduling source of truth.
-sed -i.bak '/^CONFIGURATION/,/^END_CONFIGURATION/d' \
-  "$INSTALL_DIR/versions/_initial/project/pous/main.st" 2>/dev/null \
-  && rm -f "$INSTALL_DIR/versions/_initial/project/pous/main.st.bak" || true
 
 echo "==> installing runtime binary"
 install -m 0755 "$RUNTIME_BIN" "$INSTALL_DIR/versions/_initial/runtime"
@@ -98,16 +86,16 @@ if [ ! -f "$UNIT_FILE" ]; then
   echo "ERROR: unit file not found at $UNIT_FILE" >&2
   exit 2
 fi
-install -m 0644 "$UNIT_FILE" /etc/systemd/system/controlsoftware.service
+install -m 0644 "$UNIT_FILE" /etc/systemd/system/ia2.service
 systemctl daemon-reload
-systemctl enable controlsoftware.service
+systemctl enable ia2.service
 
 echo ""
 echo "==> done."
 echo "    Layout: $INSTALL_DIR"
-echo "    Unit:   /etc/systemd/system/controlsoftware.service (enabled)"
+echo "    Unit:   /etc/systemd/system/ia2.service (enabled)"
 echo ""
 echo "    Start it now with the stub project to verify the binary runs:"
-echo "      systemctl start controlsoftware && journalctl -u controlsoftware -f"
+echo "      systemctl start ia2 && journalctl -u ia2 -f"
 echo ""
 echo "    Then push a real project from the IDE via Deploy."

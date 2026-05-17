@@ -53,7 +53,14 @@ pub struct FbdProgram {
     /// one block pin; binding the same variable twice is an error.
     /// `VAR_OUTPUT` variables not bound here are assigned via
     /// regular ST elsewhere or left at their initial value.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ///
+    /// **Always serialized**, even when empty — the TS-generated
+    /// frontend type marks this field as required, so omitting it
+    /// turns into `undefined.length` at render time (caught a real
+    /// crash on the agent's first `POST /api/pous` with the seeded
+    /// empty-outputs template). `#[serde(default)]` still covers
+    /// older files on disk that pre-date this change.
+    #[serde(default)]
     pub outputs: Vec<FbdOutputBinding>,
 }
 
@@ -77,8 +84,9 @@ pub struct FbdBlock {
     /// valid IEC identifier and unique within the POU.
     pub instance: String,
     /// Pin bindings in authoring order. Pins that aren't bound here
-    /// fall back to ironplc's defaults (FALSE / 0 / T#0ms).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// fall back to ironplc's defaults (FALSE / 0 / T#0ms). Always
+    /// serialized (see `FbdProgram::outputs` for the rationale).
+    #[serde(default)]
     pub inputs: Vec<FbdInputBinding>,
     /// Optional render position. Authoring-time hint only — the
     /// transpiler ignores it. Present when the user drags a block in

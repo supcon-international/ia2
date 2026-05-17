@@ -3,15 +3,26 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// Brand directory name used inside `~/Documents/` and the per-user
+/// config dir. Single source of truth so changing it here updates
+/// both the projects root and the state file location.
+const BRAND_DIR: &str = "IA2";
+
+/// Legacy directory name from the project's pre-IA2 working title.
+/// Migrated on first run via [`migrate_legacy_dirs`]; kept here so
+/// existing dev installs don't lose their projects or last-opened
+/// state.
+const LEGACY_BRAND_DIR: &str = "controlsoftware";
+
 /// Default directory where new projects are created.
 ///
-/// Resolves to `~/Documents/controlsoftware/` on macOS,
-/// `$XDG_DOCUMENTS_DIR/controlsoftware/` on Linux,
-/// `~/Documents/controlsoftware/` on Windows. Falls back to `./projects/`
+/// Resolves to `~/Documents/IA2/` on macOS,
+/// `$XDG_DOCUMENTS_DIR/IA2/` on Linux,
+/// `~/Documents/IA2/` on Windows. Falls back to `./projects/`
 /// only if the platform's documents dir can't be located.
 pub fn default_projects_dir() -> PathBuf {
     dirs::document_dir()
-        .map(|d| d.join("controlsoftware"))
+        .map(|d| d.join(BRAND_DIR))
         .unwrap_or_else(|| PathBuf::from("./projects"))
 }
 
@@ -19,7 +30,50 @@ pub fn default_projects_dir() -> PathBuf {
 /// platform's per-user config dir.
 pub fn default_state_path() -> PathBuf {
     let base = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
-    base.join("controlsoftware").join("state.toml")
+    base.join(BRAND_DIR).join("state.toml")
+}
+
+/// One-time migration: if the new IA2 directories don't exist but
+/// the legacy `controlsoftware/` ones do, rename them in place. Idem-
+/// potent and silent — log warnings on errors but never fail startup.
+///
+/// We do this rather than supporting both paths because:
+///   - Two paths means two truths; users will get confused which one
+///     is "real" when they move files manually.
+///   - Renaming is atomic, fast, and preserves all timestamps.
+///   - When the legacy directory doesn't exist, this is a no-op.
+pub fn migrate_legacy_dirs() {
+    if let Some(docs) = dirs::document_dir() {
+        let new_dir = docs.join(BRAND_DIR);
+        let old_dir = docs.join(LEGACY_BRAND_DIR);
+        if !new_dir.exists() && old_dir.exists() {
+            match fs::rename(&old_dir, &new_dir) {
+                Ok(()) => tracing::info!(
+                    from = %old_dir.display(),
+                    to = %new_dir.display(),
+                    "migrated legacy projects directory"
+                ),
+                Err(e) => tracing::warn!(
+                    from = %old_dir.display(),
+                    %e,
+                    "failed to migrate legacy projects directory"
+                ),
+            }
+        }
+    }
+    if let Some(cfg) = dirs::config_dir() {
+        let new_dir = cfg.join(BRAND_DIR);
+        let old_dir = cfg.join(LEGACY_BRAND_DIR);
+        if !new_dir.exists() && old_dir.exists() {
+            if let Err(e) = fs::rename(&old_dir, &new_dir) {
+                tracing::warn!(
+                    from = %old_dir.display(),
+                    %e,
+                    "failed to migrate legacy config dir"
+                );
+            }
+        }
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

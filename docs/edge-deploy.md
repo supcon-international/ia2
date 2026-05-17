@@ -1,6 +1,6 @@
 # Edge deployment
 
-How to ship a controlsoftware project to a Linux edge box and use the IDE
+How to ship an IA2 project to a Linux edge box and use the IDE
 for online debugging against it.
 
 ## What this is
@@ -27,35 +27,35 @@ prompts — the IDE runs `ssh -o BatchMode=yes`).
 1. **Get a runtime binary for the edge's architecture**. From a Linux dev
    machine of the same arch:
    ```sh
-   cargo build --release -p controlsoftware-runtime
-   # binary lands at target/release/controlsoftware-runtime
+   cargo build --release -p ia2-runtime
+   # binary lands at target/release/ia2-runtime
    ```
    For cross-arch (e.g. ARM64 edge from x86_64 dev), use `cross`:
    ```sh
    cargo install cross --git https://github.com/cross-rs/cross
-   cross build --release -p controlsoftware-runtime \
+   cross build --release -p ia2-runtime \
      --target aarch64-unknown-linux-gnu
-   # binary lands at target/aarch64-unknown-linux-gnu/release/controlsoftware-runtime
+   # binary lands at target/aarch64-unknown-linux-gnu/release/ia2-runtime
    ```
    All deps are pure Rust; cross-compile should succeed without extra
    system libs.
 
 2. **Bootstrap the edge**. From your dev machine:
    ```sh
-   scp infra/controlsoftware.service edge:/tmp/
+   scp infra/ia2.service edge:/tmp/
    scp infra/install.sh             edge:/tmp/
-   scp target/.../release/controlsoftware-runtime edge:/tmp/
-   ssh edge "sudo INSTALL_DIR=/opt/controlsoftware \
-                 RUNTIME_BIN=/tmp/controlsoftware-runtime \
-                 UNIT_FILE=/tmp/controlsoftware.service \
+   scp target/.../release/ia2-runtime edge:/tmp/
+   ssh edge "sudo INSTALL_DIR=/opt/ia2 \
+                 RUNTIME_BIN=/tmp/ia2-runtime \
+                 UNIT_FILE=/tmp/ia2.service \
                  bash /tmp/install.sh"
    ```
-   Verify with `ssh edge systemctl status controlsoftware`. It should be
+   Verify with `ssh edge systemctl status ia2`. It should be
    *enabled, not yet started*.
 
 3. **Optional: smoke-start the stub**. Confirms the binary itself runs:
    ```sh
-   ssh edge "sudo systemctl start controlsoftware && \
+   ssh edge "sudo systemctl start ia2 && \
              curl -s http://127.0.0.1:13001/health"
    # → {"status":"ok","uptime_secs":2,"scan_count":15}
    ```
@@ -72,10 +72,10 @@ prompts — the IDE runs `ssh -o BatchMode=yes`).
 
 3. **Deploy**. Click `Deploy`. The IDE:
    - `tar`s your project directory + (if found) a freshly-built
-     `controlsoftware-runtime` from the dev machine
+     `ia2-runtime` from the dev machine
    - Pipes the tar into `ssh edge bash …` which extracts to
      `$INSTALL_DIR/versions/<UTC-timestamp>/`, atomically swaps the
-     `current` symlink, and `systemctl restart controlsoftware`s
+     `current` symlink, and `systemctl restart ia2`s
    - Streams the remote script's output back into the pane
 
 4. **Attach for live debugging**. Click `Attach`. The IDE opens an
@@ -89,7 +89,7 @@ prompts — the IDE runs `ssh -o BatchMode=yes`).
 After deploy, an edge box looks like:
 
 ```
-/opt/controlsoftware/
+/opt/ia2/
 ├── current → versions/2026-05-12T08-30-00Z/       (atomic symlink)
 ├── versions/
 │   ├── 2026-05-12T08-30-00Z/       latest
@@ -105,10 +105,10 @@ After deploy, an edge box looks like:
 There's no Rollback button (yet). Manually:
 ```sh
 ssh edge
-sudo ls /opt/controlsoftware/versions/   # find the previous timestamp
-sudo ln -sfn /opt/controlsoftware/versions/<prev> /opt/controlsoftware/.current.new
-sudo mv -Tf /opt/controlsoftware/.current.new /opt/controlsoftware/current
-sudo systemctl restart controlsoftware
+sudo ls /opt/ia2/versions/   # find the previous timestamp
+sudo ln -sfn /opt/ia2/versions/<prev> /opt/ia2/.current.new
+sudo mv -Tf /opt/ia2/.current.new /opt/ia2/current
+sudo systemctl restart ia2
 ```
 
 The Deploy code uses the same symlink-swap recipe; doing it by hand for
@@ -121,7 +121,7 @@ rollback is just "point `current` at an older version and restart".
   expose `:13001` directly.
 - The systemd unit grants `CAP_NET_RAW` so that EtherCAT (when wired)
   works. If you only use Modbus, you can drop it and run as a dedicated
-  user; see the comments in `controlsoftware.service`.
+  user; see the comments in `ia2.service`.
 - Credentials are **not stored** in the project. The IDE's only auth
   mechanism is whatever `ssh` resolves via your agent / `~/.ssh/config`.
 - Hardening is on (`PrivateTmp`, `ProtectSystem=strict`, `NoNewPrivileges`).
@@ -136,7 +136,7 @@ config's `nic` field:
 | `nic` value | Behaviour |
 | --- | --- |
 | `"_sim"` (or empty) | In-memory PDO buffer. Output channels echo what the program writes; inputs start at zero. Used for macOS dev, CI, and demo. |
-| anything else (e.g. `"eth0"`) | Real `ethercrab::MainDevice` on that NIC. Walks the bus, transitions to OP, runs a cyclic exchange on its own thread. Requires Linux + `CAP_NET_RAW` (already set in `controlsoftware.service`). |
+| anything else (e.g. `"eth0"`) | Real `ethercrab::MainDevice` on that NIC. Walks the bus, transitions to OP, runs a cyclic exchange on its own thread. Requires Linux + `CAP_NET_RAW` (already set in `ia2.service`). |
 
 For real-mode channels, you must fill in `pdi_byte_offset` (and
 `pdi_bit_offset` for sub-byte digital I/O) — the byte/bit position of

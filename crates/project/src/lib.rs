@@ -30,7 +30,8 @@ pub use ld::{
 };
 pub use sfc::{SfcAction, SfcProgram, SfcQualifier, SfcStep, SfcTransition};
 pub use paths::{
-    default_projects_dir, default_state_path, load_last_opened, save_last_opened,
+    default_projects_dir, default_state_path, load_last_opened, migrate_legacy_dirs,
+    save_last_opened,
 };
 pub use store::{MigrationReport, ProjectStore};
 pub use types::{

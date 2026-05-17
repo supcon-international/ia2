@@ -59,7 +59,9 @@ pub struct SfcStep {
     /// Statements that fire while this step is active, on entry, etc.
     /// Order is preserved; the transpiler emits them in author order
     /// inside the step's `IF __sfc_step = 'name' THEN …` block.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Always serialized; see `FbdProgram::outputs` for why we don't
+    /// `skip_serializing_if = "Vec::is_empty"` here.
+    #[serde(default)]
     pub actions: Vec<SfcAction>,
 }
 

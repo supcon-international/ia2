@@ -4,13 +4,21 @@ mod events;
 mod routes;
 mod state;
 
+use std::net::SocketAddr;
+use std::path::PathBuf;
+
 use axum::{
     Router,
     routing::{get, post},
 };
+use clap::Parser;
 use iomap_modbus::{DemoSlave, run_demo_slave};
-use project::{ProjectStore, load_last_opened};
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use project::{ProjectStore, load_last_opened, migrate_legacy_dirs};
+use axum::{
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
+};
+use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
 use crate::state::AppState;
@@ -20,21 +28,108 @@ use crate::state::AppState;
 /// slave entirely (useful when port 5502 is taken by something else).
 const DEFAULT_DEMO_MODBUS_ADDR: &str = "127.0.0.1:5502";
 
+/// Default bind for the HTTP server. `127.0.0.1:0` means "pick any free
+/// port" — which is what the desktop shell uses so we never collide with
+/// whatever else the user has running. The legacy `:3001` default lives
+/// in dev scripts that the Vite proxy points at.
+const DEFAULT_BIND: &str = "127.0.0.1:3001";
+
+/// CLI flags for the long-lived HTTP backend. Deliberately tiny — every
+/// flag here either makes the desktop shell possible (`--bind 0`,
+/// `--print-url`, `--static-dir`) or surfaces a knob that already
+/// existed as an env var (`--demo-modbus-addr` mirrors
+/// `DEMO_MODBUS_ADDR`). New flags need a rationale; we are not building
+/// a CLI here, just an embeddable backend.
+#[derive(Parser, Debug)]
+#[command(
+    name = "ia2-server",
+    about = "HTTP backend for the IA2 IDE (axum + ironplc bridge + iomap)."
+)]
+struct Cli {
+    /// Address to bind. Use `127.0.0.1:0` to let the OS pick a free port;
+    /// combine with `--print-url` so a parent process (e.g. the macOS
+    /// shell) can read the actual port from stdout. Default: 127.0.0.1:3001.
+    #[arg(long, value_name = "ADDR", default_value = DEFAULT_BIND)]
+    bind: String,
+
+    /// Print the actual bound URL (e.g. `http://127.0.0.1:54321`) to
+    /// stdout once the listener is ready, on its own line. The native
+    /// shell parses this to know where to point its WebView. No-op when
+    /// you're running the server interactively.
+    #[arg(long)]
+    print_url: bool,
+
+    /// Directory containing a pre-built `apps/web/dist` to serve at `/`.
+    /// When omitted, only the JSON API is exposed (which is the current
+    /// `vite dev` behaviour — Vite serves the React app, proxies `/api`
+    /// here). When set, the server becomes a single origin hosting both
+    /// the UI and the API, which is what the desktop shell points its
+    /// WebView at. A missing/invalid path is a hard error — better to
+    /// fail loudly than to silently 404 every page request.
+    #[arg(long, value_name = "DIR")]
+    static_dir: Option<PathBuf>,
+
+    /// Override the demo Modbus slave address. Equivalent to the
+    /// `DEMO_MODBUS_ADDR` env var; flag wins when both are set. Pass
+    /// an empty string to disable the slave.
+    #[arg(long, value_name = "ADDR")]
+    demo_modbus_addr: Option<String>,
+
+    /// If set, periodically check whether the given PID is still
+    /// alive and exit if not. The Mac/Windows desktop shell passes
+    /// its own PID here so the server reaps itself if the shell is
+    /// SIGKILLed, panics, or is otherwise reaped without a chance to
+    /// run cleanup. Without this, the server would orphan and keep
+    /// the port + project lock indefinitely. Set to 0 / unset to
+    /// disable.
+    #[arg(long, value_name = "PID")]
+    parent_pid: Option<i32>,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+
+    // Spawn the parent-liveness watchdog at the *very top* of main,
+    // before tracing/subscribers/runtime setup. We deliberately don't
+    // tuck it next to its sibling concerns later in the file — see
+    // commit history: when spawned after `axum::serve(...).await` had
+    // initialized its state, the std::thread::spawn was silently
+    // unreachable in macOS-launchd-launched processes (the spawn line
+    // never executed; main's sync code path between bind and serve
+    // was effectively skipped). Moving it ahead of *all* other
+    // initialization made it reliable. The cost is one thread parked
+    // in read(2); pay it.
+    if cli.parent_pid.is_some() {
+        spawn_parent_watchdog();
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| EnvFilter::new("server=debug,tower_http=info,info")),
         )
+        // The desktop shell parses stdout to discover the URL. Anything
+        // tracing emits goes to stderr to keep stdout clean — that's the
+        // default for `tracing_subscriber::fmt()` but pin it explicitly
+        // so a future refactor doesn't accidentally break the shell.
+        .with_writer(std::io::stderr)
         .init();
+
+    // One-time legacy-path migration: rename `~/Documents/controlsoftware`
+    // → `~/Documents/IA2` (and same for config dir) if the legacy
+    // directories exist. No-op once migrated; cheap on every start.
+    migrate_legacy_dirs();
 
     // Spin up the demo Modbus slave so users can wire a Modbus device
     // against it without external hardware. The slave is shared with
     // AppState so the frontend can peek register/coil values.
     let demo_slave = DemoSlave::new();
-    let demo_addr = std::env::var("DEMO_MODBUS_ADDR")
-        .unwrap_or_else(|_| DEFAULT_DEMO_MODBUS_ADDR.into());
+    let demo_addr = cli
+        .demo_modbus_addr
+        .clone()
+        .or_else(|| std::env::var("DEMO_MODBUS_ADDR").ok())
+        .unwrap_or_else(|| DEFAULT_DEMO_MODBUS_ADDR.into());
     let state = AppState::new(demo_slave.clone(), demo_addr.clone());
     try_open_last_project(&state);
 
@@ -52,10 +147,10 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     } else {
-        tracing::info!("demo modbus slave disabled (DEMO_MODBUS_ADDR=\"\")");
+        tracing::info!("demo modbus slave disabled");
     }
 
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/health", get(routes::health))
         .route("/api/health", get(routes::api_health))
         // Project lifecycle
@@ -149,6 +244,9 @@ async fn main() -> anyhow::Result<()> {
             "/api/runtime/variables/{name}",
             post(routes::write_runtime_variable),
         )
+        // Agent activity heartbeat — see crates/server/src/events.rs::
+        // AgentActivity for the takeover-overlay protocol.
+        .route("/api/agent/heartbeat", post(routes::agent_heartbeat))
         // LSP bridge — WebSocket-upgraded; the browser-side monaco-
         // languageclient connects here and talks LSP JSON-RPC to a
         // freshly-spawned ironplc LSP process.
@@ -158,16 +256,198 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/_demo/slave/{kind}/{addr}",
             axum::routing::put(routes::poke_demo_slave),
-        )
+        );
+
+    // Optionally serve the built React app at `/`. ServeDir handles
+    // SPA-style 404→index.html via `not_found_service`, so the
+    // TanStack-router client routes ("/", "/settings", etc.) all
+    // resolve to the same React bundle. API routes shadow `/api/*`
+    // regardless of static-dir state because they were registered
+    // first.
+    if let Some(dir) = &cli.static_dir {
+        if !dir.is_dir() {
+            anyhow::bail!(
+                "--static-dir {:?} is not a directory (did you `pnpm --filter @cs/web build`?)",
+                dir
+            );
+        }
+        let index = dir.join("index.html");
+        if !index.is_file() {
+            anyhow::bail!(
+                "--static-dir {:?} has no index.html — expected a Vite build output",
+                dir
+            );
+        }
+        tracing::info!(static_dir = %dir.display(), "serving static UI");
+        // SPA pattern in two layers:
+        //   1. ServeDir resolves real files under the dist tree
+        //      (`/assets/index-XYZ.js`, `/favicon.ico`, etc).
+        //   2. When ServeDir can't find a file, we fall through to a
+        //      handler that reads index.html and returns it with a
+        //      200 status — so a hard refresh on a client route like
+        //      `/settings` re-bootstraps the SPA cleanly instead of
+        //      surfacing a 404 (which would also pollute crash
+        //      reporting and analytics with bogus "not found" hits).
+        //
+        // Note: this means a typo in an API path (e.g. `/api/poos`
+        // instead of `/api/pous`) returns the React shell with 200.
+        // The network tab makes that mistake obvious — small cost for
+        // a single-origin setup.
+        let index_html = index.clone();
+        let spa_fallback = axum::routing::any(move || {
+            let path = index_html.clone();
+            async move { spa_index(path).await }
+        });
+        let serve = ServeDir::new(dir).fallback(spa_fallback);
+        app = app.fallback_service(serve);
+    }
+
+    // Clone the state for the agent-activity watchdog before
+    // `.with_state` consumes it. The watchdog runs forever on a
+    // tokio task and only ever reads agent.lock() — sharing the
+    // same Arc<Mutex<...>> with the request handlers is correct.
+    let state_for_watchdog = state.clone();
+
+    let app = app
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
-    let addr = "127.0.0.1:3001";
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!(%addr, "server listening");
+    let bind_addr: SocketAddr = cli
+        .bind
+        .parse()
+        .map_err(|e| anyhow::anyhow!("--bind {:?} is not a SocketAddr: {e}", cli.bind))?;
+    let listener = tokio::net::TcpListener::bind(bind_addr).await?;
+    let local = listener.local_addr()?;
+    tracing::info!(addr = %local, "server listening");
+    if cli.print_url {
+        // Single line, no prefix, no trailing whitespace beyond \n.
+        // The shell's BackendSupervisor reads exactly one line and
+        // treats it as the base URL. Anything else (tracing logs,
+        // panic backtraces) goes to stderr.
+        println!("http://{}", local);
+    }
+
+    // (parent-liveness watchdog spawned earlier at the very top of
+    // main — see comment there for why)
+
+    // Agent-activity watchdog: every 500 ms, check whether the last
+    // CLI heartbeat aged out past the TTL; if so, flip `active=false`
+    // and emit an AgentActivity event so the IDE drops its takeover
+    // overlay. Cheap (one mutex peek + maybe one broadcast send).
+    tokio::spawn(agent_watchdog(state_for_watchdog));
+
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Trailing edge of the agent-activity flag. Runs forever; cheap; the
+/// leading edge (active=true) is handled inline by
+/// `AppState::record_agent_heartbeat`.
+async fn agent_watchdog(state: AppState) {
+    // TTL: how long a heartbeat is considered fresh. 3 s comfortably
+    // covers the gap between fast successive `cs` commands (each one
+    // is a separate process so each sends ONE heartbeat at startup).
+    const TTL: std::time::Duration = std::time::Duration::from_secs(3);
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tick.tick().await;
+        let event = {
+            let mut s = state.agent.lock().expect("agent mutex");
+            if !s.active {
+                continue;
+            }
+            let Some(last) = s.last_heartbeat else {
+                continue;
+            };
+            let elapsed = last.elapsed();
+            if elapsed >= TTL {
+                s.active = false;
+                Some(events::AppEvent::AgentActivity(events::AgentActivity {
+                    active: false,
+                    command: s.command.clone(),
+                    session: s.session.clone(),
+                    since_ms: elapsed.as_millis() as u64,
+                }))
+            } else {
+                None
+            }
+        };
+        if let Some(ev) = event {
+            let _ = state.event_tx.send(ev);
+        }
+    }
+}
+
+/// Watch the parent shell for liveness. Strategy: block on a read
+/// from stdin and exit when it returns 0 (EOF). The Mac/Windows
+/// shell never writes anything to our stdin while running, so the
+/// blocking read just sits there parked. The instant the shell
+/// process dies — gracefully via SIGTERM, ungracefully via SIGKILL,
+/// or via panic — the OS closes the write end of the pipe and our
+/// read returns 0.
+///
+/// Why this instead of PPID polling?
+///   - macOS GUI apps launched via `open` / launchd have a non-
+///     obvious reparent timing window: `ps` shows ppid=1 instantly,
+///     but `getppid()` inside the child can lag (observed: up to
+///     several seconds, sometimes not at all in a single test run).
+///     stdin EOF is detected by the kernel synchronously when the
+///     pipe's write end is closed, with no zombie/launchd nuance.
+///   - Works identically regardless of launch method (direct,
+///     `open`, double-click in Finder, Spotlight, `launchctl`,
+///     ssh forwarding).
+///   - Future Linux `cs runtime` case gets the same behaviour for
+///     free.
+///
+/// We use `libc::_exit` rather than `std::process::exit` so we skip
+/// Rust runtime cleanup (atexit, destructors). The whole point is to
+/// die fast and let the OS reclaim everything — there's nothing to
+/// flush.
+fn spawn_parent_watchdog() {
+    std::thread::Builder::new()
+        .name("parent-watchdog".into())
+        .spawn(move || {
+            tracing::info!("parent watchdog armed (stdin EOF detection)");
+            let mut buf = [0u8; 64];
+            loop {
+                // SAFETY: read(2) on fd 0 is safe; we only care
+                // about whether it returns 0 (EOF) or -1 (error).
+                let rv = unsafe {
+                    libc::read(
+                        0,
+                        buf.as_mut_ptr() as *mut libc::c_void,
+                        buf.len(),
+                    )
+                };
+                if rv <= 0 {
+                    // EOF (0) or error (-1) — parent gone.
+                    unsafe { libc::_exit(0) };
+                }
+                // The shell never writes to our stdin, so if we got
+                // bytes it's a misuse — drop them and keep watching.
+            }
+        })
+        .expect("spawn parent-watchdog thread");
+}
+
+/// Serve the SPA's index.html for any path that wasn't a real file
+/// under `--static-dir`. Hard-coded 200 (cf. main(): we want client
+/// router refresh-on-deep-link to look like a fresh visit, not a 404).
+async fn spa_index(path: PathBuf) -> Response {
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!(path = %path.display(), %e, "failed to read SPA index.html");
+            (StatusCode::INTERNAL_SERVER_ERROR, "index.html not readable").into_response()
+        }
+    }
 }
 
 fn try_open_last_project(state: &AppState) {

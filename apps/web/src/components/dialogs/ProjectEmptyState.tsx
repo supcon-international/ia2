@@ -14,7 +14,7 @@ export function ProjectEmptyState() {
         <div className="space-y-1">
           <div className="flex items-center gap-2 text-xs uppercase tracking-widest text-muted-foreground">
             <Box className="size-4" />
-            controlsoftware
+            IA2
           </div>
           <h1 className="text-2xl font-semibold tracking-tight">
             No project open

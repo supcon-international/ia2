@@ -1508,10 +1508,20 @@ function safeParse(source: string): Parsed {
     if (!obj || typeof obj !== "object" || !Array.isArray(obj.blocks)) {
       return { kind: "error", message: "missing `blocks` array" }
     }
-    // Round-trip through fbd-edit's parser so we always start from a
-    // well-shaped value. parseProgram is currently identical to
-    // JSON.parse + cast, but keeping the indirection lets us swap in
-    // stricter validation later without touching the editor.
+    // Normalise optional-but-required-on-frontend fields so the rest
+    // of this file can dereference `prog.outputs.length`, `block.inputs`,
+    // etc. without `undefined.length` crashes. Older project files on
+    // disk pre-date the "always serialize empty arrays" backend fix
+    // and may omit these fields entirely.
+    if (!Array.isArray(obj.outputs)) obj.outputs = []
+    if (Array.isArray(obj.blocks)) {
+      for (const b of obj.blocks) {
+        if (b && typeof b === "object" && !Array.isArray(b.inputs)) {
+          b.inputs = []
+        }
+      }
+    }
+    if (!Array.isArray(obj.variables)) obj.variables = []
     return { kind: "ok", program: parseProgram(JSON.stringify(obj)) }
   } catch (e) {
     return { kind: "error", message: String(e) }

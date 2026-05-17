@@ -1,14 +1,14 @@
 [Unit]
-Description=controlsoftware PLC runtime
+Description=IA2 PLC runtime
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 # Atomic deploys point `current` at the latest versioned dir; the runtime
 # binary + project dir always live under there.
-Environment=INSTALL_DIR=/opt/controlsoftware
-ExecStart=/opt/controlsoftware/current/runtime \
-  --project-dir /opt/controlsoftware/current/project \
+Environment=INSTALL_DIR=/opt/ia2
+ExecStart=/opt/ia2/current/runtime \
+  --project-dir /opt/ia2/current/project \
   --bind 127.0.0.1:13001
 
 # Restart on crash but back off if we're crash-looping (don't hammer the
@@ -23,13 +23,13 @@ StartLimitBurst=5
 KillSignal=SIGTERM
 TimeoutStopSec=10s
 
-# Logs go to journald — `journalctl -u controlsoftware -f` on the edge.
+# Logs go to journald — `journalctl -u ia2 -f` on the edge.
 StandardOutput=journal
 StandardError=journal
 
 # Run as root for now so EtherCAT (when wired) has CAP_NET_RAW. For Modbus-
 # only deployments, switch to a dedicated user:
-#   User=controlsoftware
+#   User=ia2
 #   AmbientCapabilities=
 # and remove the cap line below.
 User=root
@@ -42,7 +42,7 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 # Allow writes only under the install dir; everything else is read-only.
-ReadWritePaths=/opt/controlsoftware
+ReadWritePaths=/opt/ia2
 
 [Install]
 WantedBy=multi-user.target

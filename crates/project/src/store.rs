@@ -437,7 +437,7 @@ impl ProjectStore {
             host: host.into(),
             ssh_port: 22,
             ssh_user: String::new(),
-            install_dir: "/opt/controlsoftware".into(),
+            install_dir: "/opt/ia2".into(),
             runtime_port: 13001,
             notes: String::new(),
         };

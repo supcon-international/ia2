@@ -1,4 +1,4 @@
-# controlsoftware HTTP API
+# IA2 HTTP API
 
 **Audience:** AI agents (Claude Code, Cursor, Codex) and humans curling for diagnosis.
 
@@ -153,7 +153,7 @@ present.
 
 # Edge runtime API (separate process)
 
-The headless `controlsoftware-runtime` binary (running on the edge) exposes
+The headless `ia2-runtime` binary (running on the edge) exposes
 a small subset of the same surface, bound to `127.0.0.1` only:
 
 | Method | Path | Purpose |

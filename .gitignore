@@ -36,3 +36,10 @@ yarn-debug.log*
 
 # moon
 .moon/cache
+
+# Swift / Mac shell build artifacts
+apps/mac/.build/
+apps/mac/build/
+
+# Claude Code agent worktrees (per-session, not part of the repo)
+.claude/worktrees/

@@ -49,7 +49,7 @@ export function OpenProjectDialog({ trigger }: Props) {
           <Label htmlFor="project-path">Project path</Label>
           <Input
             id="project-path"
-            placeholder="/Users/you/Documents/controlsoftware/my-controller"
+            placeholder="/Users/you/Documents/IA2/my-controller"
             value={path}
             onChange={(e) => setPath(e.target.value)}
             onKeyDown={(e) => {

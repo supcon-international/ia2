@@ -18,7 +18,7 @@ edition = "2021"
 authors = []
 license = "Apache-2.0"
 publish = false
-repository = "https://github.com/supcon-international/controlsoftware"
+repository = "https://github.com/supcon-international/ia2"
 
 [workspace.dependencies]
 # async runtime
@@ -29,7 +29,10 @@ futures-util = "0.3"
 # http
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace"] }
+# `fs` lets the server host the built React app for desktop / single-binary
+# distribution (`server --static-dir apps/web/dist`). `cors` + `trace` are
+# the original feature set; keep them.
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 
 # serialization
 serde = { version = "1", features = ["derive"] }

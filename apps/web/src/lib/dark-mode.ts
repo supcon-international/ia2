@@ -10,12 +10,15 @@ import { useSyncExternalStore } from "react"
  * light regardless of the OS, and let the user override via the toggle
  * in the workbench header.
  *
- * Choice is persisted under `controlsoftware.theme` so the next reload
+ * Choice is persisted under `ia2.theme` so the next reload
  * stays in the user's mode of choice. SSR-safe (no window touch during
- * `useState` initial value).
+ * `useState` initial value). One-time migration: if the legacy
+ * `controlsoftware.theme` key exists, copy it across so users don't
+ * lose their dark-mode preference across the rename.
  */
 
-const STORAGE_KEY = "controlsoftware.theme"
+const STORAGE_KEY = "ia2.theme"
+const LEGACY_STORAGE_KEY = "controlsoftware.theme"
 type Theme = "light" | "dark"
 
 /** Read once at module load so the very first paint matches the user's
@@ -23,7 +26,15 @@ type Theme = "light" | "dark"
  * synchronously in the bundle's top-level. */
 if (typeof window !== "undefined") {
   try {
-    const persisted = window.localStorage.getItem(STORAGE_KEY) as Theme | null
+    let persisted = window.localStorage.getItem(STORAGE_KEY) as Theme | null
+    if (persisted === null) {
+      const legacy = window.localStorage.getItem(LEGACY_STORAGE_KEY) as Theme | null
+      if (legacy === "dark" || legacy === "light") {
+        window.localStorage.setItem(STORAGE_KEY, legacy)
+        window.localStorage.removeItem(LEGACY_STORAGE_KEY)
+        persisted = legacy
+      }
+    }
     if (persisted === "dark") {
       document.documentElement.classList.add("dark")
     } else {

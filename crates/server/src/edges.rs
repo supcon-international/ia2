@@ -3,7 +3,7 @@
 //! Trust model:
 //!  - The dev machine has `ssh` available and resolves `host` via
 //!    `~/.ssh/config` (keys, agent, jump hosts).
-//!  - The edge box has `controlsoftware-runtime` either pre-installed at
+//!  - The edge box has `ia2-runtime` either pre-installed at
 //!    `<install_dir>/current/runtime` (after `infra/install.sh`) or it's
 //!    pushed by deploy.
 //!  - Remote network access to the runtime's monitor server is **only**
@@ -186,7 +186,7 @@ pub enum DeployError {
 /// Deploy a project directory + optional runtime binary to one edge.
 ///
 /// `project_dir`     filesystem path of the project on the dev machine.
-/// `runtime_binary`  path to a built `controlsoftware-runtime` binary
+/// `runtime_binary`  path to a built `ia2-runtime` binary
 ///                   for the edge's architecture. Optional — when None,
 ///                   the deploy reuses whatever binary is already under
 ///                   `<install_dir>/current/runtime`.
@@ -319,10 +319,10 @@ echo "VERSION=$TS"
 # Reload the unit if systemd is available; tolerate environments without
 # systemd (handy in containers / tests).
 if command -v systemctl >/dev/null 2>&1; then
-  if systemctl is-enabled --quiet controlsoftware 2>/dev/null; then
-    sudo systemctl restart controlsoftware || systemctl --user restart controlsoftware || true
+  if systemctl is-enabled --quiet ia2 2>/dev/null; then
+    sudo systemctl restart ia2 || systemctl --user restart ia2 || true
   else
-    echo "(controlsoftware.service not enabled — install it once via infra/install.sh)" >&2
+    echo "(ia2.service not enabled — install it once via infra/install.sh)" >&2
   fi
 fi
 "#,

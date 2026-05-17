@@ -1,4 +1,4 @@
-//! `cs` — agent-first command-line interface for controlsoftware.
+//! `cs` — agent-first command-line interface for IA2.
 //!
 //! Every workflow that an engineer or agent would do **before** the
 //! runtime starts is wired here: validate, transpile, compile, inspect.
@@ -31,15 +31,18 @@ use project::{PouLanguage, ProjectStore};
 //   Top-level command surface
 // =================================================================
 
-/// `cs` — controlsoftware CLI. Static analysis, transpile, project
-/// inspection. Online runtime operations stay on the HTTP API.
+/// `cs` — IA2 CLI. Static analysis, transpile, project inspection.
+/// Online runtime operations stay on the HTTP API. The binary is
+/// called `cs` (two letters, no shift, no digit) rather than `ia2`
+/// for shell ergonomics; rename via shell alias if you'd rather
+/// match the product name.
 #[derive(Parser, Debug)]
 #[command(
     name = "cs",
     version,
-    about = "controlsoftware CLI — agent-first static analysis & project tools",
+    about = "IA2 CLI — agent-first static analysis & project tools",
     long_about = "\
-controlsoftware CLI — agent-first static analysis & project tools.
+IA2 CLI (`cs`) — agent-first static analysis & project tools.
 
 When to use this binary:
   - Before runtime starts: validate, transpile, compile, inspect.
@@ -127,6 +130,42 @@ enum Command {
     #[command(subcommand)]
     Project(ProjectCmd),
 
+    /// CRUD on POU files in the open project — wraps the HTTP API so
+    /// agents don't have to hand-roll JSON requests and don't have to
+    /// remember the `language` filename convention.
+    ///
+    /// All subcommands require a server with an open project; use
+    /// `cs project open` first if nothing's loaded.
+    #[command(subcommand)]
+    Pou(PouCmd),
+
+    /// Start a compiled project / program on the running server.
+    ///
+    /// Three flavours, mirroring the IDE's Run buttons:
+    ///   * `cs run`                       — schedule everything in tasks.toml
+    ///   * `cs run --program NAME`        — pick one PROGRAM by name from the project
+    ///   * `cs run --program NAME --file PATH` — isolated run of a stand-alone .st file
+    ///
+    /// Returns when the runtime accepts the command. Watch live values with
+    /// `cs runtime status` or `curl /api/runtime/snapshot`.
+    #[command(verbatim_doc_comment)]
+    Run {
+        /// PROGRAM name to run (must be in tasks.toml or in `--file`).
+        #[arg(long)]
+        program: Option<String>,
+        /// File path for an isolated, off-task run. Requires `--program`.
+        #[arg(long)]
+        file: Option<PathBuf>,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+
+    /// Stop the running runtime. No-op if nothing is running.
+    Stop {
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+
     /// Print the full RST documentation for an ironplc problem code.
     ///
     /// Looks up `P0001` / `P4007` / `P9001` etc. in ironplc's embedded
@@ -211,9 +250,20 @@ enum RuntimeCmd {
     /// Pin a variable to a value — applied every scan until unforced.
     /// Use a one-shot `cs runtime write` if you want the program to
     /// be able to overwrite it next cycle.
+    ///
+    /// `value` is a human-readable string; the CLI fetches the
+    /// variable's type from the live snapshot and bit-packs it
+    /// appropriately:
+    ///   * BOOL : "TRUE" / "FALSE" / "1" / "0"
+    ///   * INT  : decimal integer (32-bit signed)
+    ///   * REAL : decimal float — IEEE-754 bit pattern is sent
+    ///
+    /// Falls back to int-then-float guessing when the runtime hasn't
+    /// reported a snapshot yet.
+    #[command(verbatim_doc_comment)]
     Force {
         name: String,
-        value: i32,
+        value: String,
         #[arg(long, default_value = "http://127.0.0.1:3001")]
         server: String,
     },
@@ -224,10 +274,11 @@ enum RuntimeCmd {
         server: String,
     },
     /// One-shot write (overwritable by the program next cycle). For a
-    /// persistent override use `force`.
+    /// persistent override use `force`. Same value-encoding rules as
+    /// `force`.
     Write {
         name: String,
-        value: i32,
+        value: String,
         #[arg(long, default_value = "http://127.0.0.1:3001")]
         server: String,
     },
@@ -261,15 +312,107 @@ enum ProjectCmd {
         #[arg(long)]
         json: bool,
     },
+
+    /// Create a new project under `~/Documents/IA2/<name>/`.
+    Create {
+        name: String,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+
+    /// Open an existing project by absolute path; becomes the active
+    /// project on the server until `close` (or another `open`) replaces it.
+    Open {
+        path: PathBuf,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+
+    /// Close the currently open project. The runtime is stopped and
+    /// state caches are cleared.
+    Close {
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum PouCmd {
+    /// Create an empty POU file in the open project's `pous/` dir.
+    /// The server seeds a minimal compileable skeleton for the chosen
+    /// language; agents typically `cs pou save` real content right after.
+    Create {
+        /// Project-relative slash-path under `pous/`, no extension.
+        path: String,
+        /// IEC language. Determines the on-disk extension:
+        /// `st` → `.st`, `ld` → `.ld.json`, `fbd` → `.fbd.json`, `sfc` → `.sfc.json`.
+        #[arg(long, value_parser = ["st","ld","fbd","sfc"])]
+        language: String,
+        /// IEC POU type. Most agents create PROGRAMs.
+        #[arg(long, default_value = "program",
+              value_parser = ["program","function_block","function"])]
+        r#type: String,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+
+    /// Overwrite a POU's source. Body is read from `--from <file>`,
+    /// `--stdin`, or — if neither is given — from stdin.
+    Save {
+        /// POU path (same form as `cs pou create`).
+        path: String,
+        /// Read source from this file. Useful when the agent already
+        /// has the content on disk and wants a one-shot push.
+        #[arg(long)]
+        from: Option<PathBuf>,
+        /// Read source from stdin explicitly. Default behaviour if
+        /// neither `--from` nor `--stdin` is passed and stdin isn't a TTY.
+        #[arg(long, conflicts_with = "from")]
+        stdin: bool,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+
+    /// Delete a POU file. The runtime is NOT stopped — if the POU was
+    /// part of the running schedule, behaviour after delete is
+    /// undefined until next `cs run`.
+    Delete {
+        path: String,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
 }
 
 fn main() {
     let args = Cli::parse();
+
+    // Heartbeat: if this command is going to mutate server state,
+    // announce to the IDE *before* dispatching. The IDE shows a
+    // "takeover" overlay while at least one CLI session is active
+    // and aged-out after a few seconds of silence. Best-effort — a
+    // server timeout / 404 doesn't fail the command, only suppresses
+    // the visual cue.
+    if let Some((server, label)) = announce_target(&args.command) {
+        announce_agent(server, label);
+    }
+
     let result = match args.command {
         Command::Check { files, json, explain } => cmd_check(&files, json, explain),
         Command::Transpile { file, with_map } => cmd_transpile(&file, with_map),
         Command::Project(ProjectCmd::Check { path, json }) => cmd_project_check(&path, json),
         Command::Project(ProjectCmd::Info { path, json }) => cmd_project_info(&path, json),
+        Command::Project(ProjectCmd::Create { name, server }) => {
+            cmd_project_create(&name, &server)
+        }
+        Command::Project(ProjectCmd::Open { path, server }) => {
+            cmd_project_open(&path, &server)
+        }
+        Command::Project(ProjectCmd::Close { server }) => cmd_project_close(&server),
+        Command::Pou(p) => cmd_pou(p),
+        Command::Run { program, file, server } => {
+            cmd_run(program.as_deref(), file.as_deref(), &server)
+        }
+        Command::Stop { server } => cmd_stop(&server),
         Command::Explain { code } => cmd_explain(&code),
         Command::Symbols { file, name, json } => cmd_symbols(&file, name.as_deref(), json),
         Command::Runtime(r) => cmd_runtime(r),
@@ -605,6 +748,150 @@ fn cmd_explain(code: &str) -> Result<i32> {
 }
 
 // =================================================================
+//   Subcommand: project create / open / close
+// =================================================================
+//
+// Wrap the HTTP API so agents call `cs project create foo` instead
+// of `curl -X POST localhost:3001/api/projects -d '{"name":"foo"}'`.
+// Symmetric with `cs project info / check` which already operate on
+// project directories.
+
+fn cmd_project_create(name: &str, server: &str) -> Result<i32> {
+    let resp = post_json(
+        &format!("{server}/api/projects"),
+        &serde_json::json!({ "name": name }),
+    )?;
+    println!("{}", serde_json::to_string_pretty(&resp)?);
+    Ok(0)
+}
+
+fn cmd_project_open(path: &Path, server: &str) -> Result<i32> {
+    let abs = path
+        .canonicalize()
+        .with_context(|| format!("resolving {}", path.display()))?;
+    let resp = post_json(
+        &format!("{server}/api/projects/open"),
+        &serde_json::json!({ "path": abs.display().to_string() }),
+    )?;
+    println!("{}", serde_json::to_string_pretty(&resp)?);
+    Ok(0)
+}
+
+fn cmd_project_close(server: &str) -> Result<i32> {
+    let resp = post_json(&format!("{server}/api/projects/close"), &())?;
+    println!("{}", serde_json::to_string_pretty(&resp)?);
+    Ok(0)
+}
+
+// =================================================================
+//   Subcommand: pou create / save / delete
+// =================================================================
+
+fn cmd_pou(cmd: PouCmd) -> Result<i32> {
+    match cmd {
+        PouCmd::Create {
+            path,
+            language,
+            r#type,
+            server,
+        } => {
+            let resp = post_json(
+                &format!("{server}/api/pous"),
+                // Server's CreatePouRequest uses `type` (renamed
+                // from Rust `type_` via serde). Language values match
+                // the on-disk extensions: st / ld / fbd / sfc.
+                &serde_json::json!({
+                    "path": path,
+                    "type": r#type,
+                    "language": language,
+                }),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+            Ok(0)
+        }
+        PouCmd::Save {
+            path,
+            from,
+            stdin,
+            server,
+        } => {
+            let source = if let Some(file) = from {
+                std::fs::read_to_string(&file)
+                    .with_context(|| format!("reading {}", file.display()))?
+            } else {
+                // Read stdin (whether `--stdin` is set or it's the
+                // implicit default).
+                let _ = stdin;
+                let mut s = String::new();
+                use std::io::Read;
+                std::io::stdin()
+                    .read_to_string(&mut s)
+                    .context("reading source from stdin")?;
+                s
+            };
+            // `save_pou` accepts text/plain, not JSON — wire format
+            // matches the IDE editor's auto-save path.
+            let url = format!("{server}/api/pous/{}", url_encode(&path));
+            let resp = ureq::put(&url)
+                .set("Content-Type", "text/plain")
+                .send_string(&source)
+                .map_err(|e| anyhow::anyhow!("PUT {url}: {e}"))?;
+            let value: serde_json::Value = resp
+                .into_json()
+                .map_err(|e| anyhow::anyhow!("decode JSON from {url}: {e}"))?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            Ok(0)
+        }
+        PouCmd::Delete { path, server } => {
+            let resp = delete_json(&format!(
+                "{server}/api/pous/{}",
+                url_encode(&path)
+            ))?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+            Ok(0)
+        }
+    }
+}
+
+// =================================================================
+//   Subcommand: run / stop
+// =================================================================
+
+fn cmd_run(program: Option<&str>, file: Option<&Path>, server: &str) -> Result<i32> {
+    // The server distinguishes three run shapes by the presence of
+    // `program` / `file_path`. Mirror that here.
+    let body = match (program, file) {
+        (None, None) => serde_json::json!({ "kind": "project" }),
+        (Some(name), None) => serde_json::json!({
+            "kind": "isolated",
+            "program": name,
+        }),
+        (Some(name), Some(path)) => {
+            let abs = path
+                .canonicalize()
+                .with_context(|| format!("resolving {}", path.display()))?;
+            serde_json::json!({
+                "kind": "isolated",
+                "program": name,
+                "file_path": abs.display().to_string(),
+            })
+        }
+        (None, Some(_)) => {
+            anyhow::bail!("--file requires --program to name the PROGRAM inside it")
+        }
+    };
+    let resp = post_json(&format!("{server}/api/run"), &body)?;
+    println!("{}", serde_json::to_string_pretty(&resp)?);
+    Ok(0)
+}
+
+fn cmd_stop(server: &str) -> Result<i32> {
+    let resp = post_json(&format!("{server}/api/stop"), &())?;
+    println!("{}", serde_json::to_string_pretty(&resp)?);
+    Ok(0)
+}
+
+// =================================================================
 //   Subcommand: symbols
 // =================================================================
 
@@ -699,7 +986,8 @@ fn cmd_runtime(cmd: RuntimeCmd) -> Result<i32> {
             Ok(0)
         }
         RuntimeCmd::Force { name, value, server } => {
-            let body = serde_json::json!({ "value": value });
+            let encoded = parse_value(&server, &name, &value)?;
+            let body = serde_json::json!({ "value": encoded });
             let resp = post_json(
                 &format!("{server}/api/runtime/forces/{}", url_encode(&name)),
                 &body,
@@ -716,7 +1004,8 @@ fn cmd_runtime(cmd: RuntimeCmd) -> Result<i32> {
             Ok(0)
         }
         RuntimeCmd::Write { name, value, server } => {
-            let body = serde_json::json!({ "value": value });
+            let encoded = parse_value(&server, &name, &value)?;
+            let body = serde_json::json!({ "value": encoded });
             let resp = post_json(
                 &format!("{server}/api/runtime/variables/{}", url_encode(&name)),
                 &body,
@@ -725,6 +1014,200 @@ fn cmd_runtime(cmd: RuntimeCmd) -> Result<i32> {
             Ok(0)
         }
     }
+}
+
+/// Convert a human-typed value into the i32 the runtime wire protocol
+/// expects, type-aware via the runtime's snapshot.
+///
+/// Why: the bridge stores all variables — BOOL, INT, REAL, … — in
+/// 32-bit slots and the force/write endpoint takes a raw `i32`. For
+/// REAL the i32 is the IEEE-754 bit pattern of the float, NOT the
+/// integer value. Without type info, `cs runtime force x 50.0` would
+/// have to send `1112014848`. This helper does the conversion so
+/// humans (and agents) can use natural notation.
+///
+/// Strategy:
+///   1. If the value is obviously BOOL ("true"/"false" case-insensitive)
+///      → 0 / 1.
+///   2. Otherwise fetch `/api/runtime/snapshot`, look up the variable,
+///      encode based on its `type_name` (REAL → bit-pack, INT-family
+///      → as-is).
+///   3. If the snapshot doesn't include the variable (runtime not
+///      running yet, or the variable lives in a POU instance the
+///      bridge's snapshot extractor doesn't traverse — a known bridge
+///      bug as of 2026-05), fall back to format-based sniffing: a
+///      decimal point implies REAL, otherwise INT. Print a stderr
+///      note so users know we guessed.
+fn parse_value(server: &str, name: &str, raw: &str) -> Result<i32> {
+    // BOOL shortcuts. Case-insensitive because TRUE/FALSE are the IEC
+    // canonical form but agents type either.
+    match raw.to_ascii_lowercase().as_str() {
+        "true" => return Ok(1),
+        "false" => return Ok(0),
+        _ => {}
+    }
+
+    let var_type = match snapshot_var_type(server, name) {
+        Ok(t) => t,
+        Err(_) => None,
+    };
+
+    match var_type.as_deref() {
+        Some("BOOL") => {
+            // We already handled TRUE/FALSE above; accept 0/1 too.
+            let n: i32 = raw.parse().with_context(|| {
+                format!("value `{raw}` doesn't fit BOOL (expected TRUE/FALSE/1/0)")
+            })?;
+            Ok(if n != 0 { 1 } else { 0 })
+        }
+        Some("REAL") => {
+            let f: f32 = raw.parse().with_context(|| {
+                format!("value `{raw}` doesn't parse as REAL (32-bit float)")
+            })?;
+            Ok(f.to_bits() as i32)
+        }
+        Some("LREAL") => {
+            anyhow::bail!(
+                "LREAL (64-bit float) doesn't fit the 32-bit force wire — \
+                 use a REAL variable, or write the low 32 bits manually"
+            )
+        }
+        Some(int_type)
+            if matches!(
+                int_type,
+                "INT" | "DINT" | "SINT" | "UINT" | "UDINT" | "USINT" | "BYTE" | "WORD" | "DWORD"
+            ) =>
+        {
+            let n: i64 = raw.parse().with_context(|| {
+                format!("value `{raw}` doesn't parse as integer for {int_type}")
+            })?;
+            // Wire is i32; for unsigned and larger types we just bit-
+            // truncate. Users wanting precise unsigned semantics can
+            // pass the i32 reinterpretation directly.
+            Ok(n as i32)
+        }
+        Some(other) => anyhow::bail!(
+            "don't know how to encode value `{raw}` for type {other} (yet)"
+        ),
+        None => {
+            // No type info — guess from format and warn loudly.
+            if raw.contains('.') || raw.contains('e') || raw.contains('E') {
+                let f: f32 = raw.parse().with_context(|| {
+                    format!("value `{raw}` looks like a float but doesn't parse as f32")
+                })?;
+                eprintln!(
+                    "note: runtime didn't expose `{name}`'s type — guessed REAL from value format"
+                );
+                Ok(f.to_bits() as i32)
+            } else {
+                let n: i32 = raw.parse().with_context(|| {
+                    format!(
+                        "value `{raw}` doesn't parse as i32; if you meant REAL, use `{raw}.0`"
+                    )
+                })?;
+                eprintln!(
+                    "note: runtime didn't expose `{name}`'s type — assumed INT family"
+                );
+                Ok(n)
+            }
+        }
+    }
+}
+
+/// Best-effort variable type lookup via `/api/runtime/snapshot`. The
+/// snapshot returns one record per live variable with `type_name`. If
+/// the runtime isn't running, or the bridge's extractor doesn't
+/// include this variable's POU, return Ok(None) and let the caller
+/// fall back to format-sniffing.
+fn snapshot_var_type(server: &str, name: &str) -> Result<Option<String>> {
+    let snap = match get_json(&format!("{server}/api/runtime/snapshot")) {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
+    let vars = match snap.get("vars").and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => return Ok(None),
+    };
+    for v in vars {
+        if v.get("name").and_then(|n| n.as_str()) == Some(name) {
+            return Ok(v
+                .get("type_name")
+                .and_then(|t| t.as_str())
+                .map(String::from));
+        }
+    }
+    Ok(None)
+}
+
+// =================================================================
+//   Agent heartbeat
+// =================================================================
+//
+// Short-lived `cs` commands ping POST /api/agent/heartbeat at start.
+// The server keeps the "agent active" flag set for ~3 s after the
+// last heartbeat; the IDE renders its takeover overlay while it's
+// set. Read-only commands (check, info, status, symbols, explain,
+// transpile) deliberately skip the heartbeat — querying state isn't
+// "operating" and shouldn't trigger the overlay.
+
+/// Return `Some((server, label))` for commands that should announce
+/// before dispatching, `None` for read-only commands. The label is
+/// what shows up in the IDE banner ("Agent in control · pou create").
+fn announce_target(cmd: &Command) -> Option<(&str, &'static str)> {
+    match cmd {
+        Command::Check { .. }
+        | Command::Transpile { .. }
+        | Command::Explain { .. }
+        | Command::Symbols { .. }
+        | Command::Project(ProjectCmd::Check { .. })
+        | Command::Project(ProjectCmd::Info { .. })
+        | Command::Runtime(RuntimeCmd::Status { .. }) => None,
+
+        Command::Project(ProjectCmd::Create { server, .. }) => Some((server, "project create")),
+        Command::Project(ProjectCmd::Open { server, .. }) => Some((server, "project open")),
+        Command::Project(ProjectCmd::Close { server }) => Some((server, "project close")),
+
+        Command::Pou(PouCmd::Create { server, .. }) => Some((server, "pou create")),
+        Command::Pou(PouCmd::Save { server, .. }) => Some((server, "pou save")),
+        Command::Pou(PouCmd::Delete { server, .. }) => Some((server, "pou delete")),
+
+        Command::Run { server, .. } => Some((server, "run")),
+        Command::Stop { server } => Some((server, "stop")),
+
+        Command::Runtime(RuntimeCmd::Pause { server }) => Some((server, "runtime pause")),
+        Command::Runtime(RuntimeCmd::Resume { server }) => Some((server, "runtime resume")),
+        Command::Runtime(RuntimeCmd::Step { server, .. }) => Some((server, "runtime step")),
+        Command::Runtime(RuntimeCmd::Force { server, .. }) => Some((server, "runtime force")),
+        Command::Runtime(RuntimeCmd::Unforce { server, .. }) => Some((server, "runtime unforce")),
+        Command::Runtime(RuntimeCmd::Write { server, .. }) => Some((server, "runtime write")),
+    }
+}
+
+/// Per-process session id. Generated lazily so commands that don't
+/// announce don't pay the cost. Format: `cs-<pid>-<nanos>` — random
+/// enough for "tell agents apart" without pulling the uuid crate.
+fn session_id() -> &'static str {
+    use std::sync::OnceLock;
+    static SESSION: OnceLock<String> = OnceLock::new();
+    SESSION.get_or_init(|| {
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("cs-{pid}-{nanos:x}")
+    })
+}
+
+/// Fire-and-forget heartbeat. Short timeout because we'd rather miss
+/// the visual cue than hold up a command's actual work.
+fn announce_agent(server: &str, command_label: &str) {
+    let _ = ureq::post(&format!("{server}/api/agent/heartbeat"))
+        .timeout(std::time::Duration::from_millis(300))
+        .send_json(serde_json::json!({
+            "command": command_label,
+            "session": session_id(),
+        }));
 }
 
 /// Tiny URL-component escaper. Variable names should be IEC identifiers

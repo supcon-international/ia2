@@ -1,5 +1,5 @@
 [package]
-name = "controlsoftware-cli"
+name = "ia2-cli"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

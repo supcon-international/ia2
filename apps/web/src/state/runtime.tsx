@@ -8,6 +8,7 @@ import {
   type ReactNode,
 } from "react"
 import type { AppEvent } from "@/types/generated/AppEvent"
+import type { MutationEvent } from "@/types/generated/MutationEvent"
 import type { CheckDiagnostic } from "@/types/generated/CheckDiagnostic"
 import type { Device } from "@/types/generated/Device"
 import type { Edge } from "@/types/generated/Edge"
@@ -21,6 +22,8 @@ import type { ProjectTree } from "@/types/generated/ProjectTree"
 import type { Protocol } from "@/types/generated/Protocol"
 import type { Tasks } from "@/types/generated/Tasks"
 import type { VarSnapshot } from "@/types/generated/VarSnapshot"
+import { agentActivityStore } from "@/state/agent-activity"
+import { invalidationBus, Topic } from "@/state/invalidation"
 import {
   attachEdge as apiAttachEdge,
   closeProject as apiCloseProject,
@@ -43,6 +46,7 @@ import {
   fetchProject,
   fetchProjects as apiFetchProjects,
   fetchRuntimeStatus,
+  fetchTasks,
   migrateTasks as apiMigrateTasks,
   openProject as apiOpenProject,
   runProgram,
@@ -56,6 +60,46 @@ import {
 import { LspClient } from "@/lib/lsp-client"
 
 export type View = "app" | "device" | "iomap" | "edge" | "tasks"
+
+/**
+ * Handle a single `Mutation` event from `/api/events`.
+ *
+ * Two outputs only — invalidate the matching cache topic, and (if
+ * a new POU was created) auto-jump the editor onto it.
+ *
+ * Toasts used to live here but were removed once the agent takeover
+ * overlay landed. The overlay is the canonical surface for
+ * "something happened in the background." When no agent is active,
+ * the only things firing mutations are the user's own clicks in the
+ * IDE — toasting those was always redundant noise.
+ *
+ * Auto-jump policy (pou_created): jump to the new POU iff the
+ * editor is currently empty OR clean. Never disturb a user with
+ * unsaved work — they need to navigate manually in that case.
+ */
+function handleMutationEvent(
+  event: MutationEvent,
+  currentPouRef: React.MutableRefObject<Pou | null>,
+  sourceRef: React.MutableRefObject<string>,
+  selectPouRef: React.MutableRefObject<
+    ((path: string) => Promise<void>) | null
+  >,
+): void {
+  // (1) Fan out cache invalidation. Any hook subscribed via
+  // useInvalidate refetches its own slice.
+  invalidationBus.emit(event.topic)
+
+  // (2) Auto-jump for newly-created POUs. Per-POU refetch on
+  // updates is handled by the dedicated subscription effect in
+  // RuntimeProvider (`Topic.pou(currentPou.path)`).
+  if (event.detail.kind === "pou_created") {
+    const cur = currentPouRef.current
+    const dirty = !!cur && sourceRef.current !== cur.source
+    if (!cur || !dirty) {
+      void selectPouRef.current?.(event.detail.path)
+    }
+  }
+}
 
 /** Which edge (if any) the IDE is currently attached to. When attached,
  * the SSE source switches from the local bridge to the edge's runtime
@@ -191,6 +235,20 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   const [running, setRunning] = useState<RunningInfo>(null)
 
   const esRef = useRef<EventSource | null>(null)
+
+  // Refs mirroring state that the SSE Mutation handler needs to read
+  // *at event time* without retearing the EventSource on every
+  // keystroke. Plain `currentPou`/`source` as effect deps would
+  // rebuild the connection ~50× per minute while the user types.
+  const currentPouRef = useRef<Pou | null>(null)
+  const sourceRef = useRef("")
+  const selectPouRef = useRef<((path: string) => Promise<void>) | null>(null)
+  useEffect(() => {
+    currentPouRef.current = currentPou
+  }, [currentPou])
+  useEffect(() => {
+    sourceRef.current = source
+  }, [source])
 
   // ---------------- Bootstrap ----------------
 
@@ -328,6 +386,23 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
             case "error":
               setError(ev.data)
               break
+            case "mutation":
+              handleMutationEvent(
+                ev.data,
+                currentPouRef,
+                sourceRef,
+                selectPouRef,
+              )
+              break
+            case "agent_activity":
+              // Feed the agent-takeover store so any subscribing
+              // component (TakeoverOverlay, Banner) re-renders.
+              agentActivityStore.ingest({
+                active: ev.data.active,
+                command: ev.data.command,
+                session: ev.data.session,
+              })
+              break
           }
         }
       } catch {
@@ -368,6 +443,82 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     lspRef.current?.setSource(source)
   }, [source])
+
+  // ---------------- Invalidation bus subscriptions ----------------
+  //
+  // The SSE message handler emits to `invalidationBus` on every
+  // server-side `Mutation` event. Here we wire each topic to the
+  // matching refetch in this provider. Effects run once (mount) and
+  // rely on stable refs for the actual fetchers so we don't
+  // re-subscribe on every state update.
+
+  const refreshProjectRef = useRef<() => Promise<void>>(() => Promise.resolve())
+  useEffect(() => {
+    refreshProjectRef.current = refreshProject
+  }, [refreshProject])
+
+  useEffect(() => {
+    const subs = [
+      invalidationBus.subscribe(Topic.PROJECT, () => {
+        void refreshProjectRef.current()
+      }),
+      invalidationBus.subscribe(Topic.PROJECT_META, () => {
+        // Re-load both the open project state AND the available list
+        // (a project_created event from another client should show
+        // up in the picker).
+        void refreshProjectRef.current()
+        void apiFetchProjects()
+          .then(setAvailableProjects)
+          .catch(() => {})
+      }),
+      invalidationBus.subscribe(Topic.IOMAP, () => {
+        void fetchIomap().then(setIomap).catch(() => {})
+      }),
+      invalidationBus.subscribe(Topic.TASKS, () => {
+        void fetchTasks().then(setTasks).catch(() => {})
+      }),
+      invalidationBus.subscribe(Topic.DEVICES, () => {
+        // Devices show up in the project tree; refresh that. Per-
+        // device editor refetches via the device:<name> topic.
+        void refreshProjectRef.current()
+      }),
+      invalidationBus.subscribe(Topic.EDGES, () => {
+        void refreshProjectRef.current()
+      }),
+    ]
+    return () => {
+      subs.forEach((u) => u())
+    }
+  }, [])
+
+  // Per-POU live-reload. Subscribes to `pou:<currentPou.path>` only
+  // for as long as the editor is on that POU; tears down when the
+  // user switches POUs. Solves the race where an auto-jump's
+  // in-flight fetchPou is still resolving when the agent's
+  // `pou_updated` mutation arrives — the subscription is established
+  // *after* setCurrentPou completes, so the refetch always sees the
+  // newest source on disk. If the local buffer has unsaved edits
+  // we deliberately skip the silent refetch (the SSE handler will
+  // surface a Reload toast instead).
+  useEffect(() => {
+    const path = currentPou?.path
+    if (!path) return
+    return invalidationBus.subscribe(Topic.pou(path), () => {
+      // Re-read the current dirty state via refs to avoid stale
+      // closure values — `currentPou` and `source` snapshot at
+      // subscribe time would mis-classify rapid edits.
+      const cur = currentPouRef.current
+      if (!cur || cur.path !== path) return
+      if (sourceRef.current !== cur.source) return  // dirty — let toast handle it
+      void fetchPou(path)
+        .then((fresh) => {
+          if (currentPouRef.current?.path !== path) return  // user moved away
+          setCurrentPou(fresh)
+          setSource(fresh.source)
+        })
+        .catch(() => {})
+    })
+  }, [currentPou?.path])
 
   // ---------------- Project actions ----------------
 
@@ -426,6 +577,12 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       setError(String(e))
     }
   }, [])
+
+  // Mirror selectPou into the ref so the SSE Mutation handler (which
+  // lives outside React's render scope) can call the latest version.
+  useEffect(() => {
+    selectPouRef.current = selectPou
+  }, [selectPou])
 
   const selectDevice = useCallback(async (name: string) => {
     setError(null)

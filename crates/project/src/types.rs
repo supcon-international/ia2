@@ -348,7 +348,7 @@ pub struct Edge {
     #[serde(default)]
     pub ssh_user: String,
     /// Absolute path on the edge box where the runtime + project versions
-    /// live. Convention: `/opt/controlsoftware`. The deploy script lays out
+    /// live. Convention: `/opt/ia2`. The deploy script lays out
     /// `versions/<timestamp>/` and atomically swaps `current -> …`.
     #[serde(default = "default_install_dir")]
     pub install_dir: String,
@@ -367,7 +367,7 @@ fn default_ssh_port() -> u16 {
 }
 
 fn default_install_dir() -> String {
-    "/opt/controlsoftware".to_string()
+    "/opt/ia2".to_string()
 }
 
 fn default_runtime_port() -> u16 {

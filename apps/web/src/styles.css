@@ -133,7 +133,8 @@
 
 html,
 body,
-#app {
+#app,
+#root {
   min-height: 100%;
   height: 100%;
 }
@@ -141,6 +142,193 @@ body,
 body {
   margin: 0;
   @apply bg-background text-foreground;
+  /*
+   * Native-feel pass (cf. native-feel-cross-platform-desktop / 03
+   * § C.1, C.2, C.4): the things that quietly tell a user "this is
+   * a webpage."
+   *
+   *  - cursor: default     — native rows/buttons don't change cursor
+   *                          on hover. Opt back in only for true
+   *                          drag handles or text edit areas.
+   *  - user-select: none   — system-style labels are not selectable;
+   *                          Monaco / source views / output panes
+   *                          re-enable with `.cs-selectable`.
+   *  - overscroll: contain — kills the rubber-band on inner scrollers
+   *                          that leaks the document-scroll feel.
+   *  - tap highlight off   — no iOS-style blue flash on touch.
+   *  - smooth-scroll off   — `scroll-behavior: auto` is the native
+   *                          default; web frameworks sometimes flip
+   *                          it to 'smooth' which feels laggy.
+   */
+  cursor: default;
+  user-select: none;
+  -webkit-user-select: none;
+  overscroll-behavior: contain;
+  -webkit-tap-highlight-color: transparent;
+  scroll-behavior: auto;
+}
+
+/* Opt back into text selection for surfaces where the user really does
+ * want to copy text — source editors, output logs, the diagnostics
+ * panel. Wherever this is added, also re-enable text cursor so the
+ * affordance matches the behaviour. */
+.cs-selectable,
+.cs-selectable * {
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+}
+
+/* True drag handles — flip the cursor back to grab. Apply via class
+ * rather than per-element so the contract is explicit. */
+.cs-draggable {
+  cursor: grab;
+}
+.cs-draggable:active {
+  cursor: grabbing;
+}
+
+/* Monaco bakes its own cursor / selection. Don't fight it — let the
+ * editor surface re-enable everything underneath. */
+.monaco-editor,
+.monaco-editor * {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* Honor system-reduced-motion. Native apps already obey this; if the
+ * user has it on, our animations should compress to ~instant.
+ * (Cf. survival guide C.6.)
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* If the host shell injects a CSS-default `view-transition` (it
+ * doesn't today, but TanStack Router or a stray library might at any
+ * point), kill the cross-fade. Native windows cut, they don't fade.
+ * (Cf. survival guide A.8.)
+ */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+
+/* ---- Agent takeover overlay ----------------------------------------
+ *
+ * Composed of two layers stacked on top of each other (both rendered
+ * by TakeoverOverlay.tsx → BorderGlow):
+ *
+ *   1. .ia2-takeover-breath — A fixed-position div that "breathes":
+ *      a 6px inset ring + deep soft halo. Pulses opacity / thickness
+ *      together on a 2.4s cycle. Slow enough not to read as
+ *      seizure-y; fast enough to communicate "alive".
+ *
+ *   2. .ia2-takeover-comet  — A second fixed div behind the breath
+ *      layer, with a conic-gradient that has a bright "spotlight"
+ *      arc and is fully transparent elsewhere. We then mask out the
+ *      centre so only a perimeter ring is visible. The whole thing
+ *      rotates at 6s/turn, producing a traveling highlight that
+ *      reads as "something purposeful is moving around the window".
+ *
+ * Why both: the breath alone is too easy to mistake for a subtle
+ * accent. The comet alone reads as a single moving object, less
+ * "presence" than "loading spinner". Together they say "live
+ * agent activity here", clearly, without being garish.
+ *
+ * The conic-gradient relies on @property which is in Safari 16.4+
+ * (WKWebView ≥ macOS 13.3) — same baseline we already require for
+ * other private prefs. Browsers without @property animate-able
+ * custom properties degrade gracefully: the gradient still renders
+ * but doesn't rotate (the breath layer still pulses).
+ */
+@property --ia2-comet-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+@keyframes ia2-takeover-breath {
+  0%, 100% {
+    box-shadow:
+      inset 0 0 0 4px rgb(95 184 104 / 0.75),
+      inset 0 0 80px rgb(95 184 104 / 0.22);
+  }
+  50% {
+    box-shadow:
+      inset 0 0 0 6px rgb(95 184 104 / 1.00),
+      inset 0 0 130px rgb(95 184 104 / 0.45);
+  }
+}
+
+@keyframes ia2-takeover-comet-spin {
+  to {
+    --ia2-comet-angle: 360deg;
+  }
+}
+
+.ia2-takeover-breath {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 700;
+  animation: ia2-takeover-breath 2.4s ease-in-out infinite;
+}
+
+.ia2-takeover-comet {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 699;  /* one below the breath so the breath's crisp inner edge wins */
+  background: conic-gradient(
+    from var(--ia2-comet-angle, 0deg),
+    transparent 0%,
+    rgb(95 184 104 / 0.20) 3%,
+    rgb(120 220 130 / 0.90) 7%,
+    rgb(180 250 200 / 1.00) 9%,
+    rgb(120 220 130 / 0.90) 11%,
+    rgb(95 184 104 / 0.30) 16%,
+    transparent 22%,
+    transparent 100%
+  );
+  /* Mask out the centre — keep only an 8px-wide ring at the perimeter.
+   * The `xor` composite cuts the inner rectangle from the outer one
+   * so we get a hollow frame. */
+  -webkit-mask:
+    linear-gradient(#000, #000) content-box,
+    linear-gradient(#000, #000);
+  -webkit-mask-composite: xor;
+          mask:
+    linear-gradient(#000, #000) content-box,
+    linear-gradient(#000, #000);
+          mask-composite: exclude;
+  padding: 8px;
+  animation: ia2-takeover-comet-spin 6s linear infinite;
+}
+
+/* Respect the reduced-motion preference: drop the comet rotation
+ * (which is the most visually busy element) and slow the breath to
+ * a barely-perceptible pulse. The user still gets a clear visual
+ * cue that the agent is in control. */
+@media (prefers-reduced-motion: reduce) {
+  .ia2-takeover-breath {
+    animation: none;
+    box-shadow:
+      inset 0 0 0 4px rgb(95 184 104 / 0.85),
+      inset 0 0 80px rgb(95 184 104 / 0.30);
+  }
+  .ia2-takeover-comet {
+    animation: none;
+    opacity: 0.5;
+  }
 }
 
 @layer base {

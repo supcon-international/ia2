@@ -1181,6 +1181,15 @@ function safeParse(source: string): Parsed {
     ) {
       return { kind: "error", message: "missing `steps` or `transitions` array" }
     }
+    // Normalise the same way FBDEditor does — older files may have
+    // `actions` omitted on a step (backend used to skip empty arrays
+    // during serialization).
+    if (!Array.isArray(obj.variables)) obj.variables = []
+    for (const s of obj.steps) {
+      if (s && typeof s === "object" && !Array.isArray(s.actions)) {
+        s.actions = []
+      }
+    }
     return { kind: "ok", program: parseProgram(JSON.stringify(obj)) }
   } catch (e) {
     return { kind: "error", message: String(e) }

@@ -1,30 +1,49 @@
 import { defineConfig } from 'vite'
-
-import { tanstackStart } from '@tanstack/react-start/plugin/vite'
-
+import { TanStackRouterVite } from '@tanstack/router-plugin/vite'
 import viteReact from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
-const BACKEND = 'http://127.0.0.1:3001'
+// Where vite dev proxies `/api` + `/health` + `/ws`. Override with
+// `CS_BACKEND=http://127.0.0.1:54321 pnpm dev` so the dev server can
+// point at a shell-spawned backend on a random port (Phase 1+ flow).
+const BACKEND = process.env.CS_BACKEND || 'http://127.0.0.1:3001'
 
-// `@tanstack/devtools-vite` was removed from the plugin list because it
-// formed a positive feedback loop with vite's own client HMR logs: the
-// devtools client forwards browser console.error to the terminal, vite
-// prints "[Server] <message>", the browser picks up the new HMR/client
-// log line, forwards it back, repeat. 7+ MB of log spam per minute, no
-// recovery. Re-enable only if there's a known fix upstream.
-const config = defineConfig({
+// We dropped `@tanstack/react-start/plugin/vite` (SSR) in favour of
+// the plain router code-gen plugin. The desktop shell loads the built
+// `dist/` straight from our axum binary; SSR adds a Node runtime and
+// a reverse-proxy hop for zero user-visible benefit on localhost.
+//
+// `@tanstack/devtools-vite` is intentionally NOT in this list — see
+// the historical commit; it formed a positive feedback loop with vite
+// HMR logs. Re-enable only if upstream fixes it.
+export default defineConfig({
   resolve: { tsconfigPaths: true },
-  plugins: [tailwindcss(), tanstackStart(), viteReact()],
+  plugins: [
+    TanStackRouterVite({
+      target: 'react',
+      autoCodeSplitting: true,
+    }),
+    tailwindcss(),
+    viteReact(),
+  ],
   server: {
-    // If 3000 is taken (e.g. a stale vite), fail loudly instead of silently
-    // bumping to 3001 (which collides with the backend).
     strictPort: true,
     proxy: {
-      '/api': { target: BACKEND, changeOrigin: false },
+      '/api': {
+        target: BACKEND,
+        changeOrigin: false,
+        ws: true,
+      },
       '/health': { target: BACKEND, changeOrigin: false },
     },
   },
+  build: {
+    // Self-contained SPA output. The axum server points its
+    // `--static-dir` at this directory; client routes (e.g. `/`, any
+    // future `/settings`) all resolve back to the same `index.html`
+    // via axum's SPA fallback.
+    outDir: 'dist',
+    emptyOutDir: true,
+    sourcemap: false,
+  },
 })
-
-export default config

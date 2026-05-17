@@ -1,12 +1,12 @@
 [package]
-name = "controlsoftware-runtime"
+name = "ia2-runtime"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "controlsoftware-runtime"
+name = "ia2-runtime"
 path = "src/main.rs"
 
 [dependencies]

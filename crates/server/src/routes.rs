@@ -40,7 +40,39 @@ use ts_rs::TS;
 
 use crate::edges::{AttachInfo, DeployReport, EdgeProbe, attach_edge, deploy_to_edge, probe_edge};
 use crate::error::ApiError;
-use crate::events::AppEvent;
+use crate::events::{AppEvent, MutationDetail, topic};
+use serde::Deserialize as SerdeDeserialize;
+
+#[derive(SerdeDeserialize, Debug, Default)]
+pub struct AgentHeartbeatRequest {
+    /// Short label for *what* the agent is currently doing — usually
+    /// the `cs` subcommand path (e.g. "pou create"). Optional so a
+    /// minimal "I'm alive" beacon works too.
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Stable identifier for this CLI run. The CLI generates a UUID
+    /// once at process start and reuses it for every subsequent
+    /// command, letting the frontend tell apart a single agent doing
+    /// many things from multiple concurrent agents.
+    #[serde(default)]
+    pub session: Option<String>,
+}
+
+/// Heartbeat from an external agent (typically `cs` CLI). Updates the
+/// "agent active" state used by the IDE's takeover overlay. Returns
+/// instantly; the actual SSE event broadcast happens inside
+/// `record_agent_heartbeat` on the leading edge, and inside the
+/// `agent_watchdog` task on the trailing edge.
+///
+/// Returns the canonical `{ok: true}` to keep the wire-shape
+/// consistent with other agent-friendly endpoints.
+pub async fn agent_heartbeat(
+    State(state): State<AppState>,
+    Json(req): Json<AgentHeartbeatRequest>,
+) -> Json<RunResponse> {
+    state.record_agent_heartbeat(req.command, req.session);
+    Json(RunResponse { ok: true })
+}
 use crate::state::{AppState, RunningInfo};
 
 // ============================================================
@@ -201,6 +233,13 @@ pub async fn create_project(
     };
     save_last_opened(store.root());
     *state.project.lock().expect("project mutex") = Some(store);
+    state.emit_mutation(
+        topic::PROJECT_META,
+        MutationDetail::ProjectCreated {
+            name: info.name.clone(),
+            path: info.path.clone(),
+        },
+    );
     Ok(Json(info))
 }
 
@@ -216,6 +255,13 @@ pub async fn open_project(
     };
     save_last_opened(store.root());
     *state.project.lock().expect("project mutex") = Some(store);
+    state.emit_mutation(
+        topic::PROJECT_META,
+        MutationDetail::ProjectOpened {
+            name: info.name.clone(),
+            path: info.path.clone(),
+        },
+    );
     Ok(Json(info))
 }
 
@@ -229,6 +275,7 @@ pub async fn close_project(State(state): State<AppState>) -> Json<RunResponse> {
     // confuse anyone hitting /api/runtime/snapshot.
     *state.last_snapshot.lock().expect("last_snapshot") = None;
     *state.last_error.lock().expect("last_error") = None;
+    state.emit_mutation(topic::PROJECT_META, MutationDetail::ProjectClosed);
     Json(RunResponse { ok: true })
 }
 
@@ -295,7 +342,8 @@ pub async fn create_pou(
     State(state): State<AppState>,
     Json(req): Json<CreatePouRequest>,
 ) -> Result<Json<Pou>, ApiError> {
-    with_project(&state, |store| {
+    let created_path = req.path.clone();
+    let pou = with_project(&state, |store| {
         let language = req.language;
         let source = store.create_pou_file(&req.path, req.type_, language)?;
         Ok(Pou {
@@ -303,8 +351,12 @@ pub async fn create_pou(
             declarations: ironplc_bridge::extract_pou_declarations(&source, language),
             source,
         })
-    })
-    .map(Json)
+    })?;
+    state.emit_mutation(
+        topic::PROJECT,
+        MutationDetail::PouCreated { path: created_path },
+    );
+    Ok(Json(pou))
 }
 
 pub async fn save_pou(
@@ -315,6 +367,17 @@ pub async fn save_pou(
     with_project(&state, |store| {
         store.write_pou_source(&path, &body).map_err(Into::into)
     })?;
+    // Fire two topics: the per-POU one (specific editor refetches its
+    // own source) AND the project-wide one (declarations may have
+    // changed, so the tree should re-derive symbols).
+    state.emit_mutation(
+        topic::pou(&path),
+        MutationDetail::PouUpdated { path: path.clone() },
+    );
+    state.emit_mutation(
+        topic::PROJECT,
+        MutationDetail::PouUpdated { path },
+    );
     Ok(Json(RunResponse { ok: true }))
 }
 
@@ -323,6 +386,10 @@ pub async fn delete_pou(
     AxumPath(path): AxumPath<String>,
 ) -> Result<Json<RunResponse>, ApiError> {
     with_project(&state, |store| store.delete_pou_file(&path).map_err(Into::into))?;
+    state.emit_mutation(
+        topic::PROJECT,
+        MutationDetail::PouDeleted { path },
+    );
     Ok(Json(RunResponse { ok: true }))
 }
 
@@ -333,6 +400,10 @@ pub async fn create_pou_folder(
     with_project(&state, |store| {
         store.create_pou_folder(&req.path).map_err(Into::into)
     })?;
+    state.emit_mutation(
+        topic::PROJECT,
+        MutationDetail::PouFolderCreated { path: req.path },
+    );
     Ok(Json(RunResponse { ok: true }))
 }
 
@@ -343,6 +414,10 @@ pub async fn delete_pou_folder(
     with_project(&state, |store| {
         store.delete_pou_folder(&path).map_err(Into::into)
     })?;
+    state.emit_mutation(
+        topic::PROJECT,
+        MutationDetail::PouFolderDeleted { path },
+    );
     Ok(Json(RunResponse { ok: true }))
 }
 
@@ -373,12 +448,18 @@ pub async fn create_device(
     State(state): State<AppState>,
     Json(req): Json<CreateDeviceRequest>,
 ) -> Result<Json<Device>, ApiError> {
-    with_project(&state, |store| {
+    let device = with_project(&state, |store| {
         store
             .create_device(&req.name, req.protocol)
             .map_err(Into::into)
-    })
-    .map(Json)
+    })?;
+    state.emit_mutation(
+        topic::DEVICES,
+        MutationDetail::DeviceUpserted {
+            name: device.name.clone(),
+        },
+    );
+    Ok(Json(device))
 }
 
 pub async fn update_device(
@@ -393,6 +474,14 @@ pub async fn update_device(
         )));
     }
     with_project(&state, |store| store.write_device(&device).map_err(Into::into))?;
+    state.emit_mutation(
+        topic::DEVICES,
+        MutationDetail::DeviceUpserted { name: name.clone() },
+    );
+    state.emit_mutation(
+        topic::device(&name),
+        MutationDetail::DeviceUpserted { name },
+    );
     Ok(Json(RunResponse { ok: true }))
 }
 
@@ -403,6 +492,10 @@ pub async fn delete_device(
     with_project(&state, |store| {
         store.delete_device(&name).map_err(Into::into)
     })?;
+    state.emit_mutation(
+        topic::DEVICES,
+        MutationDetail::DeviceDeleted { name },
+    );
     Ok(Json(RunResponse { ok: true }))
 }
 
@@ -413,6 +506,10 @@ pub async fn create_device_folder(
     with_project(&state, |store| {
         store.create_device_folder(&req.path).map_err(Into::into)
     })?;
+    state.emit_mutation(
+        topic::DEVICES,
+        MutationDetail::DeviceFolderCreated { path: req.path },
+    );
     Ok(Json(RunResponse { ok: true }))
 }
 
@@ -431,10 +528,16 @@ pub async fn create_edge(
     State(state): State<AppState>,
     Json(req): Json<CreateEdgeRequest>,
 ) -> Result<Json<Edge>, ApiError> {
-    with_project(&state, |store| {
+    let edge = with_project(&state, |store| {
         store.create_edge(&req.name, &req.host).map_err(Into::into)
-    })
-    .map(Json)
+    })?;
+    state.emit_mutation(
+        topic::EDGES,
+        MutationDetail::EdgeUpserted {
+            name: edge.name.clone(),
+        },
+    );
+    Ok(Json(edge))
 }
 
 pub async fn update_edge(
@@ -449,6 +552,14 @@ pub async fn update_edge(
         )));
     }
     with_project(&state, |store| store.write_edge(&edge).map_err(Into::into))?;
+    state.emit_mutation(
+        topic::EDGES,
+        MutationDetail::EdgeUpserted { name: name.clone() },
+    );
+    state.emit_mutation(
+        topic::edge(&name),
+        MutationDetail::EdgeUpserted { name },
+    );
     Ok(Json(RunResponse { ok: true }))
 }
 
@@ -459,6 +570,10 @@ pub async fn delete_edge(
     with_project(&state, |store| store.delete_edge(&name).map_err(Into::into))?;
     // Drop any active attachment for this edge so we don't leak ssh procs.
     state.attachments.detach(&name);
+    state.emit_mutation(
+        topic::EDGES,
+        MutationDetail::EdgeDeleted { name },
+    );
     Ok(Json(RunResponse { ok: true }))
 }
 
@@ -469,6 +584,10 @@ pub async fn create_edge_folder(
     with_project(&state, |store| {
         store.create_edge_folder(&req.path).map_err(Into::into)
     })?;
+    state.emit_mutation(
+        topic::EDGES,
+        MutationDetail::EdgeFolderCreated { path: req.path },
+    );
     Ok(Json(RunResponse { ok: true }))
 }
 
@@ -504,10 +623,17 @@ pub async fn attach_edge_route(
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<AttachInfo>, ApiError> {
     let edge = with_project(&state, |store| store.read_edge(&name).map_err(Into::into))?;
-    attach_edge(&edge, &state.attachments)
+    let info = attach_edge(&edge, &state.attachments)
         .await
-        .map(Json)
-        .map_err(|e| ApiError::Internal(e.to_string()))
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    state.emit_mutation(
+        topic::edge(&name),
+        MutationDetail::EdgeAttached {
+            name,
+            local_port: info.local_port,
+        },
+    );
+    Ok(Json(info))
 }
 
 pub async fn detach_edge_route(
@@ -515,6 +641,10 @@ pub async fn detach_edge_route(
     AxumPath(name): AxumPath<String>,
 ) -> Json<RunResponse> {
     state.attachments.detach(&name);
+    state.emit_mutation(
+        topic::edge(&name),
+        MutationDetail::EdgeDetached { name },
+    );
     Json(RunResponse { ok: true })
 }
 
@@ -547,7 +677,7 @@ pub async fn attachment_status(
 /// release first, then debug, then env var override. Returns None if no
 /// binary is found — deploy falls back to "reuse current/runtime".
 fn find_runtime_binary() -> Option<std::path::PathBuf> {
-    if let Ok(p) = std::env::var("CONTROLSOFTWARE_RUNTIME_BIN") {
+    if let Ok(p) = std::env::var("IA2_RUNTIME_BIN") {
         let p = std::path::PathBuf::from(p);
         if p.exists() {
             return Some(p);
@@ -557,8 +687,8 @@ fn find_runtime_binary() -> Option<std::path::PathBuf> {
     let parent = exe.parent()?.to_path_buf();
     // Sibling of `server` binary in the same target dir.
     for candidate in [
-        parent.join("controlsoftware-runtime"),
-        parent.parent()?.join("release").join("controlsoftware-runtime"),
+        parent.join("ia2-runtime"),
+        parent.parent()?.join("release").join("ia2-runtime"),
     ] {
         if candidate.exists() {
             return Some(candidate);
@@ -580,6 +710,7 @@ pub async fn put_iomap(
     Json(iomap): Json<IoMap>,
 ) -> Result<Json<RunResponse>, ApiError> {
     with_project(&state, |store| store.write_iomap(&iomap).map_err(Into::into))?;
+    state.emit_mutation(topic::IOMAP, MutationDetail::IoMapChanged);
     Ok(Json(RunResponse { ok: true }))
 }
 
@@ -599,6 +730,7 @@ pub async fn put_tasks(
     Json(tasks): Json<Tasks>,
 ) -> Result<Json<RunResponse>, ApiError> {
     with_project(&state, |store| store.write_tasks(&tasks).map_err(Into::into))?;
+    state.emit_mutation(topic::TASKS, MutationDetail::TasksChanged);
     Ok(Json(RunResponse { ok: true }))
 }
 
@@ -636,6 +768,13 @@ pub async fn migrate_tasks(
             pous_modified,
         },
     };
+    if resp.migrated {
+        // Migration touches both task config and POU sources, so
+        // invalidate the broad project key too. The targeted topics
+        // keep individual panes responsive.
+        state.emit_mutation(topic::TASKS, MutationDetail::TasksMigrated);
+        state.emit_mutation(topic::PROJECT, MutationDetail::TasksMigrated);
+    }
     Ok(Json(resp))
 }
 
@@ -1285,6 +1424,10 @@ pub async fn delete_device_folder(
     with_project(&state, |store| {
         store.delete_device_folder(&path).map_err(Into::into)
     })?;
+    state.emit_mutation(
+        topic::DEVICES,
+        MutationDetail::DeviceFolderDeleted { path },
+    );
     Ok(Json(RunResponse { ok: true }))
 }
 
@@ -1295,6 +1438,10 @@ pub async fn delete_edge_folder(
     with_project(&state, |store| {
         store.delete_edge_folder(&path).map_err(Into::into)
     })?;
+    state.emit_mutation(
+        topic::EDGES,
+        MutationDetail::EdgeFolderDeleted { path },
+    );
     Ok(Json(RunResponse { ok: true }))
 }
 
