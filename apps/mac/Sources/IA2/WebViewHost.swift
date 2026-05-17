@@ -202,14 +202,51 @@ extension WebViewHost: WKUIDelegate {
     }
 }
 
-/// A.6 — strip WebKit's browser context menu. We don't (yet) build a
-/// native one back; the WebView is a UI surface, not a document.
-/// If we later need copy/paste on specific surfaces (e.g. the Monitor
-/// pane), implement it in the React layer where the gesture is
-/// scoped.
+/// A.6 — filter WebKit's browser context menu down to the editing
+/// affordances a Mac user expects: Cut / Copy / Paste / Select All
+/// and "Look Up" on selected text. Browser-only items (Reload,
+/// "Open in Safari", "View Page Source", Inspect Element on release
+/// builds, etc.) are stripped. The previous version removed everything
+/// — which broke text fields and selectable surfaces (Monitor pane
+/// values, output logs) because users couldn't right-click → Copy.
+///
+/// We identify items by their `WKMenuItemIdentifier` so this survives
+/// Apple's occasional menu reshuffling. Anything without a stable
+/// identifier (legacy items) is dropped to keep the menu uncluttered.
 private final class CustomWebView: WKWebView {
+    /// Identifiers we keep. WKMenuItemIdentifier values are stable
+    /// across macOS versions; the raw strings are documented in the
+    /// WebKit headers (cf. `WKMenuItemIdentifiers.h`).
+    private static let allowedIdentifiers: Set<String> = [
+        "WKMenuItemIdentifierCut",
+        "WKMenuItemIdentifierCopy",
+        "WKMenuItemIdentifierPaste",
+        "WKMenuItemIdentifierSelectAll",
+        "WKMenuItemIdentifierLookUp",
+        "WKMenuItemIdentifierTranslate",
+        // Image / link items the user explicitly initiated by right-
+        // clicking a specific element. Less noisy than the full set.
+        "WKMenuItemIdentifierCopyLink",
+        "WKMenuItemIdentifierCopyImage",
+    ]
+
     override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
+        // Two passes: collect items to keep (matched by identifier),
+        // then rebuild the menu from those. This avoids index-shift
+        // bugs from removing items while iterating.
+        let keep = menu.items.filter { item in
+            guard let id = item.identifier?.rawValue else { return false }
+            return Self.allowedIdentifiers.contains(id)
+        }
         menu.removeAllItems()
+        for item in keep {
+            menu.addItem(item)
+        }
+        // If we end up with nothing (right-click on empty surface),
+        // suppress the menu entirely rather than show a blank popup.
+        if menu.items.isEmpty {
+            menu.cancelTracking()
+        }
     }
 }
 

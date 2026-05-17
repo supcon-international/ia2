@@ -12,23 +12,39 @@
 import AppKit
 import WebKit
 
+/// Persisted-window-frame autosave name. NSWindow uses this as the key
+/// in `defaults` for `setFrame:autosaveName:` — picking a stable string
+/// gives users "the window opens where I left it" across launches.
+private let kFrameAutosaveName = "IA2MainWindow"
+
 final class WindowController: NSWindowController {
     private let webViewHost: WebViewHost
     private var firstPaintHandled = false
+    /// Tracks the most recently observed effective appearance. When
+    /// macOS dark-mode toggles, the WebView's `prefers-color-scheme`
+    /// updates automatically, but the React app reads localStorage —
+    /// so we forward the change as a custom JS event the web side can
+    /// (optionally) listen to.
+    private var appearanceObservation: NSKeyValueObservation?
 
     init(host: WebViewHost) {
         NSLog("WindowController: init begin")
         self.webViewHost = host
 
-        // Reasonable defaults for a workbench IDE. Use the standard
-        // chrome (visible titlebar + window title) for v0 — the
-        // fullSizeContentView + transparent-titlebar treatment is
-        // a polish item to revisit once the basic flow is solid.
-        // With standard chrome the window is unmistakably visible
-        // even on a busy desktop.
+        // Native-feel pass: take over the titlebar.
+        //   .fullSizeContentView — the WebView extends *under* the
+        //   titlebar all the way to the top of the window.
+        //   titlebarAppearsTransparent — no separate titlebar color;
+        //   the page's `bg-background` shows through.
+        //   titleVisibility = .hidden — no centered window-title text
+        //   competing with whatever the React side puts up there.
+        // The traffic lights (close / min / zoom) stay because the
+        // window is still `.titled`. Together this removes the
+        // high-contrast seam between OS chrome and web content that
+        // people noticed on dark mode.
         let rect = NSRect(x: 0, y: 0, width: 1280, height: 800)
         let style: NSWindow.StyleMask = [
-            .titled, .closable, .miniaturizable, .resizable,
+            .titled, .closable, .miniaturizable, .resizable, .fullSizeContentView,
         ]
         let window = NSWindow(
             contentRect: rect,
@@ -37,20 +53,27 @@ final class WindowController: NSWindowController {
             defer: false
         )
         window.title = "IA2"
-        window.titleVisibility = .visible
-        // Skip autosave for now — debugging showed the window is
-        // sometimes restored off-screen on first launch after monitor
-        // changes. Force center on current active screen every run.
-        if let screen = NSScreen.main {
-            let f = screen.visibleFrame
-            let originX = f.origin.x + (f.size.width - rect.size.width) / 2
-            let originY = f.origin.y + (f.size.height - rect.size.height) / 2
-            window.setFrame(
-                NSRect(x: originX, y: originY, width: rect.size.width, height: rect.size.height),
-                display: true
-            )
-        } else {
-            window.center()
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        // Restore the user's last-known window frame. Off-screen
+        // recovery (in case they unplugged a monitor between launches)
+        // happens in the first-paint hook below, after we know which
+        // screens are actually attached now.
+        let restored = window.setFrameUsingName(kFrameAutosaveName)
+        window.setFrameAutosaveName(kFrameAutosaveName)
+        if !restored {
+            // First-ever launch: center on the main screen.
+            if let screen = NSScreen.main {
+                let f = screen.visibleFrame
+                let originX = f.origin.x + (f.size.width - rect.size.width) / 2
+                let originY = f.origin.y + (f.size.height - rect.size.height) / 2
+                window.setFrame(
+                    NSRect(x: originX, y: originY, width: rect.size.width, height: rect.size.height),
+                    display: true
+                )
+            } else {
+                window.center()
+            }
         }
         // Make the window appear on whichever Space the user is on,
         // rather than its "home" Space — otherwise launching while
@@ -132,6 +155,22 @@ final class WindowController: NSWindowController {
                 window.isVisible ? 1 : 0,
                 window.screen?.localizedName ?? "<no screen>"
             )
+        }
+
+        // Forward macOS dark-mode toggles into the WebView. WebKit
+        // already updates `prefers-color-scheme` automatically, but
+        // the React app reads localStorage — so we dispatch a custom
+        // event the web side can opt into to mirror the OS choice.
+        // Observation is on the NSApp, not the window, because system
+        // appearance is process-wide.
+        appearanceObservation = NSApp.observe(\.effectiveAppearance, options: [.new]) {
+            [weak self] _, change in
+            guard let self, let appearance = change.newValue else { return }
+            let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            DispatchQueue.main.async {
+                let js = "window.dispatchEvent(new CustomEvent('ia2:os-appearance', { detail: { dark: \(isDark) } }))"
+                self.webViewHost.webView.evaluateJavaScript(js, completionHandler: nil)
+            }
         }
     }
 

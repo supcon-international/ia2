@@ -9,7 +9,11 @@ export function ProjectEmptyState() {
   const { availableProjects, openProject } = useRuntime()
 
   return (
-    <div className="grid h-screen place-items-center bg-background text-foreground">
+    <div className="flex h-screen flex-col bg-background text-foreground">
+      {/* macOS titlebar drag-region — same treatment as Workbench so
+       * the traffic lights have an empty strip to float over. */}
+      <div aria-hidden className="ia2-mac-drag-region h-7 shrink-0" />
+      <div className="ia2-no-drag grid flex-1 place-items-center">
       <div className="w-full max-w-md space-y-6 p-8">
         <div className="space-y-1">
           <div className="flex items-center gap-2 text-xs uppercase tracking-widest text-muted-foreground">
@@ -70,6 +74,7 @@ export function ProjectEmptyState() {
             </ul>
           </div>
         )}
+      </div>
       </div>
     </div>
   )

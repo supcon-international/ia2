@@ -85,8 +85,11 @@ function Shell() {
 
   if (projectLoading) {
     return (
-      <div className="grid h-screen place-items-center bg-background text-sm text-muted-foreground">
-        Loading…
+      <div className="flex h-screen flex-col bg-background text-foreground">
+        <div aria-hidden className="ia2-mac-drag-region h-7 shrink-0" />
+        <div className="grid flex-1 place-items-center text-sm text-muted-foreground">
+          Loading…
+        </div>
       </div>
     )
   }
@@ -117,12 +120,26 @@ function Shell() {
   // `collapsedSize` (3% — a tiny stub).
 
   return (
-    <div className="h-screen w-screen overflow-hidden bg-background text-foreground">
+    <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
+      {/* macOS titlebar safe area. The Swift shell uses
+       *   fullSizeContentView + titlebarAppearsTransparent
+       * so the WebView extends under the OS chrome. This 28px strip
+       * reserves space the traffic lights float over, gives the user
+       * an empty drag region to grab the window, and — crucially —
+       * shares `bg-background` with the rest of the page so there's
+       * no seam between OS gray and content. On Windows/Linux this is
+       * still rendered (it's just an empty thin top bar) but doesn't
+       * conflict with anything. See `.ia2-mac-drag-region` in
+       * styles.css for the WebKit drag-region opt-in. */}
+      <div
+        aria-hidden
+        className="ia2-mac-drag-region h-7 shrink-0 bg-background"
+      />
       <Group
         orientation="horizontal"
         defaultLayout={hLayout}
         onLayoutChange={setHLayout}
-        className="h-full w-full"
+        className="ia2-no-drag h-full w-full min-h-0"
       >
         <Panel
           id={PANEL_PROJECT}
