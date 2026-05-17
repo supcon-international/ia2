@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 
 use tokio::net::TcpListener;
 use tokio_modbus::prelude::*;
+use tokio_modbus::server::tcp::{accept_tcp_connection, Server};
 use tokio_modbus::server::Service;
-use tokio_modbus::server::tcp::{Server, accept_tcp_connection};
 
 const ADDR_SPACE: usize = 256;
 
@@ -137,8 +137,7 @@ pub async fn run_demo_slave(addr: SocketAddr, slave: DemoSlave) -> std::io::Resu
         // (the underlying state is Arc'd so all clones share storage).
         let slave = slave.clone();
         async move {
-            let new_service =
-                move |_addr| Ok::<_, std::io::Error>(Some(slave.clone()));
+            let new_service = move |_addr| Ok::<_, std::io::Error>(Some(slave.clone()));
             accept_tcp_connection(stream, socket_addr, new_service)
         }
     };

@@ -24,9 +24,7 @@ pub fn read_value(
     data_type: EthercatDataType,
 ) -> Result<ChannelValue, IoError> {
     if bit_length == 0 {
-        return Err(IoError::Transport(
-            "bit_length must be > 0".into(),
-        ));
+        return Err(IoError::Transport("bit_length must be > 0".into()));
     }
     let total_bits = bit_length as usize;
     let start_bit = (byte_offset * 8) + bit_offset as usize;
@@ -62,18 +60,14 @@ pub fn read_value(
         EthercatDataType::Bool => unreachable!("handled above"),
         EthercatDataType::U8 => ChannelValue::U16(slice[0] as u16),
         EthercatDataType::I8 => ChannelValue::U16(slice[0] as i8 as i16 as u16),
-        EthercatDataType::U16 => {
-            ChannelValue::U16(u16::from_le_bytes([slice[0], slice[1]]))
+        EthercatDataType::U16 => ChannelValue::U16(u16::from_le_bytes([slice[0], slice[1]])),
+        EthercatDataType::I16 => ChannelValue::U16(i16::from_le_bytes([slice[0], slice[1]]) as u16),
+        EthercatDataType::U32 => {
+            ChannelValue::I32(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]) as i32)
         }
-        EthercatDataType::I16 => {
-            ChannelValue::U16(i16::from_le_bytes([slice[0], slice[1]]) as u16)
+        EthercatDataType::I32 => {
+            ChannelValue::I32(i32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
         }
-        EthercatDataType::U32 => ChannelValue::I32(
-            u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]) as i32,
-        ),
-        EthercatDataType::I32 => ChannelValue::I32(i32::from_le_bytes([
-            slice[0], slice[1], slice[2], slice[3],
-        ])),
         EthercatDataType::Real => {
             // REAL is IEEE-754 f32; quantise to i32 so it fits the same
             // ChannelValue lane as integer 32-bit. Loses fractional info
@@ -96,9 +90,7 @@ pub fn write_value(
     value: ChannelValue,
 ) -> Result<(), IoError> {
     if bit_length == 0 {
-        return Err(IoError::Transport(
-            "bit_length must be > 0".into(),
-        ));
+        return Err(IoError::Transport("bit_length must be > 0".into()));
     }
     let start_bit = (byte_offset * 8) + bit_offset as usize;
     let end_bit = start_bit + bit_length as usize;
@@ -161,7 +153,15 @@ mod tests {
     #[test]
     fn read_write_bool_single_byte() {
         let mut pdi = [0u8; 1];
-        write_value(&mut pdi, 0, 0, 1, EthercatDataType::Bool, ChannelValue::Bool(true)).unwrap();
+        write_value(
+            &mut pdi,
+            0,
+            0,
+            1,
+            EthercatDataType::Bool,
+            ChannelValue::Bool(true),
+        )
+        .unwrap();
         assert_eq!(pdi, [0b0000_0001]);
         let v = read_value(&pdi, 0, 0, 1, EthercatDataType::Bool).unwrap();
         assert_eq!(v, ChannelValue::Bool(true));
@@ -171,23 +171,72 @@ mod tests {
     fn bool_bits_pack_independently_within_byte() {
         let mut pdi = [0u8; 1];
         // Set bit 0, bit 3, bit 7
-        write_value(&mut pdi, 0, 0, 1, EthercatDataType::Bool, ChannelValue::Bool(true)).unwrap();
-        write_value(&mut pdi, 0, 3, 1, EthercatDataType::Bool, ChannelValue::Bool(true)).unwrap();
-        write_value(&mut pdi, 0, 7, 1, EthercatDataType::Bool, ChannelValue::Bool(true)).unwrap();
+        write_value(
+            &mut pdi,
+            0,
+            0,
+            1,
+            EthercatDataType::Bool,
+            ChannelValue::Bool(true),
+        )
+        .unwrap();
+        write_value(
+            &mut pdi,
+            0,
+            3,
+            1,
+            EthercatDataType::Bool,
+            ChannelValue::Bool(true),
+        )
+        .unwrap();
+        write_value(
+            &mut pdi,
+            0,
+            7,
+            1,
+            EthercatDataType::Bool,
+            ChannelValue::Bool(true),
+        )
+        .unwrap();
         assert_eq!(pdi, [0b1000_1001]);
         // Clear bit 3 — bits 0 and 7 must remain
-        write_value(&mut pdi, 0, 3, 1, EthercatDataType::Bool, ChannelValue::Bool(false)).unwrap();
+        write_value(
+            &mut pdi,
+            0,
+            3,
+            1,
+            EthercatDataType::Bool,
+            ChannelValue::Bool(false),
+        )
+        .unwrap();
         assert_eq!(pdi, [0b1000_0001]);
         // Read individual bits
-        assert_eq!(read_value(&pdi, 0, 0, 1, EthercatDataType::Bool).unwrap(), ChannelValue::Bool(true));
-        assert_eq!(read_value(&pdi, 0, 3, 1, EthercatDataType::Bool).unwrap(), ChannelValue::Bool(false));
-        assert_eq!(read_value(&pdi, 0, 7, 1, EthercatDataType::Bool).unwrap(), ChannelValue::Bool(true));
+        assert_eq!(
+            read_value(&pdi, 0, 0, 1, EthercatDataType::Bool).unwrap(),
+            ChannelValue::Bool(true)
+        );
+        assert_eq!(
+            read_value(&pdi, 0, 3, 1, EthercatDataType::Bool).unwrap(),
+            ChannelValue::Bool(false)
+        );
+        assert_eq!(
+            read_value(&pdi, 0, 7, 1, EthercatDataType::Bool).unwrap(),
+            ChannelValue::Bool(true)
+        );
     }
 
     #[test]
     fn u8_roundtrip() {
         let mut pdi = [0u8; 4];
-        write_value(&mut pdi, 1, 0, 8, EthercatDataType::U8, ChannelValue::U16(0x42)).unwrap();
+        write_value(
+            &mut pdi,
+            1,
+            0,
+            8,
+            EthercatDataType::U8,
+            ChannelValue::U16(0x42),
+        )
+        .unwrap();
         assert_eq!(pdi, [0, 0x42, 0, 0]);
         let v = read_value(&pdi, 1, 0, 8, EthercatDataType::U8).unwrap();
         assert_eq!(v, ChannelValue::U16(0x42));
@@ -196,7 +245,15 @@ mod tests {
     #[test]
     fn u16_little_endian() {
         let mut pdi = [0u8; 4];
-        write_value(&mut pdi, 0, 0, 16, EthercatDataType::U16, ChannelValue::U16(0x1234)).unwrap();
+        write_value(
+            &mut pdi,
+            0,
+            0,
+            16,
+            EthercatDataType::U16,
+            ChannelValue::U16(0x1234),
+        )
+        .unwrap();
         assert_eq!(pdi, [0x34, 0x12, 0, 0]);
         let v = read_value(&pdi, 0, 0, 16, EthercatDataType::U16).unwrap();
         assert_eq!(v, ChannelValue::U16(0x1234));
@@ -205,7 +262,15 @@ mod tests {
     #[test]
     fn i16_negative_roundtrip() {
         let mut pdi = [0u8; 2];
-        write_value(&mut pdi, 0, 0, 16, EthercatDataType::I16, ChannelValue::U16(-100i16 as u16)).unwrap();
+        write_value(
+            &mut pdi,
+            0,
+            0,
+            16,
+            EthercatDataType::I16,
+            ChannelValue::U16(-100i16 as u16),
+        )
+        .unwrap();
         // -100 = 0xFF9C in two's-complement i16 (LE: 0x9C, 0xFF)
         assert_eq!(pdi, [0x9C, 0xFF]);
         let v = read_value(&pdi, 0, 0, 16, EthercatDataType::I16).unwrap();
@@ -218,7 +283,15 @@ mod tests {
     #[test]
     fn i32_little_endian() {
         let mut pdi = [0u8; 6];
-        write_value(&mut pdi, 2, 0, 32, EthercatDataType::I32, ChannelValue::I32(-1)).unwrap();
+        write_value(
+            &mut pdi,
+            2,
+            0,
+            32,
+            EthercatDataType::I32,
+            ChannelValue::I32(-1),
+        )
+        .unwrap();
         // -1 in 32-bit LE is 0xFF * 4
         assert_eq!(pdi, [0, 0, 0xFF, 0xFF, 0xFF, 0xFF]);
         let v = read_value(&pdi, 2, 0, 32, EthercatDataType::I32).unwrap();
@@ -228,7 +301,15 @@ mod tests {
     #[test]
     fn real_quantises_through_i32() {
         let mut pdi = [0u8; 4];
-        write_value(&mut pdi, 0, 0, 32, EthercatDataType::Real, ChannelValue::I32(42)).unwrap();
+        write_value(
+            &mut pdi,
+            0,
+            0,
+            32,
+            EthercatDataType::Real,
+            ChannelValue::I32(42),
+        )
+        .unwrap();
         // 42.0_f32 le bytes
         assert_eq!(pdi, 42.0f32.to_le_bytes());
         let v = read_value(&pdi, 0, 0, 32, EthercatDataType::Real).unwrap();
@@ -245,7 +326,15 @@ mod tests {
     #[test]
     fn out_of_bounds_write_errors() {
         let mut pdi = [0u8; 2];
-        let err = write_value(&mut pdi, 0, 0, 32, EthercatDataType::U32, ChannelValue::I32(0)).unwrap_err();
+        let err = write_value(
+            &mut pdi,
+            0,
+            0,
+            32,
+            EthercatDataType::U32,
+            ChannelValue::I32(0),
+        )
+        .unwrap_err();
         assert!(matches!(err, IoError::Transport(_)));
     }
 
@@ -253,7 +342,15 @@ mod tests {
     fn non_aligned_multi_bit_is_rejected() {
         let mut pdi = [0u8; 4];
         // 16-bit value at bit_offset=2 is unsupported
-        let err = write_value(&mut pdi, 0, 2, 16, EthercatDataType::U16, ChannelValue::U16(0)).unwrap_err();
+        let err = write_value(
+            &mut pdi,
+            0,
+            2,
+            16,
+            EthercatDataType::U16,
+            ChannelValue::U16(0),
+        )
+        .unwrap_err();
         assert!(matches!(err, IoError::Transport(_)));
         let err = read_value(&pdi, 0, 2, 16, EthercatDataType::U16).unwrap_err();
         assert!(matches!(err, IoError::Transport(_)));
@@ -265,7 +362,15 @@ mod tests {
         // share one byte. Writing channel 4 must leave channels 0..3, 5..7
         // untouched.
         let mut pdi = [0b1111_1111u8; 1];
-        write_value(&mut pdi, 0, 4, 1, EthercatDataType::Bool, ChannelValue::Bool(false)).unwrap();
+        write_value(
+            &mut pdi,
+            0,
+            4,
+            1,
+            EthercatDataType::Bool,
+            ChannelValue::Bool(false),
+        )
+        .unwrap();
         assert_eq!(pdi, [0b1110_1111]);
     }
 }

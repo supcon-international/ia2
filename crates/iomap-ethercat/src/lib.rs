@@ -72,11 +72,7 @@ impl IoDevice for EthercatDevice {
         }
     }
 
-    async fn write_channel(
-        &mut self,
-        channel: &str,
-        value: ChannelValue,
-    ) -> Result<(), IoError> {
+    async fn write_channel(&mut self, channel: &str, value: ChannelValue) -> Result<(), IoError> {
         match &mut self.0 {
             Inner::Sim(s) => s.write_channel(channel, value).await,
             Inner::Real(r) => r.write_channel(channel, value).await,

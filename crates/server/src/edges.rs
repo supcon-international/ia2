@@ -211,7 +211,9 @@ pub async fn deploy_to_edge(
                 .ok_or_else(|| DeployError::Pack("project dir has no name".into()))?,
         );
     if let Some(bin) = runtime_binary {
-        let bin = bin.canonicalize().map_err(|e| DeployError::Pack(e.to_string()))?;
+        let bin = bin
+            .canonicalize()
+            .map_err(|e| DeployError::Pack(e.to_string()))?;
         tar.arg("-C")
             .arg(bin.parent().unwrap())
             .arg(bin.file_name().unwrap());
@@ -255,10 +257,20 @@ pub async fn deploy_to_edge(
     let out = ssh.wait_with_output().await?;
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    let combined = format!("{stdout}{}{stderr}", if !stderr.is_empty() { "\n--stderr--\n" } else { "" });
+    let combined = format!(
+        "{stdout}{}{stderr}",
+        if !stderr.is_empty() {
+            "\n--stderr--\n"
+        } else {
+            ""
+        }
+    );
 
     if !out.status.success() {
-        return Err(DeployError::Remote(out.status.code().unwrap_or(-1), combined));
+        return Err(DeployError::Remote(
+            out.status.code().unwrap_or(-1),
+            combined,
+        ));
     }
 
     // The script prints `VERSION=<ts>` as its last informational line.
@@ -280,7 +292,11 @@ pub async fn deploy_to_edge(
 /// the `current` symlink atomically (rename(2) of a temp symlink), and
 /// restarts the systemd unit. Old versions are kept; rollback is just a
 /// symlink swap.
-fn remote_deploy_script(install_dir: &str, project_basename: &str, binary_basename: Option<&str>) -> String {
+fn remote_deploy_script(
+    install_dir: &str,
+    project_basename: &str,
+    binary_basename: Option<&str>,
+) -> String {
     let bin_swap = match binary_basename {
         Some(name) => format!(
             "if [ -f \"$DEST/{name}\" ]; then\n  chmod +x \"$DEST/{name}\"\n  mv \"$DEST/{name}\" \"$DEST/runtime\"\nfi\n",
@@ -343,10 +359,7 @@ pub struct AttachInfo {
 /// Start an `ssh -N -L 127.0.0.1:<local_port>:127.0.0.1:<edge.runtime_port> <host>`
 /// and stash the child in `registry` keyed by `edge.name`. Re-attaching
 /// while one is live replaces the previous tunnel.
-pub async fn attach_edge(
-    edge: &Edge,
-    registry: &AttachmentRegistry,
-) -> io::Result<AttachInfo> {
+pub async fn attach_edge(edge: &Edge, registry: &AttachmentRegistry) -> io::Result<AttachInfo> {
     // Pick an ephemeral local port by binding briefly then releasing it
     // back to the OS — ssh will grab it a moment later. Tiny race window;
     // for an MVP dev tool it's acceptable.
@@ -394,14 +407,11 @@ pub async fn attach_edge(
             let _ = stderr.read_to_string(&mut err_buf).await;
         }
         let _ = child.kill().await;
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!(
-                "ssh port-forward to {host} never came up: {err}",
-                host = edge.host,
-                err = first_line(&err_buf)
-            ),
-        ));
+        return Err(io::Error::other(format!(
+            "ssh port-forward to {host} never came up: {err}",
+            host = edge.host,
+            err = first_line(&err_buf)
+        )));
     }
 
     registry.insert(edge.name.clone(), local_port, child);
@@ -435,5 +445,8 @@ pub fn ssh_cmd(edge: &Edge) -> Command {
 }
 
 fn first_line(s: &str) -> &str {
-    s.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim_end()
+    s.lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim_end()
 }

@@ -22,7 +22,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use ironplc_bridge::CheckDiagnostic;
 use project::{PouLanguage, ProjectStore};
@@ -397,21 +397,23 @@ fn main() {
     }
 
     let result = match args.command {
-        Command::Check { files, json, explain } => cmd_check(&files, json, explain),
+        Command::Check {
+            files,
+            json,
+            explain,
+        } => cmd_check(&files, json, explain),
         Command::Transpile { file, with_map } => cmd_transpile(&file, with_map),
         Command::Project(ProjectCmd::Check { path, json }) => cmd_project_check(&path, json),
         Command::Project(ProjectCmd::Info { path, json }) => cmd_project_info(&path, json),
-        Command::Project(ProjectCmd::Create { name, server }) => {
-            cmd_project_create(&name, &server)
-        }
-        Command::Project(ProjectCmd::Open { path, server }) => {
-            cmd_project_open(&path, &server)
-        }
+        Command::Project(ProjectCmd::Create { name, server }) => cmd_project_create(&name, &server),
+        Command::Project(ProjectCmd::Open { path, server }) => cmd_project_open(&path, &server),
         Command::Project(ProjectCmd::Close { server }) => cmd_project_close(&server),
         Command::Pou(p) => cmd_pou(p),
-        Command::Run { program, file, server } => {
-            cmd_run(program.as_deref(), file.as_deref(), &server)
-        }
+        Command::Run {
+            program,
+            file,
+            server,
+        } => cmd_run(program.as_deref(), file.as_deref(), &server),
         Command::Stop { server } => cmd_stop(&server),
         Command::Explain { code } => cmd_explain(&code),
         Command::Symbols { file, name, json } => cmd_symbols(&file, name.as_deref(), json),
@@ -438,8 +440,8 @@ fn cmd_check(files: &[PathBuf], json: bool, explain: bool) -> Result<i32> {
 
     for file in files {
         let language = language_for_path(file)?;
-        let source = std::fs::read_to_string(file)
-            .with_context(|| format!("reading {}", file.display()))?;
+        let source =
+            std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
         let diags = ironplc_bridge::check_pou_source(&source, language);
         if !diags.is_empty() {
             any_errors = true;
@@ -465,7 +467,11 @@ fn cmd_check(files: &[PathBuf], json: bool, explain: bool) -> Result<i32> {
         }
         let total: usize = all.iter().map(|f| f.diagnostics.len()).sum();
         if total == 0 {
-            eprintln!("✓ {} file{} clean", files.len(), if files.len() == 1 { "" } else { "s" });
+            eprintln!(
+                "✓ {} file{} clean",
+                files.len(),
+                if files.len() == 1 { "" } else { "s" }
+            );
         } else {
             eprintln!(
                 "✗ {} error{} across {} file{}",
@@ -543,7 +549,10 @@ fn describe_ld_location(loc: &ironplc_bridge::LdLocation) -> String {
     match loc {
         Variable { name } => format!("var {name}"),
         Rung { rung_id } => format!("rung {rung_id}"),
-        Coil { rung_id, coil_index } => format!("rung {rung_id} · coil {coil_index}"),
+        Coil {
+            rung_id,
+            coil_index,
+        } => format!("rung {rung_id} · coil {coil_index}"),
         FbCall { rung_id, instance } => format!("rung {rung_id} · {instance}(…)"),
     }
 }
@@ -573,8 +582,8 @@ fn describe_sfc_location(loc: &ironplc_bridge::SfcLocation) -> String {
 
 fn cmd_transpile(file: &Path, with_map: bool) -> Result<i32> {
     let language = language_for_path(file)?;
-    let source = std::fs::read_to_string(file)
-        .with_context(|| format!("reading {}", file.display()))?;
+    let source =
+        std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
 
     match language {
         PouLanguage::St => {
@@ -739,9 +748,7 @@ fn cmd_explain(code: &str) -> Result<i32> {
             Ok(0)
         }
         None => {
-            eprintln!(
-                "error: no documentation for `{code}` — not in ironplc's problem registry"
-            );
+            eprintln!("error: no documentation for `{code}` — not in ironplc's problem registry");
             Ok(1)
         }
     }
@@ -832,7 +839,8 @@ fn cmd_pou(cmd: PouCmd) -> Result<i32> {
             // `save_pou` accepts text/plain, not JSON — wire format
             // matches the IDE editor's auto-save path.
             let url = format!("{server}/api/pous/{}", url_encode(&path));
-            let resp = ureq::put(&url)
+            let resp = http_agent()
+                .put(&url)
                 .set("Content-Type", "text/plain")
                 .send_string(&source)
                 .map_err(|e| anyhow::anyhow!("PUT {url}: {e}"))?;
@@ -843,10 +851,7 @@ fn cmd_pou(cmd: PouCmd) -> Result<i32> {
             Ok(0)
         }
         PouCmd::Delete { path, server } => {
-            let resp = delete_json(&format!(
-                "{server}/api/pous/{}",
-                url_encode(&path)
-            ))?;
+            let resp = delete_json(&format!("{server}/api/pous/{}", url_encode(&path)))?;
             println!("{}", serde_json::to_string_pretty(&resp)?);
             Ok(0)
         }
@@ -897,8 +902,8 @@ fn cmd_stop(server: &str) -> Result<i32> {
 
 fn cmd_symbols(file: &Path, name_filter: Option<&str>, json: bool) -> Result<i32> {
     let language = language_for_path(file)?;
-    let source = std::fs::read_to_string(file)
-        .with_context(|| format!("reading {}", file.display()))?;
+    let source =
+        std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
     let mut syms = ironplc_bridge::extract_symbols(&source, language);
     if let Some(needle) = name_filter {
         syms.retain(|s| s.name.contains(needle));
@@ -924,7 +929,11 @@ fn cmd_symbols(file: &Path, name_filter: Option<&str>, json: bool) -> Result<i32
             if syms.len() == 1 { "" } else { "s" },
         );
     }
-    Ok(if syms.is_empty() && name_filter.is_some() { 1 } else { 0 })
+    Ok(if syms.is_empty() && name_filter.is_some() {
+        1
+    } else {
+        0
+    })
 }
 
 // =================================================================
@@ -960,7 +969,10 @@ fn cmd_runtime(cmd: RuntimeCmd) -> Result<i32> {
             } else {
                 // A minimal human summary; full status is one --json
                 // away.
-                let mode = status.get("mode").cloned().unwrap_or(serde_json::Value::Null);
+                let mode = status
+                    .get("mode")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
                 let forces = status
                     .get("forces")
                     .and_then(|v| v.as_array())
@@ -985,7 +997,11 @@ fn cmd_runtime(cmd: RuntimeCmd) -> Result<i32> {
             }
             Ok(0)
         }
-        RuntimeCmd::Force { name, value, server } => {
+        RuntimeCmd::Force {
+            name,
+            value,
+            server,
+        } => {
             let encoded = parse_value(&server, &name, &value)?;
             let body = serde_json::json!({ "value": encoded });
             let resp = post_json(
@@ -1003,7 +1019,11 @@ fn cmd_runtime(cmd: RuntimeCmd) -> Result<i32> {
             println!("{}", serde_json::to_string_pretty(&resp)?);
             Ok(0)
         }
-        RuntimeCmd::Write { name, value, server } => {
+        RuntimeCmd::Write {
+            name,
+            value,
+            server,
+        } => {
             let encoded = parse_value(&server, &name, &value)?;
             let body = serde_json::json!({ "value": encoded });
             let resp = post_json(
@@ -1047,10 +1067,7 @@ fn parse_value(server: &str, name: &str, raw: &str) -> Result<i32> {
         _ => {}
     }
 
-    let var_type = match snapshot_var_type(server, name) {
-        Ok(t) => t,
-        Err(_) => None,
-    };
+    let var_type = snapshot_var_type(server, name).unwrap_or_default();
 
     match var_type.as_deref() {
         Some("BOOL") => {
@@ -1061,9 +1078,9 @@ fn parse_value(server: &str, name: &str, raw: &str) -> Result<i32> {
             Ok(if n != 0 { 1 } else { 0 })
         }
         Some("REAL") => {
-            let f: f32 = raw.parse().with_context(|| {
-                format!("value `{raw}` doesn't parse as REAL (32-bit float)")
-            })?;
+            let f: f32 = raw
+                .parse()
+                .with_context(|| format!("value `{raw}` doesn't parse as REAL (32-bit float)"))?;
             Ok(f.to_bits() as i32)
         }
         Some("LREAL") => {
@@ -1086,9 +1103,9 @@ fn parse_value(server: &str, name: &str, raw: &str) -> Result<i32> {
             // pass the i32 reinterpretation directly.
             Ok(n as i32)
         }
-        Some(other) => anyhow::bail!(
-            "don't know how to encode value `{raw}` for type {other} (yet)"
-        ),
+        Some(other) => {
+            anyhow::bail!("don't know how to encode value `{raw}` for type {other} (yet)")
+        }
         None => {
             // No type info — guess from format and warn loudly.
             if raw.contains('.') || raw.contains('e') || raw.contains('E') {
@@ -1101,13 +1118,9 @@ fn parse_value(server: &str, name: &str, raw: &str) -> Result<i32> {
                 Ok(f.to_bits() as i32)
             } else {
                 let n: i32 = raw.parse().with_context(|| {
-                    format!(
-                        "value `{raw}` doesn't parse as i32; if you meant REAL, use `{raw}.0`"
-                    )
+                    format!("value `{raw}` doesn't parse as i32; if you meant REAL, use `{raw}.0`")
                 })?;
-                eprintln!(
-                    "note: runtime didn't expose `{name}`'s type — assumed INT family"
-                );
+                eprintln!("note: runtime didn't expose `{name}`'s type — assumed INT family");
                 Ok(n)
             }
         }
@@ -1202,7 +1215,8 @@ fn session_id() -> &'static str {
 /// Fire-and-forget heartbeat. Short timeout because we'd rather miss
 /// the visual cue than hold up a command's actual work.
 fn announce_agent(server: &str, command_label: &str) {
-    let _ = ureq::post(&format!("{server}/api/agent/heartbeat"))
+    let _ = http_agent()
+        .post(&format!("{server}/api/agent/heartbeat"))
         .timeout(std::time::Duration::from_millis(300))
         .send_json(serde_json::json!({
             "command": command_label,
@@ -1227,11 +1241,31 @@ fn url_encode(s: &str) -> String {
         .collect()
 }
 
-fn post_json(
-    url: &str,
-    body: &impl serde::Serialize,
-) -> Result<serde_json::Value> {
-    let resp = ureq::post(url)
+/// Build a no-proxy ureq Agent. ureq 2.x auto-picks up `HTTP_PROXY` /
+/// `HTTPS_PROXY` env vars at request time, which routes our localhost
+/// API traffic through the user's developer proxy (Clash etc.). Users
+/// running a system-wide proxy see "Header field didn't end with \n"
+/// because their proxy speaks SOCKS / Trojan, not HTTP. Building an
+/// explicit Agent with no proxy fixes it.
+///
+/// We cache the Agent in a OnceLock so each `cs` invocation pays the
+/// build cost once even if it makes several requests.
+fn http_agent() -> &'static ureq::Agent {
+    use std::sync::OnceLock;
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::AgentBuilder::new()
+            // No `.proxy(...)` call — ureq treats absence as "direct
+            // connection". Without this Agent, the static `ureq::post(...)`
+            // path defaults to reading proxy from env.
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+    })
+}
+
+fn post_json(url: &str, body: &impl serde::Serialize) -> Result<serde_json::Value> {
+    let resp = http_agent()
+        .post(url)
         .set("Content-Type", "application/json")
         .send_json(body)
         .map_err(|e| anyhow::anyhow!("POST {url}: {e}"))?;
@@ -1242,7 +1276,8 @@ fn post_json(
 }
 
 fn get_json(url: &str) -> Result<serde_json::Value> {
-    let resp = ureq::get(url)
+    let resp = http_agent()
+        .get(url)
         .call()
         .map_err(|e| anyhow::anyhow!("GET {url}: {e}"))?;
     let value: serde_json::Value = resp
@@ -1252,7 +1287,8 @@ fn get_json(url: &str) -> Result<serde_json::Value> {
 }
 
 fn delete_json(url: &str) -> Result<serde_json::Value> {
-    let resp = ureq::delete(url)
+    let resp = http_agent()
+        .delete(url)
         .call()
         .map_err(|e| anyhow::anyhow!("DELETE {url}: {e}"))?;
     let value: serde_json::Value = resp

@@ -8,16 +8,16 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use axum::{
-    Router,
-    routing::{get, post},
-};
-use clap::Parser;
-use iomap_modbus::{DemoSlave, run_demo_slave};
-use project::{ProjectStore, load_last_opened, migrate_legacy_dirs};
-use axum::{
-    http::{StatusCode, header},
+    http::{header, StatusCode},
     response::{IntoResponse, Response},
 };
+use axum::{
+    routing::{get, post},
+    Router,
+};
+use clap::Parser;
+use iomap_modbus::{run_demo_slave, DemoSlave};
+use project::{load_last_opened, migrate_legacy_dirs, ProjectStore};
 use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
@@ -154,7 +154,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(routes::health))
         .route("/api/health", get(routes::api_health))
         // Project lifecycle
-        .route("/api/projects", get(routes::list_projects).post(routes::create_project))
+        .route(
+            "/api/projects",
+            get(routes::list_projects).post(routes::create_project),
+        )
         .route("/api/projects/open", post(routes::open_project))
         .route("/api/projects/close", post(routes::close_project))
         .route("/api/project", get(routes::project_tree))
@@ -179,10 +182,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/pous/{path}/variables", get(routes::pou_variables))
         // Devices
         .route("/api/devices", post(routes::create_device))
-        .route(
-            "/api/devices/folders",
-            post(routes::create_device_folder),
-        )
+        .route("/api/devices/folders", post(routes::create_device_folder))
         .route(
             "/api/devices/folders/{*path}",
             axum::routing::delete(routes::delete_device_folder),
@@ -195,10 +195,7 @@ async fn main() -> anyhow::Result<()> {
         )
         // Edges (deploy targets)
         .route("/api/edges", post(routes::create_edge))
-        .route(
-            "/api/edges/folders",
-            post(routes::create_edge_folder),
-        )
+        .route("/api/edges/folders", post(routes::create_edge_folder))
         .route(
             "/api/edges/folders/{*path}",
             axum::routing::delete(routes::delete_edge_folder),
@@ -414,13 +411,7 @@ fn spawn_parent_watchdog() {
             loop {
                 // SAFETY: read(2) on fd 0 is safe; we only care
                 // about whether it returns 0 (EOF) or -1 (error).
-                let rv = unsafe {
-                    libc::read(
-                        0,
-                        buf.as_mut_ptr() as *mut libc::c_void,
-                        buf.len(),
-                    )
-                };
+                let rv = unsafe { libc::read(0, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
                 if rv <= 0 {
                     // EOF (0) or error (-1) — parent gone.
                     unsafe { libc::_exit(0) };

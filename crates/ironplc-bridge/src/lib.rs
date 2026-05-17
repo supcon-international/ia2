@@ -11,13 +11,13 @@ mod sfc_transpile;
 
 pub use problem_docs::{lookup_problem_doc, lookup_problem_explanation};
 
-pub use ld_transpile::transpile_to_st as transpile_ld_to_st;
-pub use ld_transpile::{
-    transpile_to_st_with_map as transpile_ld_to_st_with_map, LdLocation, LdSourceMap,
-};
 pub use fbd_transpile::transpile_to_st as transpile_fbd_to_st;
 pub use fbd_transpile::{
     transpile_to_st_with_map as transpile_fbd_to_st_with_map, FbdLocation, FbdSourceMap,
+};
+pub use ld_transpile::transpile_to_st as transpile_ld_to_st;
+pub use ld_transpile::{
+    transpile_to_st_with_map as transpile_ld_to_st_with_map, LdLocation, LdSourceMap,
 };
 pub use sfc_transpile::transpile_to_st as transpile_sfc_to_st;
 pub use sfc_transpile::{
@@ -26,14 +26,12 @@ pub use sfc_transpile::{
 
 pub use errors::BridgeError;
 pub use runtime::{
-    DeviceSpec, ProgramHandle, RuntimeMode, RuntimeWriteError, VarSnapshot, VarValue, spawn,
+    spawn, spawn_with_interval, DeviceSpec, ProgramHandle, RuntimeMode, RuntimeWriteError,
+    VarSnapshot, VarValue, DEFAULT_SCAN_INTERVAL_MS,
 };
-
 
 use ironplc_container::Container;
-use ironplc_dsl::common::{
-    InitialValueAssignmentKind, LibraryElementKind, VarDecl, VariableType,
-};
+use ironplc_dsl::common::{InitialValueAssignmentKind, LibraryElementKind, VarDecl, VariableType};
 use ironplc_dsl::core::FileId;
 use ironplc_dsl::diagnostic::{Diagnostic, LineColumn};
 use ironplc_parser::options::CompilerOptions;
@@ -47,8 +45,10 @@ pub fn compile(source: &str) -> Result<Container, BridgeError> {
     // `allow_empty_var_blocks` mirrors the ironplc CLI flag. POU templates
     // we ship intentionally start with empty VAR / VAR_INPUT / VAR_OUTPUT
     // blocks — those should compile, not error.
-    let mut options = CompilerOptions::default();
-    options.allow_empty_var_blocks = true;
+    let options = CompilerOptions {
+        allow_empty_var_blocks: true,
+        ..Default::default()
+    };
 
     let library = ironplc_parser::parse_program(source, &file_id, &options)
         .map_err(|d| BridgeError::Parse(format!("{d:?}")))?;
@@ -120,7 +120,10 @@ pub fn compile_project_with_tasks(
         }
     }
     combined.push_str(&synthesize_configuration(tasks));
-    tracing::debug!(len = combined.len(), "compile_project: combined source built");
+    tracing::debug!(
+        len = combined.len(),
+        "compile_project: combined source built"
+    );
     compile(&combined)
 }
 
@@ -138,9 +141,7 @@ pub fn compile_isolated_source(
     tasks: &project::Tasks,
 ) -> Result<Container, BridgeError> {
     if tasks.programs.is_empty() {
-        return Err(BridgeError::Parse(
-            "no PROGRAM instance to run".into(),
-        ));
+        return Err(BridgeError::Parse("no PROGRAM instance to run".into()));
     }
     let st = source_to_st(source, language)?;
     let mut combined = String::with_capacity(st.len() + 256);
@@ -156,10 +157,7 @@ pub fn compile_isolated_source(
 /// `St` is the identity. `Ld` parses the JSON via the LD schema and
 /// runs the transpiler. Returns a descriptive parse error if the input
 /// shape doesn't match the declared language.
-fn source_to_st(
-    source: &str,
-    language: project::PouLanguage,
-) -> Result<String, BridgeError> {
+fn source_to_st(source: &str, language: project::PouLanguage) -> Result<String, BridgeError> {
     match language {
         project::PouLanguage::St => Ok(source.to_string()),
         project::PouLanguage::Ld => {
@@ -340,10 +338,7 @@ pub fn check(source: &str) -> Vec<CheckDiagnostic> {
 /// Returns a single synthetic diagnostic if the JSON itself doesn't
 /// parse (so the editor still gets a squiggle pointing at the broken
 /// document rather than silent failure).
-pub fn check_pou_source(
-    source: &str,
-    language: project::PouLanguage,
-) -> Vec<CheckDiagnostic> {
+pub fn check_pou_source(source: &str, language: project::PouLanguage) -> Vec<CheckDiagnostic> {
     match language {
         project::PouLanguage::St => check(source),
         project::PouLanguage::Ld => {
@@ -393,11 +388,7 @@ enum SourceMapKind<'a> {
     Sfc(&'a sfc_transpile::SfcSourceMap),
 }
 
-fn synthetic_parse_diag(
-    code: &str,
-    language_name: &str,
-    e: &serde_json::Error,
-) -> CheckDiagnostic {
+fn synthetic_parse_diag(code: &str, language_name: &str, e: &serde_json::Error) -> CheckDiagnostic {
     CheckDiagnostic {
         severity: "error".into(),
         code: code.into(),
@@ -441,8 +432,10 @@ fn check_inner(source: &str, map: SourceMapKind<'_>) -> Vec<CheckDiagnostic> {
     // `allow_empty_var_blocks` mirrors the ironplc CLI flag. POU templates
     // we ship intentionally start with empty VAR / VAR_INPUT / VAR_OUTPUT
     // blocks — those should compile, not error.
-    let mut options = CompilerOptions::default();
-    options.allow_empty_var_blocks = true;
+    let options = CompilerOptions {
+        allow_empty_var_blocks: true,
+        ..Default::default()
+    };
 
     let library = match ironplc_parser::parse_program(source, &file_id, &options) {
         Ok(l) => l,
@@ -562,23 +555,21 @@ pub fn extract_pou_declarations(
 fn extract_st_declarations(source: &str) -> Vec<project::PouDecl> {
     use project::{PouDecl, PouLanguage, PouType};
     let file_id = FileId::default();
-    let mut options = CompilerOptions::default();
-    options.allow_empty_var_blocks = true;
+    let options = CompilerOptions {
+        allow_empty_var_blocks: true,
+        ..Default::default()
+    };
     let Ok(library) = ironplc_parser::parse_program(source, &file_id, &options) else {
         return vec![];
     };
     let mut out = Vec::new();
     for element in &library.elements {
         let (name, type_) = match element {
-            LibraryElementKind::ProgramDeclaration(p) => {
-                (p.name.to_string(), PouType::Program)
-            }
+            LibraryElementKind::ProgramDeclaration(p) => (p.name.to_string(), PouType::Program),
             LibraryElementKind::FunctionBlockDeclaration(fb) => {
                 (fb.name.to_string(), PouType::FunctionBlock)
             }
-            LibraryElementKind::FunctionDeclaration(f) => {
-                (f.name.to_string(), PouType::Function)
-            }
+            LibraryElementKind::FunctionDeclaration(f) => (f.name.to_string(), PouType::Function),
             _ => continue,
         };
         out.push(PouDecl {
@@ -598,10 +589,7 @@ fn extract_st_declarations(source: &str) -> Vec<project::PouDecl> {
 /// Returns `[]` for unsupported languages and for malformed sources —
 /// callers shouldn't fall over when the user is mid-edit and the JSON
 /// is briefly invalid.
-pub fn extract_symbols(
-    source: &str,
-    language: project::PouLanguage,
-) -> Vec<VariableInfo> {
+pub fn extract_symbols(source: &str, language: project::PouLanguage) -> Vec<VariableInfo> {
     use project::PouLanguage;
     match language {
         PouLanguage::St => extract_variables(source),
@@ -674,8 +662,10 @@ pub fn extract_variables(source: &str) -> Vec<VariableInfo> {
     // `allow_empty_var_blocks` mirrors the ironplc CLI flag. POU templates
     // we ship intentionally start with empty VAR / VAR_INPUT / VAR_OUTPUT
     // blocks — those should compile, not error.
-    let mut options = CompilerOptions::default();
-    options.allow_empty_var_blocks = true;
+    let options = CompilerOptions {
+        allow_empty_var_blocks: true,
+        ..Default::default()
+    };
     let library = match ironplc_parser::parse_program(source, &file_id, &options) {
         Ok(l) => l,
         Err(_) => return vec![],
@@ -741,16 +731,11 @@ fn init_type_name(init: &InitialValueAssignmentKind) -> String {
 /// temps) arrive with both `ld_location` and `fbd_location` = None,
 /// which the editor renders as a generic file-level error rather than
 /// a per-element squiggle.
-fn diag_to_dto_with_map(
-    d: &Diagnostic,
-    source: &str,
-    map: &SourceMapKind<'_>,
-) -> CheckDiagnostic {
+fn diag_to_dto_with_map(d: &Diagnostic, source: &str, map: &SourceMapKind<'_>) -> CheckDiagnostic {
     let start = LineColumn::from_offset(source, d.primary.location.start);
     let end = LineColumn::from_offset(source, d.primary.location.end);
     let start_line = start.line + 1;
-    let (ld_location, fbd_location, sfc_location) =
-        lookup_locations(map, start_line as usize);
+    let (ld_location, fbd_location, sfc_location) = lookup_locations(map, start_line as usize);
 
     // `described` is ironplc's structured context — "variable=foo",
     // "type=BOOL", etc. We pass it through verbatim; the editor /

@@ -56,25 +56,15 @@ type FbInstanceTable = BTreeMap<String, String>;
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LdLocation {
     /// A specific declared variable.
-    Variable {
-        name: String,
-    },
+    Variable { name: String },
     /// Anywhere within a rung — most common case (the rung's main
     /// assignment line). `rung_id` matches `LdRung::id` in the JSON.
-    Rung {
-        rung_id: String,
-    },
+    Rung { rung_id: String },
     /// A specific coil in a multi-coil rung. `coil_index` is the
     /// 0-based position in `LdRung::coils`.
-    Coil {
-        rung_id: String,
-        coil_index: usize,
-    },
+    Coil { rung_id: String, coil_index: usize },
     /// The `inst(PIN := ..., ...);` statement for an FB call.
-    FbCall {
-        rung_id: String,
-        instance: String,
-    },
+    FbCall { rung_id: String, instance: String },
 }
 
 /// One-line-per-entry mapping. Index `i` describes ST line `i+1`
@@ -134,9 +124,7 @@ pub fn transpile_to_st(prog: &LdProgram) -> Result<String, BridgeError> {
 
 /// Like `transpile_to_st` but also returns the source map so callers
 /// can translate diagnostic line numbers back to LD elements.
-pub fn transpile_to_st_with_map(
-    prog: &LdProgram,
-) -> Result<(String, LdSourceMap), BridgeError> {
+pub fn transpile_to_st_with_map(prog: &LdProgram) -> Result<(String, LdSourceMap), BridgeError> {
     if prog.name.is_empty() {
         return Err(BridgeError::Parse("LD program name is empty".into()));
     }
@@ -224,9 +212,7 @@ fn walk_for_fb_calls(
             instance, fb_type, ..
         } => {
             if instance.is_empty() {
-                return Err(BridgeError::Parse(
-                    "FB call has empty instance name".into(),
-                ));
+                return Err(BridgeError::Parse("FB call has empty instance name".into()));
             }
             if fb_type.is_empty() {
                 return Err(BridgeError::Parse(format!(
@@ -247,7 +233,11 @@ fn write_variable_blocks(
     // IEC requires VAR blocks in a specific order with no duplicates,
     // and ironplc's `allow_empty_var_blocks` already lets us emit
     // empty sections — so we always emit all three for shape stability.
-    for section in [LdVarSection::Input, LdVarSection::Output, LdVarSection::Internal] {
+    for section in [
+        LdVarSection::Input,
+        LdVarSection::Output,
+        LdVarSection::Internal,
+    ] {
         let header = match section {
             LdVarSection::Input => "VAR_INPUT",
             LdVarSection::Output => "VAR_OUTPUT",
@@ -286,11 +276,7 @@ fn write_variable_blocks(
     }
 }
 
-fn emit_rung(
-    em: &mut StEmitter,
-    rung: &project::LdRung,
-    idx: usize,
-) -> Result<(), BridgeError> {
+fn emit_rung(em: &mut StEmitter, rung: &project::LdRung, idx: usize) -> Result<(), BridgeError> {
     if rung.coils.is_empty() {
         return Err(BridgeError::Parse(format!(
             "LD rung {} ({}) has no coils — a rung with no output is dead code",
@@ -395,7 +381,10 @@ fn walk_in_order(
 ) -> Result<(), BridgeError> {
     visit(node)?;
     match node {
-        LdNode::Contact { .. } | LdNode::Const { .. } | LdNode::Compare { .. } | LdNode::FbCall { .. } => Ok(()),
+        LdNode::Contact { .. }
+        | LdNode::Const { .. }
+        | LdNode::Compare { .. }
+        | LdNode::FbCall { .. } => Ok(()),
         LdNode::And { args } | LdNode::Or { args } => {
             for a in args {
                 walk_in_order(a, visit)?;
@@ -510,9 +499,7 @@ fn render_node(node: &LdNode) -> Result<String, BridgeError> {
             // IEC 61131-3 — ironplc parses it as a member reference
             // on the FB instance.
             if instance.is_empty() {
-                return Err(BridgeError::Parse(
-                    "FB call has empty instance name".into(),
-                ));
+                return Err(BridgeError::Parse("FB call has empty instance name".into()));
             }
             if output_pin.is_empty() {
                 return Err(BridgeError::Parse(format!(
@@ -886,14 +873,22 @@ mod tests {
                     negated: false,
                 },
                 coils: vec![
-                    LdCoil { var: "x".into(), kind: LdCoilKind::Standard },
-                    LdCoil { var: "y".into(), kind: LdCoilKind::Standard },
+                    LdCoil {
+                        var: "x".into(),
+                        kind: LdCoilKind::Standard,
+                    },
+                    LdCoil {
+                        var: "y".into(),
+                        kind: LdCoilKind::Standard,
+                    },
                 ],
             }],
         };
         let st = transpile_to_st(&prog).unwrap();
         // The temp must be declared in VAR before the rung uses it.
-        let temp_decl_pos = st.find("__rung_multi : BOOL").expect("temp must be declared");
+        let temp_decl_pos = st
+            .find("__rung_multi : BOOL")
+            .expect("temp must be declared");
         let temp_use_pos = st.find("__rung_multi := a").expect("temp must be used");
         assert!(
             temp_decl_pos < temp_use_pos,
@@ -1421,7 +1416,13 @@ mod tests {
             "CTUD",
             "myUd",
             "QU",
-            &[("CU", "up"), ("CD", "dn"), ("R", "rst"), ("LD", "load"), ("PV", "5")],
+            &[
+                ("CU", "up"),
+                ("CD", "dn"),
+                ("R", "rst"),
+                ("LD", "load"),
+                ("PV", "5"),
+            ],
             &[
                 ("up", "BOOL", LdVarSection::Input),
                 ("dn", "BOOL", LdVarSection::Input),
@@ -1507,7 +1508,10 @@ mod tests {
         // `motor_run :=`.
         let n = line_of(&st, "motor_run := (");
         match map.lookup(n) {
-            Some(LdLocation::Coil { rung_id, coil_index }) => {
+            Some(LdLocation::Coil {
+                rung_id,
+                coil_index,
+            }) => {
                 assert_eq!(rung_id, "r0");
                 assert_eq!(*coil_index, 0);
             }
@@ -1551,8 +1555,14 @@ mod tests {
                     negated: false,
                 },
                 coils: vec![
-                    LdCoil { var: "x".into(), kind: LdCoilKind::Standard },
-                    LdCoil { var: "y".into(), kind: LdCoilKind::Standard },
+                    LdCoil {
+                        var: "x".into(),
+                        kind: LdCoilKind::Standard,
+                    },
+                    LdCoil {
+                        var: "y".into(),
+                        kind: LdCoilKind::Standard,
+                    },
                 ],
             }],
         };
@@ -1566,7 +1576,10 @@ mod tests {
         // Two coil lines
         let x_line = line_of(&st, "x := __rung_multi");
         match map.lookup(x_line) {
-            Some(LdLocation::Coil { rung_id, coil_index }) => {
+            Some(LdLocation::Coil {
+                rung_id,
+                coil_index,
+            }) => {
                 assert_eq!(rung_id, "multi");
                 assert_eq!(*coil_index, 0);
             }
@@ -1574,7 +1587,10 @@ mod tests {
         }
         let y_line = line_of(&st, "y := __rung_multi");
         match map.lookup(y_line) {
-            Some(LdLocation::Coil { rung_id, coil_index }) => {
+            Some(LdLocation::Coil {
+                rung_id,
+                coil_index,
+            }) => {
                 assert_eq!(rung_id, "multi");
                 assert_eq!(*coil_index, 1);
             }
@@ -1641,7 +1657,10 @@ mod tests {
         // The coil assignment one line below should still be a Coil.
         let coil_line = line_of(&st, "out := myT.Q");
         match map.lookup(coil_line) {
-            Some(LdLocation::Coil { rung_id, coil_index }) => {
+            Some(LdLocation::Coil {
+                rung_id,
+                coil_index,
+            }) => {
                 assert_eq!(rung_id, "rdelay");
                 assert_eq!(*coil_index, 0);
             }
@@ -1670,7 +1689,8 @@ mod tests {
         let (st, map) = transpile_to_st_with_map(&prog).unwrap();
         let line_count = st.lines().count();
         assert_eq!(
-            line_count, map.lines.len(),
+            line_count,
+            map.lines.len(),
             "expected one map entry per emitted line; got {} lines vs {} entries\n{}",
             line_count,
             map.lines.len(),

@@ -21,8 +21,8 @@ fn generate_problem_docs(manifest_dir: &str) {
     // Paths into the vendored ironplc repo. The bridge crate sits at
     // `crates/ironplc-bridge/`; ironplc's docs/problems CSV are at
     // `vendor/ironplc/...` — two ".." segments up plus a hop down.
-    let problems_dir = Path::new(manifest_dir)
-        .join("../../vendor/ironplc/docs/reference/compiler/problems");
+    let problems_dir =
+        Path::new(manifest_dir).join("../../vendor/ironplc/docs/reference/compiler/problems");
     let csv_path = Path::new(manifest_dir)
         .join("../../vendor/ironplc/compiler/problems/resources/problem-codes.csv");
 

@@ -27,9 +27,7 @@ impl From<StoreError> for ApiError {
             StoreError::DeviceNotFound(n) => Self::NotFound(format!("device '{n}' not found")),
             StoreError::EdgeNotFound(n) => Self::NotFound(format!("edge '{n}' not found")),
             StoreError::FolderNotFound(n) => Self::NotFound(format!("folder '{n}' not found")),
-            StoreError::FolderNotEmpty(n) => {
-                Self::Conflict(format!("folder '{n}' not empty"))
-            }
+            StoreError::FolderNotEmpty(n) => Self::Conflict(format!("folder '{n}' not empty")),
             other => Self::Internal(other.to_string()),
         }
     }

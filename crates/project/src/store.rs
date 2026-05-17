@@ -811,7 +811,11 @@ fn parse_time_to_ms(spec: &str) -> Option<u32> {
             unit.clear();
         }
     }
-    if total > 0 { Some(total) } else { None }
+    if total > 0 {
+        Some(total)
+    } else {
+        None
+    }
 }
 
 fn parse_priority(args: &str) -> Option<i32> {
@@ -935,9 +939,7 @@ fn walk_files(
                 format!("{prefix}/{name}")
             };
             walk_files(&path, &next_prefix, ext, cb)?;
-        } else if ftype.is_file()
-            && path.extension().and_then(|s| s.to_str()) == Some(ext)
-        {
+        } else if ftype.is_file() && path.extension().and_then(|s| s.to_str()) == Some(ext) {
             let stem = match path.file_stem().and_then(|s| s.to_str()) {
                 Some(s) => s,
                 None => continue,

@@ -10,37 +10,37 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use axum::{
-    Json,
     extract::{
-        Path as AxumPath, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
+        Path as AxumPath, Query, State,
     },
     response::{
-        IntoResponse,
         sse::{Event, KeepAlive, Sse},
+        IntoResponse,
     },
+    Json,
 };
 use futures_util::stream::Stream;
 use futures_util::{SinkExt, StreamExt as FuturesStreamExt};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
 use ironplc_bridge::{
     CheckDiagnostic, DeviceSpec, ProgramHandle, RuntimeMode, RuntimeWriteError, VarSnapshot,
     VariableInfo,
 };
 use project::{
-    Device, Edge, IoMap, MigrationReport, Pou, PouFile, PouLanguage, PouType, ProgramInstance,
-    ProjectListing, ProjectManifest, ProjectStore, ProjectTree, Protocol, Task, Tasks,
-    default_projects_dir, load_last_opened, save_last_opened,
+    default_projects_dir, load_last_opened, save_last_opened, Device, Edge, IoMap, MigrationReport,
+    Pou, PouFile, PouLanguage, PouType, ProgramInstance, ProjectListing, ProjectManifest,
+    ProjectStore, ProjectTree, Protocol, Task, Tasks,
 };
 use serde::{Deserialize, Serialize};
-use tokio_stream::StreamExt as TokioStreamExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::process::Command;
 use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::StreamExt as TokioStreamExt;
 use ts_rs::TS;
 
-use crate::edges::{AttachInfo, DeployReport, EdgeProbe, attach_edge, deploy_to_edge, probe_edge};
+use crate::edges::{attach_edge, deploy_to_edge, probe_edge, AttachInfo, DeployReport, EdgeProbe};
 use crate::error::ApiError;
-use crate::events::{AppEvent, MutationDetail, topic};
+use crate::events::{topic, AppEvent, MutationDetail};
 use serde::Deserialize as SerdeDeserialize;
 
 #[derive(SerdeDeserialize, Debug, Default)]
@@ -279,9 +279,7 @@ pub async fn close_project(State(state): State<AppState>) -> Json<RunResponse> {
     Json(RunResponse { ok: true })
 }
 
-pub async fn project_tree(
-    State(state): State<AppState>,
-) -> Result<Json<ProjectTree>, ApiError> {
+pub async fn project_tree(State(state): State<AppState>) -> Result<Json<ProjectTree>, ApiError> {
     with_project(&state, |store| {
         // The skeleton has each POU file's raw source. We parse each here
         // to surface declarations to the frontend (the store stays parser-
@@ -374,10 +372,7 @@ pub async fn save_pou(
         topic::pou(&path),
         MutationDetail::PouUpdated { path: path.clone() },
     );
-    state.emit_mutation(
-        topic::PROJECT,
-        MutationDetail::PouUpdated { path },
-    );
+    state.emit_mutation(topic::PROJECT, MutationDetail::PouUpdated { path });
     Ok(Json(RunResponse { ok: true }))
 }
 
@@ -385,11 +380,10 @@ pub async fn delete_pou(
     State(state): State<AppState>,
     AxumPath(path): AxumPath<String>,
 ) -> Result<Json<RunResponse>, ApiError> {
-    with_project(&state, |store| store.delete_pou_file(&path).map_err(Into::into))?;
-    state.emit_mutation(
-        topic::PROJECT,
-        MutationDetail::PouDeleted { path },
-    );
+    with_project(&state, |store| {
+        store.delete_pou_file(&path).map_err(Into::into)
+    })?;
+    state.emit_mutation(topic::PROJECT, MutationDetail::PouDeleted { path });
     Ok(Json(RunResponse { ok: true }))
 }
 
@@ -414,10 +408,7 @@ pub async fn delete_pou_folder(
     with_project(&state, |store| {
         store.delete_pou_folder(&path).map_err(Into::into)
     })?;
-    state.emit_mutation(
-        topic::PROJECT,
-        MutationDetail::PouFolderDeleted { path },
-    );
+    state.emit_mutation(topic::PROJECT, MutationDetail::PouFolderDeleted { path });
     Ok(Json(RunResponse { ok: true }))
 }
 
@@ -473,7 +464,9 @@ pub async fn update_device(
             device.name
         )));
     }
-    with_project(&state, |store| store.write_device(&device).map_err(Into::into))?;
+    with_project(&state, |store| {
+        store.write_device(&device).map_err(Into::into)
+    })?;
     state.emit_mutation(
         topic::DEVICES,
         MutationDetail::DeviceUpserted { name: name.clone() },
@@ -492,10 +485,7 @@ pub async fn delete_device(
     with_project(&state, |store| {
         store.delete_device(&name).map_err(Into::into)
     })?;
-    state.emit_mutation(
-        topic::DEVICES,
-        MutationDetail::DeviceDeleted { name },
-    );
+    state.emit_mutation(topic::DEVICES, MutationDetail::DeviceDeleted { name });
     Ok(Json(RunResponse { ok: true }))
 }
 
@@ -556,10 +546,7 @@ pub async fn update_edge(
         topic::EDGES,
         MutationDetail::EdgeUpserted { name: name.clone() },
     );
-    state.emit_mutation(
-        topic::edge(&name),
-        MutationDetail::EdgeUpserted { name },
-    );
+    state.emit_mutation(topic::edge(&name), MutationDetail::EdgeUpserted { name });
     Ok(Json(RunResponse { ok: true }))
 }
 
@@ -570,10 +557,7 @@ pub async fn delete_edge(
     with_project(&state, |store| store.delete_edge(&name).map_err(Into::into))?;
     // Drop any active attachment for this edge so we don't leak ssh procs.
     state.attachments.detach(&name);
-    state.emit_mutation(
-        topic::EDGES,
-        MutationDetail::EdgeDeleted { name },
-    );
+    state.emit_mutation(topic::EDGES, MutationDetail::EdgeDeleted { name });
     Ok(Json(RunResponse { ok: true }))
 }
 
@@ -606,9 +590,7 @@ pub async fn deploy_edge_route(
     let (edge, project_dir) = {
         let guard = state.project.lock().expect("project mutex");
         let store = guard.as_ref().ok_or(ApiError::NoProject)?;
-        let edge = store
-            .read_edge(&name)
-            .map_err(|e| ApiError::from(crate::error::project_err(e)))?;
+        let edge = store.read_edge(&name).map_err(crate::error::project_err)?;
         (edge, store.root().to_path_buf())
     };
     let runtime_binary = find_runtime_binary();
@@ -641,10 +623,7 @@ pub async fn detach_edge_route(
     AxumPath(name): AxumPath<String>,
 ) -> Json<RunResponse> {
     state.attachments.detach(&name);
-    state.emit_mutation(
-        topic::edge(&name),
-        MutationDetail::EdgeDetached { name },
-    );
+    state.emit_mutation(topic::edge(&name), MutationDetail::EdgeDetached { name });
     Json(RunResponse { ok: true })
 }
 
@@ -686,15 +665,12 @@ fn find_runtime_binary() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let parent = exe.parent()?.to_path_buf();
     // Sibling of `server` binary in the same target dir.
-    for candidate in [
+    [
         parent.join("ia2-runtime"),
         parent.parent()?.join("release").join("ia2-runtime"),
-    ] {
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-    None
+    ]
+    .into_iter()
+    .find(|c| c.exists())
 }
 
 // ============================================================
@@ -709,7 +685,9 @@ pub async fn put_iomap(
     State(state): State<AppState>,
     Json(iomap): Json<IoMap>,
 ) -> Result<Json<RunResponse>, ApiError> {
-    with_project(&state, |store| store.write_iomap(&iomap).map_err(Into::into))?;
+    with_project(&state, |store| {
+        store.write_iomap(&iomap).map_err(Into::into)
+    })?;
     state.emit_mutation(topic::IOMAP, MutationDetail::IoMapChanged);
     Ok(Json(RunResponse { ok: true }))
 }
@@ -719,17 +697,16 @@ pub async fn put_iomap(
 // ============================================================
 
 pub async fn get_tasks(State(state): State<AppState>) -> Result<Json<Tasks>, ApiError> {
-    with_project(&state, |store| {
-        Ok(store.read_tasks()?.unwrap_or_default())
-    })
-    .map(Json)
+    with_project(&state, |store| Ok(store.read_tasks()?.unwrap_or_default())).map(Json)
 }
 
 pub async fn put_tasks(
     State(state): State<AppState>,
     Json(tasks): Json<Tasks>,
 ) -> Result<Json<RunResponse>, ApiError> {
-    with_project(&state, |store| store.write_tasks(&tasks).map_err(Into::into))?;
+    with_project(&state, |store| {
+        store.write_tasks(&tasks).map_err(Into::into)
+    })?;
     state.emit_mutation(topic::TASKS, MutationDetail::TasksChanged);
     Ok(Json(RunResponse { ok: true }))
 }
@@ -802,7 +779,12 @@ pub async fn symbols(
     Query(q): Query<CheckQuery>,
     body: String,
 ) -> Json<Vec<ironplc_bridge::VariableInfo>> {
-    let language = match q.language.as_deref().map(str::to_ascii_lowercase).as_deref() {
+    let language = match q
+        .language
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
         Some("ld") => PouLanguage::Ld,
         Some("fbd") => PouLanguage::Fbd,
         Some("sfc") => PouLanguage::Sfc,
@@ -811,16 +793,18 @@ pub async fn symbols(
     Json(ironplc_bridge::extract_symbols(&body, language))
 }
 
-pub async fn check(
-    Query(q): Query<CheckQuery>,
-    body: String,
-) -> Json<Vec<CheckDiagnostic>> {
+pub async fn check(Query(q): Query<CheckQuery>, body: String) -> Json<Vec<CheckDiagnostic>> {
     // The frontend posts `?language=ld` when the editor source on the
     // wire is `.ld.json`. Anything else (or absent) is treated as ST,
     // which is the historical behaviour. Keeping `check` and
     // `check_pou_source` as one HTTP route means the editor doesn't
     // need a second LSP-style channel.
-    let language = match q.language.as_deref().map(str::to_ascii_lowercase).as_deref() {
+    let language = match q
+        .language
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
         Some("ld") => PouLanguage::Ld,
         Some("fbd") => PouLanguage::Fbd,
         Some("sfc") => PouLanguage::Sfc,
@@ -897,9 +881,7 @@ pub struct ProjectPous {
 /// multiple POUs (FB + PROGRAM + FUNCTION side by side); each appears
 /// as its own entry here. Agents and the Tasks pane both use this to
 /// populate the "PROGRAM to schedule" dropdown.
-pub async fn project_pous(
-    State(state): State<AppState>,
-) -> Result<Json<ProjectPous>, ApiError> {
+pub async fn project_pous(State(state): State<AppState>) -> Result<Json<ProjectPous>, ApiError> {
     with_project(&state, |store| {
         let paths = store.list_pou_paths()?;
         let mut out = Vec::new();
@@ -977,9 +959,58 @@ pub async fn run(
     //  - `program: Some("foo")`    → compile_project_with_tasks (synthetic
     //                                 single-instance schedule; tasks.toml
     //                                 untouched on disk)
-    let (container, device_specs, mappings) = {
+    let (container, scan_interval_ms, device_specs, mappings) = {
         let store_guard = state.project.lock().expect("project mutex");
         let store = store_guard.as_ref().ok_or(ApiError::NoProject)?;
+
+        // Determine the effective Tasks for this run — tasks.toml when
+        // running the whole project, synthesised single-program when
+        // doing an ad-hoc run from a specific PROGRAM.
+        let effective_tasks = match req.program.as_deref() {
+            None => store.read_tasks()?.unwrap_or_default(),
+            Some(name) => single_program_tasks(name),
+        };
+
+        // GUARD: ironplc's current codegen only emits one PROGRAM
+        // per container — `find_program()` picks the first declared
+        // and silently drops the rest. Scheduling more than one means
+        // only one would actually run; the others would just appear
+        // to be running. Refuse loudly so users don't ship broken
+        // schedules. The CLI / IDE should land users on a single
+        // PROGRAM run; multi-program needs upstream codegen work
+        // (track in docs/known-issues).
+        if effective_tasks.programs.len() > 1 {
+            let names = effective_tasks
+                .programs
+                .iter()
+                .map(|p| p.program.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(ApiError::BadRequest(format!(
+                "tasks.toml schedules {} PROGRAMs ({}) but the current runtime can \
+                 only execute one PROGRAM per run (an upstream ironplc codegen \
+                 limitation: its `find_program` picks the first declared and the \
+                 rest are silently dropped). Reduce tasks.toml to one PROGRAM, or \
+                 use `cs run --program <name>` / the editor's Run button for an \
+                 ad-hoc single-PROGRAM run.",
+                effective_tasks.programs.len(),
+                names,
+            )));
+        }
+
+        // Scan period: pull the bound task's interval from the
+        // effective Tasks. Falls back to the bridge's default if for
+        // any reason the bind chain is incomplete (no programs, or
+        // task name mismatch — both indicate a malformed tasks.toml
+        // that the editor should catch first, but we degrade
+        // gracefully rather than panic).
+        let scan_interval_ms = effective_tasks
+            .programs
+            .first()
+            .and_then(|p| effective_tasks.tasks.iter().find(|t| t.name == p.task))
+            .map(|t| t.interval_ms as u64)
+            .unwrap_or(ironplc_bridge::DEFAULT_SCAN_INTERVAL_MS);
+
         let container = match (req.program.as_deref(), req.file_path.as_deref()) {
             (None, _) => ironplc_bridge::compile_project(store)?,
             (Some(name), Some(file_path)) => {
@@ -1012,7 +1043,7 @@ pub async fn run(
                 config: d.config,
             })
             .collect::<Vec<_>>();
-        (container, specs, iomap.mappings)
+        (container, scan_interval_ms, specs, iomap.mappings)
     };
 
     {
@@ -1022,7 +1053,8 @@ pub async fn run(
         }
     }
 
-    let handle = ironplc_bridge::spawn(container, device_specs, mappings);
+    let handle =
+        ironplc_bridge::spawn_with_interval(container, device_specs, mappings, scan_interval_ms);
     let mut rx = handle.subscribe();
     let event_tx = state.event_tx.clone();
     let last_snapshot_cache = state.last_snapshot.clone();
@@ -1032,17 +1064,12 @@ pub async fn run(
 
     tokio::spawn(async move {
         while let Ok(snap) = rx.recv().await {
-            *last_snapshot_cache.lock().expect("last_snapshot mutex") =
-                Some(snap.clone());
+            *last_snapshot_cache.lock().expect("last_snapshot mutex") = Some(snap.clone());
             let _ = event_tx.send(AppEvent::Snapshot(snap));
         }
     });
 
-    state
-        .program
-        .lock()
-        .expect("program mutex")
-        .replace(handle);
+    state.program.lock().expect("program mutex").replace(handle);
 
     // Record what kind of run this is so /api/runtime/status can label
     // the Monitor pane on a fresh page load (which would otherwise have
@@ -1079,12 +1106,7 @@ pub async fn run(
 }
 
 pub async fn stop(State(state): State<AppState>) -> Json<RunResponse> {
-    if let Some(handle) = state
-        .program
-        .lock()
-        .expect("program mutex")
-        .take()
-    {
+    if let Some(handle) = state.program.lock().expect("program mutex").take() {
         handle.stop();
     }
     *state.running_info.lock().expect("running_info mutex") = None;
@@ -1127,9 +1149,7 @@ pub async fn events(
 /// nothing has been snapshotted in the current session (no run, or
 /// project was just closed). Lets agents poll one-shot without
 /// subscribing to /api/events SSE.
-pub async fn runtime_snapshot(
-    State(state): State<AppState>,
-) -> Json<Option<VarSnapshot>> {
+pub async fn runtime_snapshot(State(state): State<AppState>) -> Json<Option<VarSnapshot>> {
     Json(state.last_snapshot.lock().expect("last_snapshot").clone())
 }
 
@@ -1171,9 +1191,7 @@ pub struct ForceEntry {
 /// One-shot overview of the runtime — designed for agents who want
 /// "what's going on right now" without composing /health + /api/project
 /// + the SSE stream.
-pub async fn runtime_status(
-    State(state): State<AppState>,
-) -> Json<RuntimeStatus> {
+pub async fn runtime_status(State(state): State<AppState>) -> Json<RuntimeStatus> {
     let project_open = state.project.lock().expect("project").is_some();
     let running = state.program.lock().expect("program").is_some();
     let (project_name, programs, devices) = {
@@ -1181,11 +1199,7 @@ pub async fn runtime_status(
         match guard.as_ref() {
             Some(store) => {
                 let tasks = store.read_tasks().ok().flatten().unwrap_or_default();
-                let programs = tasks
-                    .programs
-                    .iter()
-                    .map(|p| p.instance.clone())
-                    .collect();
+                let programs = tasks.programs.iter().map(|p| p.instance.clone()).collect();
                 let devices = store
                     .list_devices()
                     .map(|ds| ds.iter().map(|d| d.name.clone()).collect())
@@ -1199,9 +1213,9 @@ pub async fn runtime_status(
     let last_error = state.last_error.lock().expect("last_error").clone();
     let running_info = state.running_info.lock().expect("running_info").clone();
     let _ = project_open; // suppress unused — kept for symmetry with runtime
-    // Mode + forces come from the live ProgramHandle, when there is
-    // one. Clone the handle out of the mutex briefly to avoid holding
-    // the sync lock across the calls.
+                          // Mode + forces come from the live ProgramHandle, when there is
+                          // one. Clone the handle out of the mutex briefly to avoid holding
+                          // the sync lock across the calls.
     let (mode, forces) = {
         let guard = state.program.lock().expect("program");
         match guard.as_ref() {
@@ -1326,13 +1340,17 @@ fn live_program(state: &AppState) -> Result<ProgramHandle, ApiError> {
 pub async fn runtime_pause(State(state): State<AppState>) -> Result<Json<ModeResponse>, ApiError> {
     let handle = live_program(&state)?;
     handle.pause();
-    Ok(Json(ModeResponse { mode: handle.mode() }))
+    Ok(Json(ModeResponse {
+        mode: handle.mode(),
+    }))
 }
 
 pub async fn runtime_resume(State(state): State<AppState>) -> Result<Json<ModeResponse>, ApiError> {
     let handle = live_program(&state)?;
     handle.resume();
-    Ok(Json(ModeResponse { mode: handle.mode() }))
+    Ok(Json(ModeResponse {
+        mode: handle.mode(),
+    }))
 }
 
 pub async fn runtime_step(
@@ -1342,7 +1360,9 @@ pub async fn runtime_step(
     let handle = live_program(&state)?;
     let cycles = body.map(|Json(r)| r.cycles).unwrap_or(1);
     handle.step(cycles);
-    Ok(Json(ModeResponse { mode: handle.mode() }))
+    Ok(Json(ModeResponse {
+        mode: handle.mode(),
+    }))
 }
 
 #[derive(Debug, Serialize, TS)]
@@ -1380,23 +1400,16 @@ pub async fn unforce_runtime_variable(
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let handle = live_program(&state)?;
-    handle
-        .unforce_variable(&name)
-        .await
-        .map_err(|e| match e {
-            RuntimeWriteError::Disconnected => {
-                ApiError::Conflict("scan loop has stopped".into())
-            }
-            other => ApiError::Internal(format!("{other:?}")),
-        })?;
+    handle.unforce_variable(&name).await.map_err(|e| match e {
+        RuntimeWriteError::Disconnected => ApiError::Conflict("scan loop has stopped".into()),
+        other => ApiError::Internal(format!("{other:?}")),
+    })?;
     Ok(Json(serde_json::json!({ "name": name, "forced": false })))
 }
 
 /// List currently-forced variables. Returns `[]` when nothing's
 /// running (rather than 409) — easier for clients to render.
-pub async fn list_runtime_forces(
-    State(state): State<AppState>,
-) -> Json<Vec<ForceEntry>> {
+pub async fn list_runtime_forces(State(state): State<AppState>) -> Json<Vec<ForceEntry>> {
     let forces = state
         .program
         .lock()
@@ -1424,10 +1437,7 @@ pub async fn delete_device_folder(
     with_project(&state, |store| {
         store.delete_device_folder(&path).map_err(Into::into)
     })?;
-    state.emit_mutation(
-        topic::DEVICES,
-        MutationDetail::DeviceFolderDeleted { path },
-    );
+    state.emit_mutation(topic::DEVICES, MutationDetail::DeviceFolderDeleted { path });
     Ok(Json(RunResponse { ok: true }))
 }
 
@@ -1438,10 +1448,7 @@ pub async fn delete_edge_folder(
     with_project(&state, |store| {
         store.delete_edge_folder(&path).map_err(Into::into)
     })?;
-    state.emit_mutation(
-        topic::EDGES,
-        MutationDetail::EdgeFolderDeleted { path },
-    );
+    state.emit_mutation(topic::EDGES, MutationDetail::EdgeFolderDeleted { path });
     Ok(Json(RunResponse { ok: true }))
 }
 

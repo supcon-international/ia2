@@ -71,10 +71,7 @@ pub struct AppState {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RunningInfo {
     /// `compile_isolated_source` path: one PROGRAM from one .st file.
-    Isolated {
-        program: String,
-        file_path: String,
-    },
+    Isolated { program: String, file_path: String },
     /// `compile_project_with_tasks` (or `compile_project`): full
     /// tasks.toml schedule. Programs are the PROGRAM names, not the
     /// instance names — that's what makes sense to a human at a glance.
@@ -103,11 +100,7 @@ impl AppState {
     /// `active` flag (and emits an SSE) on the leading edge; the
     /// trailing edge is driven by the watchdog task that ages out
     /// stale heartbeats.
-    pub fn record_agent_heartbeat(
-        &self,
-        command: Option<String>,
-        session: Option<String>,
-    ) {
+    pub fn record_agent_heartbeat(&self, command: Option<String>, session: Option<String>) {
         let edge = {
             let mut s = self.agent.lock().expect("agent mutex");
             let was_active = s.active;

@@ -102,9 +102,7 @@ pub fn transpile_to_st(prog: &FbdProgram) -> Result<String, BridgeError> {
 }
 
 /// As above, but also returns the source map (one entry per ST line).
-pub fn transpile_to_st_with_map(
-    prog: &FbdProgram,
-) -> Result<(String, FbdSourceMap), BridgeError> {
+pub fn transpile_to_st_with_map(prog: &FbdProgram) -> Result<(String, FbdSourceMap), BridgeError> {
     if prog.name.is_empty() {
         return Err(BridgeError::Parse("FBD program name is empty".into()));
     }
@@ -249,7 +247,11 @@ fn write_variable_blocks(
     vars: &[LdVariable],
     fb_instances: &BTreeMap<String, String>,
 ) {
-    for section in [LdVarSection::Input, LdVarSection::Output, LdVarSection::Internal] {
+    for section in [
+        LdVarSection::Input,
+        LdVarSection::Output,
+        LdVarSection::Internal,
+    ] {
         let header = match section {
             LdVarSection::Input => "VAR_INPUT",
             LdVarSection::Output => "VAR_OUTPUT",
@@ -339,14 +341,17 @@ fn emit_output_binding(
     id_to_idx: &HashMap<&str, usize>,
     blocks: &[FbdBlock],
 ) -> Result<(), BridgeError> {
-    let idx = id_to_idx.get(out.from_block.as_str()).ok_or_else(|| {
-        BridgeError::Parse(format!("unknown block '{}'", out.from_block))
-    })?;
+    let idx = id_to_idx
+        .get(out.from_block.as_str())
+        .ok_or_else(|| BridgeError::Parse(format!("unknown block '{}'", out.from_block)))?;
     em.line(
         Some(FbdLocation::Output {
             variable: out.variable.clone(),
         }),
-        format_args!("    {} := {}.{};", out.variable, blocks[*idx].instance, out.from_pin),
+        format_args!(
+            "    {} := {}.{};",
+            out.variable, blocks[*idx].instance, out.from_pin
+        ),
     );
     Ok(())
 }
@@ -363,9 +368,7 @@ fn topo_sort(
     for (i, b) in blocks.iter().enumerate() {
         for input in &b.inputs {
             if let FbdInputSource::Block { block_id, .. } = &input.value {
-                let u = *id_to_idx
-                    .get(block_id.as_str())
-                    .expect("validated above");
+                let u = *id_to_idx.get(block_id.as_str()).expect("validated above");
                 if u == i {
                     return Err(BridgeError::Parse(format!(
                         "FBD block '{}' references itself — self-feedback isn't supported",
@@ -462,10 +465,7 @@ mod tests {
     fn single_block_emits_decl_call_and_output_binding() {
         let st = transpile_to_st(&ton_program()).unwrap();
         assert!(st.contains("myT : TON;"), "got:\n{st}");
-        assert!(
-            st.contains("myT(IN := btn, PT := T#3s);"),
-            "got:\n{st}"
-        );
+        assert!(st.contains("myT(IN := btn, PT := T#3s);"), "got:\n{st}");
         assert!(st.contains("done := myT.Q;"), "got:\n{st}");
         assert!(st.contains("END_PROGRAM"));
     }
@@ -612,10 +612,7 @@ mod tests {
         };
         let err = transpile_to_st(&prog).unwrap_err();
         let msg = format!("{err:?}");
-        assert!(
-            msg.contains("instance") && msg.contains("myT"),
-            "{msg}"
-        );
+        assert!(msg.contains("instance") && msg.contains("myT"), "{msg}");
     }
 
     #[test]
@@ -789,7 +786,9 @@ mod tests {
                     instance: "rt".into(),
                     inputs: vec![FbdInputBinding {
                         pin: "CLK".into(),
-                        value: FbdInputSource::Var { name: "tick".into() },
+                        value: FbdInputSource::Var {
+                            name: "tick".into(),
+                        },
                     }],
                     position: None,
                 },

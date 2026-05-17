@@ -295,7 +295,6 @@ pub struct Device {
     pub config: ProtocolConfig,
 }
 
-
 // ---------------- IO Mapping ----------------
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]

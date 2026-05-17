@@ -5,4 +5,4 @@ mod client;
 mod slave;
 
 pub use client::ModbusDevice;
-pub use slave::{DemoSlave, run_demo_slave};
+pub use slave::{run_demo_slave, DemoSlave};

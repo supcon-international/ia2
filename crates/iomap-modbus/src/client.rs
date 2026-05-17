@@ -5,8 +5,8 @@ use std::str::FromStr;
 use async_trait::async_trait;
 use iocore::{ChannelValue, IoDevice, IoError};
 use project::{ModbusChannel, ModbusChannelKind, ModbusConfig};
+use tokio_modbus::client::{tcp, Context, Reader, Writer};
 use tokio_modbus::Slave;
-use tokio_modbus::client::{Context, Reader, Writer, tcp};
 
 pub struct ModbusDevice {
     name: String,
@@ -94,11 +94,7 @@ impl IoDevice for ModbusDevice {
         }
     }
 
-    async fn write_channel(
-        &mut self,
-        channel: &str,
-        value: ChannelValue,
-    ) -> Result<(), IoError> {
+    async fn write_channel(&mut self, channel: &str, value: ChannelValue) -> Result<(), IoError> {
         let ch = self.channel(channel)?;
         match ch.kind {
             ModbusChannelKind::Coil => {

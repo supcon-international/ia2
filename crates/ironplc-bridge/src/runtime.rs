@@ -8,16 +8,16 @@
 //! `VmRunning::run_round` itself is sync.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use iocore::{ChannelValue, IoDevice};
+use ironplc_container::debug_format::{build_var_debug_map, format_variable_value, VarDebugInfo};
+use ironplc_container::debug_section::iec_type_tag;
 use ironplc_container::Container;
 use ironplc_container::VarIndex;
-use ironplc_container::debug_format::{VarDebugInfo, build_var_debug_map, format_variable_value};
-use ironplc_container::debug_section::iec_type_tag;
 use ironplc_vm::{Vm, VmBuffers, VmRunning};
-use iocore::{ChannelValue, IoDevice};
 use project::{Direction, Mapping, ProtocolConfig};
 use serde::Serialize;
 use tokio::sync::broadcast;
@@ -59,6 +59,10 @@ pub enum RuntimeWriteError {
 /// Out-of-band commands the scan loop drains between rounds. Used so
 /// HTTP handlers (in the server's tokio runtime) can poke the VM (which
 /// lives on a dedicated std::thread + current_thread runtime).
+// The "Variable" postfix on every variant is intentional — these are
+// commands that target a named runtime variable, and the postfix makes
+// `RuntimeCommand::WriteVariable` self-documenting at the call site.
+#[allow(clippy::enum_variant_names)]
 enum RuntimeCommand {
     /// One-shot variable write — applied once, may be overwritten by
     /// the program in subsequent scans. Use `ForceVariable` to keep a
@@ -149,11 +153,7 @@ impl ProgramHandle {
     /// The write is applied between scan rounds, so it's seen by the next
     /// cycle's logic. Returns the value that was written; an error if the
     /// name doesn't resolve to a known variable or the VM traps.
-    pub async fn write_variable(
-        &self,
-        name: &str,
-        value: i32,
-    ) -> Result<i32, RuntimeWriteError> {
+    pub async fn write_variable(&self, name: &str, value: i32) -> Result<i32, RuntimeWriteError> {
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
         self.cmd_tx
             .send(RuntimeCommand::WriteVariable {
@@ -171,11 +171,7 @@ impl ProgramHandle {
     /// writes get overridden each round and field inputs can't push
     /// through. Forces survive across scan cycles, unlike one-shot
     /// `write_variable`. Returns the value that was applied.
-    pub async fn force_variable(
-        &self,
-        name: &str,
-        value: i32,
-    ) -> Result<i32, RuntimeWriteError> {
+    pub async fn force_variable(&self, name: &str, value: i32) -> Result<i32, RuntimeWriteError> {
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
         self.cmd_tx
             .send(RuntimeCommand::ForceVariable {
@@ -189,10 +185,7 @@ impl ProgramHandle {
 
     /// Release a forced variable. The variable resumes program-driven
     /// behaviour next scan. No-op if the variable wasn't forced.
-    pub async fn unforce_variable(
-        &self,
-        name: &str,
-    ) -> Result<(), RuntimeWriteError> {
+    pub async fn unforce_variable(&self, name: &str) -> Result<(), RuntimeWriteError> {
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
         self.cmd_tx
             .send(RuntimeCommand::UnforceVariable {
@@ -210,8 +203,7 @@ impl ProgramHandle {
             .lock()
             .ok()
             .map(|m| {
-                let mut out: Vec<(String, i32)> =
-                    m.iter().map(|(k, &v)| (k.clone(), v)).collect();
+                let mut out: Vec<(String, i32)> = m.iter().map(|(k, &v)| (k.clone(), v)).collect();
                 out.sort_by(|a, b| a.0.cmp(&b.0));
                 out
             })
@@ -220,10 +212,7 @@ impl ProgramHandle {
 
     /// Read the current execution mode (Running / Paused / Step{N}).
     pub fn mode(&self) -> RuntimeMode {
-        self.mode
-            .lock()
-            .map(|m| *m)
-            .unwrap_or(RuntimeMode::Running)
+        self.mode.lock().map(|m| *m).unwrap_or(RuntimeMode::Running)
     }
 
     /// Halt the scan loop. The current round finishes first; subsequent
@@ -257,10 +246,41 @@ impl ProgramHandle {
     }
 }
 
+/// Default scan period when the caller doesn't request one. 100 ms
+/// matches what Codesys-class tools default to and is plenty for
+/// every demo we ship. Anything below ~10 ms starts taxing the
+/// snapshot fan-out without giving the user faster perception.
+pub const DEFAULT_SCAN_INTERVAL_MS: u64 = 100;
+
 pub fn spawn(
     container: Container,
     devices: Vec<DeviceSpec>,
     mappings: Vec<Mapping>,
+) -> ProgramHandle {
+    spawn_with_interval(container, devices, mappings, DEFAULT_SCAN_INTERVAL_MS)
+}
+
+/// Like `spawn`, but throttles the scan loop to `scan_interval_ms`
+/// regardless of what (if anything) the compiled CONFIGURATION
+/// requested. Use this when the caller knows the desired period —
+/// e.g. `compile_project_with_tasks` reads `tasks.toml` and passes
+/// the bound program's task interval through.
+///
+/// Why we throttle in the bridge rather than letting the VM
+/// scheduler do it: as of the currently-vendored ironplc, codegen
+/// does NOT populate `container.task_table`. The VM scheduler
+/// therefore sees zero cyclic tasks → `next_due_us()` returns
+/// `None` → the scan loop falls through to a 1 ms minimum sleep
+/// → ~700 scans/s. That breaks every time-sensitive demo
+/// (PID tunings, SFC transition timings, TON expirations). Until
+/// upstream wires CONFIGURATION → task_table, this bridge-level
+/// throttle is the source of truth for "the scan period the user
+/// asked for in tasks.toml."
+pub fn spawn_with_interval(
+    container: Container,
+    devices: Vec<DeviceSpec>,
+    mappings: Vec<Mapping>,
+    scan_interval_ms: u64,
 ) -> ProgramHandle {
     let stop = Arc::new(AtomicBool::new(false));
     let (snapshot_tx, _) = broadcast::channel(64);
@@ -272,6 +292,7 @@ pub fn spawn(
     let snapshot_tx_clone = snapshot_tx.clone();
     let mode_clone = mode.clone();
     let forces_clone = forces.clone();
+    let scan_interval = Duration::from_millis(scan_interval_ms.max(1));
 
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
@@ -293,6 +314,7 @@ pub fn spawn(
             cmd_rx,
             mode_clone,
             forces_clone,
+            scan_interval,
         ));
     });
 
@@ -305,15 +327,22 @@ pub fn spawn(
     }
 }
 
+// Bundling these into a single config struct would hide what each piece
+// actually does; the long arg list is the most readable form here.
+#[allow(clippy::too_many_arguments)]
 async fn run_loop_async(
     container: Container,
     device_specs: Vec<DeviceSpec>,
+    // ↓ all subsequent args are passed through from spawn_with_interval —
+    // see that function's doc-comment for why scan_interval lives here
+    // rather than coming from the VM's task scheduler.
     mappings: Vec<Mapping>,
     stop: Arc<AtomicBool>,
     snapshot_tx: broadcast::Sender<VarSnapshot>,
     mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<RuntimeCommand>,
     mode: Arc<std::sync::Mutex<RuntimeMode>>,
     forces: Arc<std::sync::Mutex<HashMap<String, i32>>>,
+    scan_interval: Duration,
 ) {
     // ---- Connect devices (skip the ones that fail rather than abort) ----
     let mut devices: Vec<Box<dyn IoDevice>> = Vec::with_capacity(device_specs.len());
@@ -381,7 +410,10 @@ async fn run_loop_async(
             tracing::warn!(var = %m.variable, "mapping references unknown variable, skipping");
             continue;
         };
-        let type_tag = debug_map.get(&var_index).map(|d| d.iec_type_tag).unwrap_or(0);
+        let type_tag = debug_map
+            .get(&var_index)
+            .map(|d| d.iec_type_tag)
+            .unwrap_or(0);
         let rm = ResolvedMapping {
             device_index,
             channel: m.channel.clone(),
@@ -404,6 +436,14 @@ async fn run_loop_async(
     let start = Instant::now();
     let mut last_snapshot = Instant::now() - Duration::from_secs(1);
     let mut scan_count: u64 = 0;
+    // Cadence anchor: when the *next* scan should start. Each cycle
+    // sleeps until this instant, then advances it by one
+    // `scan_interval`. If a scan overruns its budget (the simulation
+    // does heavy work this round), `next_scan_at` slides forward by
+    // `now + scan_interval` so we don't burn CPU catching up; the
+    // overrun is logged via a one-shot warning.
+    let mut next_scan_at = Instant::now() + scan_interval;
+    let mut warned_overrun = false;
 
     loop {
         if stop.load(Ordering::Relaxed) {
@@ -421,13 +461,9 @@ async fn run_loop_async(
             match cmd {
                 RuntimeCommand::WriteVariable { name, value, ack } => {
                     let result = match var_index_by_name.get(&name).copied() {
-                        Some(idx) => match running
-                            .write_variable(VarIndex::new(idx), value)
-                        {
+                        Some(idx) => match running.write_variable(VarIndex::new(idx), value) {
                             Ok(()) => Ok(value),
-                            Err(trap) => {
-                                Err(RuntimeWriteError::Vm(format!("{trap:?}")))
-                            }
+                            Err(trap) => Err(RuntimeWriteError::Vm(format!("{trap:?}"))),
                         },
                         None => Err(RuntimeWriteError::UnknownVariable(name)),
                     };
@@ -549,15 +585,30 @@ async fn run_loop_async(
             last_snapshot = Instant::now();
         }
 
-        // Sleep until next task is due (or briefly yield for freewheeling)
-        if let Some(due_us) = running.next_due_us() {
-            let now_us = start.elapsed().as_micros() as u64;
-            let sleep_us = due_us.saturating_sub(now_us);
-            if sleep_us > 0 {
-                tokio::time::sleep(Duration::from_micros(sleep_us)).await;
-            }
+        // Sleep until the next scan deadline. The VM's `next_due_us`
+        // would also work in theory, but as of the vendored ironplc
+        // codegen doesn't populate the container's task_table from
+        // the CONFIGURATION block — so `next_due_us` returns None
+        // and the loop free-runs at the underlying tokio scheduler's
+        // resolution (~1 ms). The bridge owns the cadence here,
+        // sourced from `tasks.toml` via spawn_with_interval.
+        let now = Instant::now();
+        if now < next_scan_at {
+            tokio::time::sleep(next_scan_at - now).await;
+            next_scan_at += scan_interval;
         } else {
-            tokio::time::sleep(Duration::from_millis(1)).await;
+            if !warned_overrun {
+                let overrun = now - next_scan_at;
+                tracing::warn!(
+                    overrun_us = overrun.as_micros() as u64,
+                    interval_us = scan_interval.as_micros() as u64,
+                    "scan overran its budget — sliding cadence forward and \
+                     suppressing further overrun warnings (the trace will \
+                     show the drift in scan_count vs wall clock)"
+                );
+                warned_overrun = true;
+            }
+            next_scan_at = now + scan_interval;
         }
     }
 

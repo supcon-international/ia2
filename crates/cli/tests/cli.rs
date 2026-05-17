@@ -202,7 +202,8 @@ fn check_json_includes_context_related_explanation() {
         .as_array()
         .expect("P4007 always carries a `variable=…` context line");
     assert!(
-        ctx.iter().any(|c| c.as_str().unwrap_or("").contains("nope")),
+        ctx.iter()
+            .any(|c| c.as_str().unwrap_or("").contains("nope")),
         "expected `variable=nope` in context, got: {ctx:?}"
     );
 }
@@ -227,8 +228,10 @@ fn symbols_lists_variables_and_fb_instances() {
     assert!(names.contains(&"done"));
     assert!(names.contains(&"rt"));
     assert!(names.contains(&"cu"));
-    let directions: Vec<&str> =
-        arr.iter().map(|s| s["direction"].as_str().unwrap()).collect();
+    let directions: Vec<&str> = arr
+        .iter()
+        .map(|s| s["direction"].as_str().unwrap())
+        .collect();
     assert!(directions.contains(&"fb_instance"));
 }
 
@@ -302,9 +305,7 @@ fn transpile_with_map_includes_source_map() {
     // The map should contain at least one Variable entry and one
     // Rung/Coil entry — proves it isn't just nulls.
     let map = v["source_map"].as_array().unwrap();
-    let has_variable = map
-        .iter()
-        .any(|e| !e.is_null() && e["kind"] == "variable");
+    let has_variable = map.iter().any(|e| !e.is_null() && e["kind"] == "variable");
     let has_rung_or_coil = map
         .iter()
         .any(|e| !e.is_null() && (e["kind"] == "rung" || e["kind"] == "coil"));

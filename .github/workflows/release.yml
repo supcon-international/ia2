@@ -1,0 +1,69 @@
+name: Release
+
+# Tag push (e.g. `git tag v0.1.0 && git push --tags`) triggers a full
+# release flow: build the Mac .app, package as a .dmg, upload to a
+# GitHub Release. The body of the release is left empty here so a
+# human can write the user-facing changelog after the fact; tools
+# like cliff / changelog-rs could generate one if we want to
+# automate that later.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.1.0)'
+        required: true
+
+jobs:
+  mac-dmg:
+    name: Build and publish .dmg
+    runs-on: macos-14
+    permissions:
+      contents: write  # required for `softprops/action-gh-release`
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target/
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - name: Install web deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build release .app
+        run: ./apps/mac/build.sh release
+
+      - name: Package as .dmg
+        run: |
+          set -e
+          cd apps/mac/build/release
+          VERSION="${GITHUB_REF##*/}"
+          hdiutil create \
+            -volname "IA2 $VERSION" \
+            -srcfolder IA2.app \
+            -ov -format UDZO \
+            "IA2-$VERSION-macos-arm64.dmg"
+
+      - name: Upload release artifact
+        uses: softprops/action-gh-release@v2
+        with:
+          files: apps/mac/build/release/IA2-*-macos-arm64.dmg
+          draft: true        # publish manually after review
+          generate_release_notes: true

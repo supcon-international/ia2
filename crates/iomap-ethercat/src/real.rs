@@ -34,14 +34,14 @@
 //!   being touched from a tokio task.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, mpsc};
+use std::sync::Arc;
+use std::sync::{mpsc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ethercrab::{MainDevice, MainDeviceConfig, PduStorage, Timeouts, std::ethercat_now};
+use ethercrab::{std::ethercat_now, MainDevice, MainDeviceConfig, PduStorage, Timeouts};
 use iocore::{ChannelValue, IoDevice, IoError};
 use project::{EthercatChannel, EthercatConfig, EthercatPdoDirection};
 
@@ -87,9 +87,7 @@ pub struct RealEthercat {
 /// Whether the bus-side init succeeded. Sent back over the oneshot.
 #[derive(Debug)]
 enum InitResult {
-    Ok {
-        discovered: Vec<SlaveDiscovery>,
-    },
+    Ok { discovered: Vec<SlaveDiscovery> },
     Err(String),
 }
 
@@ -141,9 +139,7 @@ impl RealEthercat {
 
         let thread = thread::Builder::new()
             .name(thread_name)
-            .spawn(move || {
-                smol_main(&nic, cycle_us, pdi_clone, shutdown_clone, init_tx)
-            })
+            .spawn(move || smol_main(&nic, cycle_us, pdi_clone, shutdown_clone, init_tx))
             .map_err(|e| IoError::Connect(format!("spawn ethercat thread: {e}")))?;
 
         // Wait for the worker to report success or failure. The init walk
@@ -232,11 +228,7 @@ impl IoDevice for RealEthercat {
         )
     }
 
-    async fn write_channel(
-        &mut self,
-        channel: &str,
-        value: ChannelValue,
-    ) -> Result<(), IoError> {
+    async fn write_channel(&mut self, channel: &str, value: ChannelValue) -> Result<(), IoError> {
         let meta = self
             .channels
             .get(channel)
@@ -336,9 +328,7 @@ fn smol_main(
         let group = match group.into_op(&maindevice).await {
             Ok(g) => g,
             Err(e) => {
-                let _ = init_tx.send(InitResult::Err(format!(
-                    "into_op (PRE-OP -> OP): {e:?}"
-                )));
+                let _ = init_tx.send(InitResult::Err(format!("into_op (PRE-OP -> OP): {e:?}")));
                 return;
             }
         };

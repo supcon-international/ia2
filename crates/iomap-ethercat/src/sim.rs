@@ -12,9 +12,7 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use iocore::{ChannelValue, IoDevice, IoError};
-use project::{
-    EthercatChannel, EthercatConfig, EthercatDataType, EthercatPdoDirection,
-};
+use project::{EthercatChannel, EthercatConfig, EthercatDataType, EthercatPdoDirection};
 
 pub struct SimEthercat {
     name: String,
@@ -90,11 +88,7 @@ impl IoDevice for SimEthercat {
             .unwrap_or(ChannelValue::I32(0)))
     }
 
-    async fn write_channel(
-        &mut self,
-        channel: &str,
-        value: ChannelValue,
-    ) -> Result<(), IoError> {
+    async fn write_channel(&mut self, channel: &str, value: ChannelValue) -> Result<(), IoError> {
         let meta = self.channel(channel)?.clone();
         if meta.direction == EthercatPdoDirection::TxPdo {
             return Err(IoError::TypeMismatch {

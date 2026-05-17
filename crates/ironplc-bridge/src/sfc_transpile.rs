@@ -19,19 +19,19 @@
 //!   2. **Per-step action block**: one `IF __sfc_step = 'name' THEN …`
 //!      for each step. Inside, action bodies render in author order
 //!      according to their qualifier:
-//!         N → unconditional body
-//!         S → `IF __sfc_prev <> 'name' THEN body END_IF;` (entry edge)
-//!         R → same shape as S; the distinction is documentation
-//!             (S typically asserts, R typically deasserts).
+//!      - N → unconditional body
+//!      - S → `IF __sfc_prev <> 'name' THEN body END_IF;` (entry edge)
+//!      - R → same shape as S; the distinction is documentation
+//!        (S typically asserts, R typically deasserts).
 //!   3. `__sfc_prev := __sfc_step;` — snapshot **before** transitions,
 //!      so the next scan's action block sees the correct prev value
 //!      for entry detection.
 //!   4. **Transition cascade**: one big `IF / ELSIF` chain. First
 //!      satisfied condition wins. Authoring order = priority. Each
 //!      branch:
-//!         `IF __sfc_step = '<from>' AND (<condition>) THEN
-//!              __sfc_step := '<to>';
-//!          ELSIF …`
+//!      `IF __sfc_step = '<from>' AND (<condition>) THEN
+//!           __sfc_step := '<to>';
+//!       ELSIF …`
 //!
 //! Why STRING (not DINT enum)
 //! --------------------------
@@ -72,10 +72,7 @@ pub enum SfcLocation {
     /// A step's action block (`IF __sfc_step = 'name' THEN` … `END_IF;`).
     Step { name: String },
     /// One action body inside a step's IF block.
-    Action {
-        step: String,
-        action_index: usize,
-    },
+    Action { step: String, action_index: usize },
     /// One transition rule in the cascade. `index` matches the
     /// position in `SfcProgram::transitions`.
     Transition { index: usize },
@@ -130,9 +127,7 @@ pub fn transpile_to_st(prog: &SfcProgram) -> Result<String, BridgeError> {
 }
 
 /// As above, but also returns the line-resolution source map.
-pub fn transpile_to_st_with_map(
-    prog: &SfcProgram,
-) -> Result<(String, SfcSourceMap), BridgeError> {
+pub fn transpile_to_st_with_map(prog: &SfcProgram) -> Result<(String, SfcSourceMap), BridgeError> {
     // ----- Validate -----
     if prog.name.is_empty() {
         return Err(BridgeError::Parse("SFC program name is empty".into()));
@@ -229,21 +224,14 @@ pub fn transpile_to_st_with_map(
     em.line(None, format_args!("    (* === SFC transitions === *)"));
     if !prog.transitions.is_empty() {
         for (i, t) in prog.transitions.iter().enumerate() {
-            let cond_clause = format!(
-                "__sfc_step = '{}' AND ({})",
-                t.from,
-                t.condition.trim()
-            );
+            let cond_clause = format!("__sfc_step = '{}' AND ({})", t.from, t.condition.trim());
             let span = Some(SfcLocation::Transition { index: i });
             if i == 0 {
                 em.line(span.clone(), format_args!("    IF {cond_clause} THEN"));
             } else {
                 em.line(span.clone(), format_args!("    ELSIF {cond_clause} THEN"));
             }
-            em.line(
-                span,
-                format_args!("        __sfc_step := '{}';", t.to),
-            );
+            em.line(span, format_args!("        __sfc_step := '{}';", t.to));
         }
         em.line(None, format_args!("    END_IF;"));
     }
@@ -257,7 +245,11 @@ pub fn transpile_to_st_with_map(
 // =================================================================
 
 fn write_variable_blocks(em: &mut StEmitter, vars: &[LdVariable], initial_step: &str) {
-    for section in [LdVarSection::Input, LdVarSection::Output, LdVarSection::Internal] {
+    for section in [
+        LdVarSection::Input,
+        LdVarSection::Output,
+        LdVarSection::Internal,
+    ] {
         let header = match section {
             LdVarSection::Input => "VAR_INPUT",
             LdVarSection::Output => "VAR_OUTPUT",
@@ -332,14 +324,9 @@ fn emit_step_actions(em: &mut StEmitter, step: &SfcStep) {
 /// Write an action body to the emitter, splitting on the user's own
 /// newlines so each line gets its own source-map entry. The body is
 /// trusted ST; the transpiler doesn't try to parse it.
-fn emit_action_body(
-    em: &mut StEmitter,
-    body: &str,
-    span: Option<SfcLocation>,
-    indent: usize,
-) {
+fn emit_action_body(em: &mut StEmitter, body: &str, span: Option<SfcLocation>, indent: usize) {
     let pad = " ".repeat(indent);
-    for line in body.trim_end_matches(|c| c == ' ' || c == '\t').lines() {
+    for line in body.trim_end_matches([' ', '\t']).lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             // Preserve blank lines for readability but still record
@@ -350,12 +337,10 @@ fn emit_action_body(
         // Ensure the body ends with a semicolon — IEC ST requires
         // statement terminators. If the user already supplied one,
         // we won't double it up.
-        let needs_semi = !trimmed.ends_with(';') && !trimmed.ends_with("END_IF") && !trimmed.ends_with("THEN");
+        let needs_semi =
+            !trimmed.ends_with(';') && !trimmed.ends_with("END_IF") && !trimmed.ends_with("THEN");
         if needs_semi {
-            em.line(
-                span.clone(),
-                format_args!("{pad}{trimmed};"),
-            );
+            em.line(span.clone(), format_args!("{pad}{trimmed};"));
         } else {
             em.line(span.clone(), format_args!("{pad}{trimmed}"));
         }
@@ -466,10 +451,7 @@ mod tests {
         assert!(st.contains("__sfc_step : STRING[31] := 'idle';"));
         assert!(st.contains("__sfc_prev : STRING[31] := '';"));
         // Per-step action blocks
-        assert!(
-            st.contains("IF __sfc_step = 'filling' THEN"),
-            "got:\n{st}"
-        );
+        assert!(st.contains("IF __sfc_step = 'filling' THEN"), "got:\n{st}");
         assert!(st.contains("inlet_valve := TRUE;"), "got:\n{st}");
         // Transition cascade
         assert!(

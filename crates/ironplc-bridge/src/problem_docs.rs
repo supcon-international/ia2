@@ -40,15 +40,19 @@ fn strip_rst_title_block(rst: &str) -> String {
     let mut lines = rst.lines().peekable();
     // Pattern A: overline + title + underline (three lines starting
     // with at least one `=`).
-    if let (Some(a), Some(_b), Some(c)) = (lines.peek().copied(), {
-        let mut clone = rst.lines();
-        clone.nth(0);
-        clone.next()
-    }, {
-        let mut clone = rst.lines();
-        clone.nth(0);
-        clone.nth(1)
-    }) {
+    if let (Some(a), Some(_b), Some(c)) = (
+        lines.peek().copied(),
+        {
+            let mut clone = rst.lines();
+            clone.next();
+            clone.next()
+        },
+        {
+            let mut clone = rst.lines();
+            clone.next();
+            clone.nth(1)
+        },
+    ) {
         if a.trim_start().starts_with('=') && c.trim_start().starts_with('=') {
             // Skip three header lines + any blank lines immediately after.
             lines.next();
@@ -75,8 +79,7 @@ mod tests {
         assert!(!title.is_empty());
         // The title from the CSV is the human description.
         assert!(
-            title.to_lowercase().contains("variable")
-                || title.to_lowercase().contains("not"),
+            title.to_lowercase().contains("variable") || title.to_lowercase().contains("not"),
             "got title: {title}"
         );
     }

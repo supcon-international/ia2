@@ -1,0 +1,70 @@
+name: CI
+
+# Runs on every push and PR. Linux only — Mac builds are gated to
+# tags / paths under `.github/workflows/mac.yml` so we don't burn
+# macOS runner time on every commit. Public repo → unlimited free
+# minutes on Linux runners.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel in-progress runs of the same branch on a new push, so the
+# latest commit's CI isn't queued behind a stale one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust (fmt + clippy + test)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (with vendored ironplc submodule)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry + target/
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --quiet
+
+  web:
+    name: Web (typecheck + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+          cache-dependency-path: 'pnpm-lock.yaml'
+
+      - name: Install deps (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Type-check the web app
+        run: cd apps/web && pnpm tsc --noEmit
+
+      - name: Vite build
+        run: cd apps/web && pnpm build

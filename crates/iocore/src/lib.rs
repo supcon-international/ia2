@@ -49,9 +49,5 @@ pub enum IoError {
 pub trait IoDevice: Send {
     fn name(&self) -> &str;
     async fn read_channel(&mut self, channel: &str) -> Result<ChannelValue, IoError>;
-    async fn write_channel(
-        &mut self,
-        channel: &str,
-        value: ChannelValue,
-    ) -> Result<(), IoError>;
+    async fn write_channel(&mut self, channel: &str, value: ChannelValue) -> Result<(), IoError>;
 }

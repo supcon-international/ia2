@@ -15,25 +15,25 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use axum::{
-    Json, Router,
     extract::State,
     response::{
-        IntoResponse,
         sse::{Event, KeepAlive, Sse},
+        IntoResponse,
     },
     routing::{get, post},
+    Json, Router,
 };
 use futures_util::stream::Stream;
 use ironplc_bridge::{DeviceSpec, ProgramHandle, VarSnapshot};
 use project::{ProjectStore, ProtocolConfig};
 use serde::Serialize;
 use tokio::signal;
-use tower_http::cors::CorsLayer;
 use tokio::sync::broadcast;
-use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::StreamExt as _;
+use tower_http::cors::CorsLayer;
 use tracing_subscriber::EnvFilter;
 
 const DEFAULT_BIND: &str = "127.0.0.1:13001";
@@ -181,6 +181,25 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Multi-PROGRAM guard — see the IDE-side `/api/run` handler for
+    // the full explanation. Same reason here on the edge: ironplc's
+    // codegen only honors the first PROGRAM declaration.
+    if tasks.programs.len() > 1 {
+        let names = tasks
+            .programs
+            .iter()
+            .map(|p| p.program.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        anyhow::bail!(
+            "tasks.toml schedules {} PROGRAMs ({}) but the runtime can only execute \
+             one PROGRAM per process (ironplc codegen limitation). Reduce tasks.toml \
+             to one PROGRAM and redeploy.",
+            tasks.programs.len(),
+            names,
+        );
+    }
+
     let container = ironplc_bridge::compile_project(&store).context("compiling project")?;
     tracing::info!(
         devices = device_specs.len(),
@@ -190,8 +209,24 @@ async fn main() -> Result<()> {
         "compiled"
     );
 
+    // Source the scan period from the (only) program's bound task,
+    // falling back to the bridge default if the bind chain is
+    // incomplete. See `crates/ironplc-bridge/src/runtime.rs` for why
+    // we throttle in the bridge rather than via the VM scheduler.
+    let scan_interval_ms = tasks
+        .programs
+        .first()
+        .and_then(|p| tasks.tasks.iter().find(|t| t.name == p.task))
+        .map(|t| t.interval_ms as u64)
+        .unwrap_or(ironplc_bridge::DEFAULT_SCAN_INTERVAL_MS);
+
     // ---- Spawn the bridge ----
-    let handle: ProgramHandle = ironplc_bridge::spawn(container, device_specs, iomap.mappings);
+    let handle: ProgramHandle = ironplc_bridge::spawn_with_interval(
+        container,
+        device_specs,
+        iomap.mappings,
+        scan_interval_ms,
+    );
 
     // Fan out the bridge's snapshots into a runtime-owned broadcast channel,
     // so we can keep the latest snapshot in shared state for /status and so
@@ -277,13 +312,11 @@ async fn wait_for_shutdown(shutdown: Arc<tokio::sync::Notify>) {
 
 fn init_logging() {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                EnvFilter::new(
-                    "ia2_runtime=info,ironplc_bridge=info,iomap_modbus=info,iomap_ethercat=info,info",
-                )
-            }),
-        )
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new(
+                "ia2_runtime=info,ironplc_bridge=info,iomap_modbus=info,iomap_ethercat=info,info",
+            )
+        }))
         .init();
 }
 
