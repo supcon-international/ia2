@@ -56,7 +56,9 @@ jobs:
       - name: Install Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # pnpm 11.0.9 (pinned via packageManager) needs Node ≥22.13.
+          # Local devs are on 22+ (engines.node is the min), CI matches.
+          node-version: 22
           cache: 'pnpm'
           cache-dependency-path: 'pnpm-lock.yaml'
 

@@ -4,7 +4,7 @@
   "version": "0.0.1",
   "packageManager": "pnpm@11.0.9",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.13"
   },
   "scripts": {
     "dev": "pnpm --filter @cs/web dev",
