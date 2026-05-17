@@ -61,13 +61,26 @@ final class WebViewHost: NSObject {
         webView.uiDelegate = self
         NSLog("WebViewHost: delegates set")
 
-        // For v0 use the default WebView background (opaque). The
-        // translucency / vibrancy work is deferred to Phase 2 — it
-        // requires coordinated CSS changes on the React side
-        // (`body { background: transparent }`, sidebar tint that
-        // looks right against blur) and shipping it without those is
-        // worse than not shipping it at all (half-readable content).
         webView.wantsLayer = true
+        // Disable the WebView's own opaque background so the
+        // NSVisualEffectView underlay we install in WindowController
+        // can show through wherever the page leaves a transparent gap
+        // (right now: the 28px titlebar safe area at the top of
+        // Workbench). The rest of the page sets `bg-background`
+        // explicitly so vibrancy only leaks in where we want it.
+        //
+        // `drawsBackground` is a private KVC key on WKWebView (the
+        // public API didn't ship until macOS 13.3 as a non-private
+        // property). The KVC path has been stable since macOS 10.10
+        // — guarded with responds(to:) so a future WebKit shuffle
+        // can't crash us.
+        let drawsBackgroundKey = "drawsBackground"
+        if (webView as NSObject).responds(to: Selector((drawsBackgroundKey))) {
+            webView.setValue(false, forKey: drawsBackgroundKey)
+            NSLog("WebViewHost: drawsBackground = false (vibrancy enabled)")
+        } else {
+            NSLog("WebViewHost: drawsBackground key absent; titlebar vibrancy disabled")
+        }
 
         // Forward console.log from the page to Console.app via a
         // userContentController message handler. Cheap way to debug

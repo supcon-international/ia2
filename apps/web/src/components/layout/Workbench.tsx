@@ -85,9 +85,9 @@ function Shell() {
 
   if (projectLoading) {
     return (
-      <div className="flex h-screen flex-col bg-background text-foreground">
+      <div className="flex h-screen flex-col text-foreground">
         <div aria-hidden className="ia2-mac-drag-region h-7 shrink-0" />
-        <div className="grid flex-1 place-items-center text-sm text-muted-foreground">
+        <div className="grid flex-1 place-items-center bg-background text-sm text-muted-foreground">
           Loading…
         </div>
       </div>
@@ -120,26 +120,28 @@ function Shell() {
   // `collapsedSize` (3% — a tiny stub).
 
   return (
-    <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
+    <div className="flex h-screen w-screen flex-col overflow-hidden text-foreground">
       {/* macOS titlebar safe area. The Swift shell uses
        *   fullSizeContentView + titlebarAppearsTransparent
-       * so the WebView extends under the OS chrome. This 28px strip
-       * reserves space the traffic lights float over, gives the user
-       * an empty drag region to grab the window, and — crucially —
-       * shares `bg-background` with the rest of the page so there's
-       * no seam between OS gray and content. On Windows/Linux this is
-       * still rendered (it's just an empty thin top bar) but doesn't
-       * conflict with anything. See `.ia2-mac-drag-region` in
-       * styles.css for the WebKit drag-region opt-in. */}
+       *   + drawsBackground: false on the WebView
+       *   + NSVisualEffectView underlay (titlebar material)
+       * so this 28px strip stays *transparent* and the OS-level
+       * vibrancy blur shows through behind the traffic lights — the
+       * same translucent chrome Safari / Linear / Figma get for free.
+       * The strip is also a `-webkit-app-region: drag` zone so users
+       * can grab it to move the window. On non-mac shells (Linux /
+       * Windows / browser) the strip is just a thin transparent
+       * gutter that costs ~28px of vertical space — no visual
+       * conflict, no special-casing. */}
       <div
         aria-hidden
-        className="ia2-mac-drag-region h-7 shrink-0 bg-background"
+        className="ia2-mac-drag-region h-7 shrink-0"
       />
       <Group
         orientation="horizontal"
         defaultLayout={hLayout}
         onLayoutChange={setHLayout}
-        className="ia2-no-drag h-full w-full min-h-0"
+        className="ia2-no-drag h-full w-full min-h-0 bg-background"
       >
         <Panel
           id={PANEL_PROJECT}

@@ -96,18 +96,35 @@ final class WindowController: NSWindowController {
 
         super.init(window: window)
 
-        // For v0 keep it simple: WebView is the entire content view,
-        // no NSVisualEffectView underlay. The React app already
-        // paints an opaque background. The vibrancy material is a
-        // polish item — turning it on requires careful CSS work on
-        // the React side (body { background: transparent } plus
-        // sidebar tints that look right against system blur), and
-        // shipping it without that work yields a window whose
-        // content is half-readable.
-        webViewHost.webView.frame = window.contentView?.bounds ?? .zero
+        // Native-feel pass: a thin NSVisualEffectView underlay only at
+        // the top 28pt where the OS chrome lives. The web side then
+        // leaves that strip transparent (see `.ia2-mac-drag-region` in
+        // styles.css), so the macOS blur shows through behind the
+        // traffic lights — same translucent material Linear / Figma /
+        // Safari use for their tab strips.
+        //
+        // The workspace BELOW that strip stays solid (WebView keeps
+        // `drawsBackground = true`, React panels keep their opaque
+        // `bg-card` / `bg-background`). Mixing translucent chrome with
+        // an opaque workspace is the macOS convention — vibrancy
+        // everywhere would only hurt content readability over a busy
+        // desktop wallpaper without buying anything visible.
+        let container = NSView(frame: rect)
+        container.autoresizingMask = [.width, .height]
+
+        let vibrancy = NSVisualEffectView(frame: rect)
+        vibrancy.material = .titlebar
+        vibrancy.blendingMode = .behindWindow
+        vibrancy.state = .followsWindowActiveState
+        vibrancy.autoresizingMask = [.width, .height]
+        container.addSubview(vibrancy)
+
+        webViewHost.webView.frame = container.bounds
         webViewHost.webView.autoresizingMask = [.width, .height]
         webViewHost.webView.translatesAutoresizingMaskIntoConstraints = true
-        window.contentView = webViewHost.webView
+        container.addSubview(webViewHost.webView)
+
+        window.contentView = container
 
         // Title KVO bridge — when the page sets `document.title`,
         // forward to the window menu / Dock label.
