@@ -52,6 +52,16 @@ fi
 # shell's BackendSupervisor.locateServerBinary() looks for this name.
 cp "$SERVER_BIN" "$APP_CONTENTS/MacOS/ia2-server"
 
+# --- 1b. ts-rs bindings ---------------------------------------------
+# ts-rs exports TS types only as a side effect of `cargo test`, not
+# `cargo build`. The React build below imports them by path, so on a
+# fresh clone the web build fails with TS2307 module-not-found errors.
+# Run the targeted export tests (fast — sub-second when builds are
+# cached). `--tests` skips doctests; `export_bindings` is the prefix
+# ts-rs generates for every `#[derive(TS)]`-exported type.
+echo "==> Generating ts-rs bindings"
+(cd "$REPO_ROOT" && cargo test --workspace --tests --quiet export_bindings)
+
 # --- 2. React app ---------------------------------------------------
 
 echo "==> Building React app"
