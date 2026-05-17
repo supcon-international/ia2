@@ -10,6 +10,7 @@ import { MonitorPane } from "./MonitorPane"
 import { ProgramPane } from "./ProgramPane"
 import { ProjectPane } from "./ProjectPane"
 import { TasksPane } from "./TasksPane"
+import { WindowTitleBar } from "./WindowTitleBar"
 
 // The .dark class is applied at module load by lib/dark-mode.ts (reads
 // localStorage). Components that care about the current theme subscribe
@@ -133,10 +134,7 @@ function Shell() {
        * Windows / browser) the strip is just a thin transparent
        * gutter that costs ~28px of vertical space — no visual
        * conflict, no special-casing. */}
-      <div
-        aria-hidden
-        className="ia2-mac-drag-region h-7 shrink-0"
-      />
+      <WindowTitleBar />
       <Group
         orientation="horizontal"
         defaultLayout={hLayout}

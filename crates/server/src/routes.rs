@@ -12,8 +12,9 @@ use std::time::Duration;
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path as AxumPath, Query, State,
+        FromRequestParts, Path as AxumPath, Query, State,
     },
+    http::request::Parts,
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse,
@@ -41,7 +42,45 @@ use ts_rs::TS;
 use crate::edges::{attach_edge, deploy_to_edge, probe_edge, AttachInfo, DeployReport, EdgeProbe};
 use crate::error::ApiError;
 use crate::events::{topic, AppEvent, MutationDetail};
+use crate::state::RunningProgram;
 use serde::Deserialize as SerdeDeserialize;
+
+/// HTTP header name used by every multi-project-aware client. The web
+/// app sets it from the `?project=` URL search param; CLI sets it
+/// when `--project` is passed; both fall back to "header absent" =
+/// "use the server's active project" for single-window workflows.
+pub const PROJECT_HEADER: &str = "x-ia2-project";
+
+/// Axum extractor that pulls the `X-IA2-Project` header off a
+/// request. `None` means "header absent / empty"; the route handler
+/// then falls back to the active project. Never errors — invalid /
+/// missing headers are interpreted as `None`.
+#[derive(Debug, Clone, Default)]
+pub struct ProjectName(pub Option<String>);
+
+impl ProjectName {
+    pub fn as_deref(&self) -> Option<&str> {
+        self.0.as_deref()
+    }
+}
+
+impl<S> FromRequestParts<S> for ProjectName
+where
+    S: Send + Sync,
+{
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let value = parts
+            .headers
+            .get(PROJECT_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        Ok(ProjectName(value))
+    }
+}
 
 #[derive(SerdeDeserialize, Debug, Default)]
 pub struct AgentHeartbeatRequest {
@@ -196,7 +235,7 @@ pub struct RunRequest {
 
 pub async fn health(State(state): State<AppState>) -> Json<HealthStatus> {
     let elapsed = state.start_time.elapsed().as_secs();
-    let project_open = state.project.lock().expect("project mutex").is_some();
+    let project_open = !state.projects.lock().expect("projects mutex").is_empty();
     let program_running = state.program.lock().expect("program mutex").is_some();
     Json(HealthStatus {
         status: "ok".into(),
@@ -232,8 +271,15 @@ pub async fn create_project(
         path: store.root().display().to_string(),
     };
     save_last_opened(store.root());
-    *state.project.lock().expect("project mutex") = Some(store);
+    let name_for_event = info.name.clone();
+    state
+        .projects
+        .lock()
+        .expect("projects mutex")
+        .insert_and_activate(store);
+    save_open_projects(&state);
     state.emit_mutation(
+        name_for_event,
         topic::PROJECT_META,
         MutationDetail::ProjectCreated {
             name: info.name.clone(),
@@ -254,8 +300,19 @@ pub async fn open_project(
         path: store.root().display().to_string(),
     };
     save_last_opened(store.root());
-    *state.project.lock().expect("project mutex") = Some(store);
+    let name_for_event = info.name.clone();
+    // Adding doesn't displace other open projects — multi-window IDE
+    // clients can now have several projects open simultaneously, each
+    // pinned to one window via `X-IA2-Project`. The newly-opened one
+    // becomes the active fallback for header-less requests.
+    state
+        .projects
+        .lock()
+        .expect("projects mutex")
+        .insert_and_activate(store);
+    save_open_projects(&state);
     state.emit_mutation(
+        name_for_event,
         topic::PROJECT_META,
         MutationDetail::ProjectOpened {
             name: info.name.clone(),
@@ -265,22 +322,95 @@ pub async fn open_project(
     Ok(Json(info))
 }
 
-pub async fn close_project(State(state): State<AppState>) -> Json<RunResponse> {
-    if let Some(handle) = state.program.lock().expect("program").take() {
-        handle.stop();
+pub async fn close_project(
+    State(state): State<AppState>,
+    project: ProjectName,
+) -> Result<Json<RunResponse>, ApiError> {
+    // Resolve which project to close — either the named one in the
+    // header or the active fallback. Errors out (NoProject) if no
+    // project is open. After resolving, stop the runtime if it
+    // belongs to that project.
+    let target = resolve_project_name(&state, &project)?;
+    {
+        let mut prog = state.program.lock().expect("program");
+        if let Some(rp) = prog.as_ref() {
+            if rp.project_name == target {
+                if let Some(rp) = prog.take() {
+                    rp.handle.stop();
+                }
+            }
+        }
     }
-    *state.project.lock().expect("project") = None;
-    // Wipe runtime caches — the data belonged to the project that's
-    // being closed, and stale-looking values across projects would
-    // confuse anyone hitting /api/runtime/snapshot.
-    *state.last_snapshot.lock().expect("last_snapshot") = None;
-    *state.last_error.lock().expect("last_error") = None;
-    state.emit_mutation(topic::PROJECT_META, MutationDetail::ProjectClosed);
-    Json(RunResponse { ok: true })
+    // Tear down any ssh tunnels attached to this project's edges.
+    state.attachments.detach_all_for_project(&target);
+    let removed = state
+        .projects
+        .lock()
+        .expect("projects mutex")
+        .remove(&target);
+    if !removed {
+        return Err(ApiError::NoProject);
+    }
+    save_open_projects(&state);
+    // Wipe runtime caches if the program we stopped belonged to this
+    // project — otherwise leave them so the other window can still
+    // see its own values.
+    let running_for_target = state
+        .program
+        .lock()
+        .expect("program")
+        .as_ref()
+        .map(|rp| rp.project_name.clone())
+        == Some(target.clone());
+    if running_for_target {
+        *state.last_snapshot.lock().expect("last_snapshot") = None;
+        *state.last_error.lock().expect("last_error") = None;
+        *state.running_info.lock().expect("running_info") = None;
+    }
+    state.emit_mutation(target, topic::PROJECT_META, MutationDetail::ProjectClosed);
+    Ok(Json(RunResponse { ok: true }))
 }
 
-pub async fn project_tree(State(state): State<AppState>) -> Result<Json<ProjectTree>, ApiError> {
-    with_project(&state, |store| {
+/// GET /api/projects/open — list every project the server currently
+/// has open, plus which one is active. Distinct from
+/// `/api/projects` (the disk-scan listing); this is the in-memory
+/// set the multi-window IDE picks from.
+pub async fn list_open_projects(State(state): State<AppState>) -> Json<OpenProjectsList> {
+    let guard = state.projects.lock().expect("projects mutex");
+    let active = guard.active_name().map(str::to_string);
+    let projects = guard
+        .iter()
+        .map(|store| OpenProjectInfo {
+            name: store.name().to_string(),
+            path: store.root().display().to_string(),
+        })
+        .collect();
+    Json(OpenProjectsList { projects, active })
+}
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct OpenProjectInfo {
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct OpenProjectsList {
+    pub projects: Vec<OpenProjectInfo>,
+    /// Server's current "active fallback" project — the one a
+    /// header-less request lands on. May be absent if nothing is
+    /// open. Frontends with no `?project=` in their URL load this
+    /// one by default.
+    pub active: Option<String>,
+}
+
+pub async fn project_tree(
+    State(state): State<AppState>,
+    project: ProjectName,
+) -> Result<Json<ProjectTree>, ApiError> {
+    with_project(&state, &project, |store| {
         // The skeleton has each POU file's raw source. We parse each here
         // to surface declarations to the frontend (the store stays parser-
         // free; the bridge owns the parser).
@@ -322,9 +452,10 @@ pub async fn project_tree(State(state): State<AppState>) -> Result<Json<ProjectT
 /// pane use the declaration list to drive scheduling.
 pub async fn get_pou(
     State(state): State<AppState>,
+    project: ProjectName,
     AxumPath(path): AxumPath<String>,
 ) -> Result<Json<Pou>, ApiError> {
-    with_project(&state, |store| {
+    with_project(&state, &project, |store| {
         let language = store.pou_file_language(&path)?;
         let source = store.read_pou_source(&path)?;
         Ok(Pou {
@@ -338,10 +469,11 @@ pub async fn get_pou(
 
 pub async fn create_pou(
     State(state): State<AppState>,
+    project: ProjectName,
     Json(req): Json<CreatePouRequest>,
 ) -> Result<Json<Pou>, ApiError> {
     let created_path = req.path.clone();
-    let pou = with_project(&state, |store| {
+    let pou = with_project(&state, &project, |store| {
         let language = req.language;
         let source = store.create_pou_file(&req.path, req.type_, language)?;
         Ok(Pou {
@@ -350,7 +482,9 @@ pub async fn create_pou(
             source,
         })
     })?;
-    state.emit_mutation(
+    emit_mutation(
+        &state,
+        &project,
         topic::PROJECT,
         MutationDetail::PouCreated { path: created_path },
     );
@@ -359,42 +493,59 @@ pub async fn create_pou(
 
 pub async fn save_pou(
     State(state): State<AppState>,
+    project: ProjectName,
     AxumPath(path): AxumPath<String>,
     body: String,
 ) -> Result<Json<RunResponse>, ApiError> {
-    with_project(&state, |store| {
+    with_project(&state, &project, |store| {
         store.write_pou_source(&path, &body).map_err(Into::into)
     })?;
     // Fire two topics: the per-POU one (specific editor refetches its
     // own source) AND the project-wide one (declarations may have
     // changed, so the tree should re-derive symbols).
-    state.emit_mutation(
+    emit_mutation(
+        &state,
+        &project,
         topic::pou(&path),
         MutationDetail::PouUpdated { path: path.clone() },
     );
-    state.emit_mutation(topic::PROJECT, MutationDetail::PouUpdated { path });
+    emit_mutation(
+        &state,
+        &project,
+        topic::PROJECT,
+        MutationDetail::PouUpdated { path },
+    );
     Ok(Json(RunResponse { ok: true }))
 }
 
 pub async fn delete_pou(
     State(state): State<AppState>,
+    project: ProjectName,
     AxumPath(path): AxumPath<String>,
 ) -> Result<Json<RunResponse>, ApiError> {
-    with_project(&state, |store| {
+    with_project(&state, &project, |store| {
         store.delete_pou_file(&path).map_err(Into::into)
     })?;
-    state.emit_mutation(topic::PROJECT, MutationDetail::PouDeleted { path });
+    emit_mutation(
+        &state,
+        &project,
+        topic::PROJECT,
+        MutationDetail::PouDeleted { path },
+    );
     Ok(Json(RunResponse { ok: true }))
 }
 
 pub async fn create_pou_folder(
     State(state): State<AppState>,
+    project: ProjectName,
     Json(req): Json<CreateFolderRequest>,
 ) -> Result<Json<RunResponse>, ApiError> {
-    with_project(&state, |store| {
+    with_project(&state, &project, |store| {
         store.create_pou_folder(&req.path).map_err(Into::into)
     })?;
-    state.emit_mutation(
+    emit_mutation(
+        &state,
+        &project,
         topic::PROJECT,
         MutationDetail::PouFolderCreated { path: req.path },
     );
@@ -403,12 +554,18 @@ pub async fn create_pou_folder(
 
 pub async fn delete_pou_folder(
     State(state): State<AppState>,
+    project: ProjectName,
     AxumPath(path): AxumPath<String>,
 ) -> Result<Json<RunResponse>, ApiError> {
-    with_project(&state, |store| {
+    with_project(&state, &project, |store| {
         store.delete_pou_folder(&path).map_err(Into::into)
     })?;
-    state.emit_mutation(topic::PROJECT, MutationDetail::PouFolderDeleted { path });
+    emit_mutation(
+        &state,
+        &project,
+        topic::PROJECT,
+        MutationDetail::PouFolderDeleted { path },
+    );
     Ok(Json(RunResponse { ok: true }))
 }
 
@@ -416,9 +573,10 @@ pub async fn delete_pou_folder(
 /// fails — handy for mid-typing editor calls.
 pub async fn pou_variables(
     State(state): State<AppState>,
+    project: ProjectName,
     AxumPath(path): AxumPath<String>,
 ) -> Result<Json<Vec<VariableInfo>>, ApiError> {
-    let source = with_project(&state, |store| {
+    let source = with_project(&state, &project, |store| {
         store.read_pou_source(&path).map_err(Into::into)
     })?;
     Ok(Json(ironplc_bridge::extract_variables(&source)))
@@ -430,21 +588,28 @@ pub async fn pou_variables(
 
 pub async fn get_device(
     State(state): State<AppState>,
+    project: ProjectName,
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<Device>, ApiError> {
-    with_project(&state, |store| store.read_device(&name).map_err(Into::into)).map(Json)
+    with_project(&state, &project, |store| {
+        store.read_device(&name).map_err(Into::into)
+    })
+    .map(Json)
 }
 
 pub async fn create_device(
     State(state): State<AppState>,
+    project: ProjectName,
     Json(req): Json<CreateDeviceRequest>,
 ) -> Result<Json<Device>, ApiError> {
-    let device = with_project(&state, |store| {
+    let device = with_project(&state, &project, |store| {
         store
             .create_device(&req.name, req.protocol)
             .map_err(Into::into)
     })?;
-    state.emit_mutation(
+    emit_mutation(
+        &state,
+        &project,
         topic::DEVICES,
         MutationDetail::DeviceUpserted {
             name: device.name.clone(),
@@ -455,6 +620,7 @@ pub async fn create_device(
 
 pub async fn update_device(
     State(state): State<AppState>,
+    project: ProjectName,
     AxumPath(name): AxumPath<String>,
     Json(device): Json<Device>,
 ) -> Result<Json<RunResponse>, ApiError> {
@@ -464,14 +630,18 @@ pub async fn update_device(
             device.name
         )));
     }
-    with_project(&state, |store| {
+    with_project(&state, &project, |store| {
         store.write_device(&device).map_err(Into::into)
     })?;
-    state.emit_mutation(
+    emit_mutation(
+        &state,
+        &project,
         topic::DEVICES,
         MutationDetail::DeviceUpserted { name: name.clone() },
     );
-    state.emit_mutation(
+    emit_mutation(
+        &state,
+        &project,
         topic::device(&name),
         MutationDetail::DeviceUpserted { name },
     );
@@ -480,23 +650,32 @@ pub async fn update_device(
 
 pub async fn delete_device(
     State(state): State<AppState>,
+    project: ProjectName,
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<RunResponse>, ApiError> {
-    with_project(&state, |store| {
+    with_project(&state, &project, |store| {
         store.delete_device(&name).map_err(Into::into)
     })?;
-    state.emit_mutation(topic::DEVICES, MutationDetail::DeviceDeleted { name });
+    emit_mutation(
+        &state,
+        &project,
+        topic::DEVICES,
+        MutationDetail::DeviceDeleted { name },
+    );
     Ok(Json(RunResponse { ok: true }))
 }
 
 pub async fn create_device_folder(
     State(state): State<AppState>,
+    project: ProjectName,
     Json(req): Json<CreateFolderRequest>,
 ) -> Result<Json<RunResponse>, ApiError> {
-    with_project(&state, |store| {
+    with_project(&state, &project, |store| {
         store.create_device_folder(&req.path).map_err(Into::into)
     })?;
-    state.emit_mutation(
+    emit_mutation(
+        &state,
+        &project,
         topic::DEVICES,
         MutationDetail::DeviceFolderCreated { path: req.path },
     );
@@ -509,19 +688,26 @@ pub async fn create_device_folder(
 
 pub async fn get_edge(
     State(state): State<AppState>,
+    project: ProjectName,
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<Edge>, ApiError> {
-    with_project(&state, |store| store.read_edge(&name).map_err(Into::into)).map(Json)
+    with_project(&state, &project, |store| {
+        store.read_edge(&name).map_err(Into::into)
+    })
+    .map(Json)
 }
 
 pub async fn create_edge(
     State(state): State<AppState>,
+    project: ProjectName,
     Json(req): Json<CreateEdgeRequest>,
 ) -> Result<Json<Edge>, ApiError> {
-    let edge = with_project(&state, |store| {
+    let edge = with_project(&state, &project, |store| {
         store.create_edge(&req.name, &req.host).map_err(Into::into)
     })?;
-    state.emit_mutation(
+    emit_mutation(
+        &state,
+        &project,
         topic::EDGES,
         MutationDetail::EdgeUpserted {
             name: edge.name.clone(),
@@ -532,6 +718,7 @@ pub async fn create_edge(
 
 pub async fn update_edge(
     State(state): State<AppState>,
+    project: ProjectName,
     AxumPath(name): AxumPath<String>,
     Json(edge): Json<Edge>,
 ) -> Result<Json<RunResponse>, ApiError> {
@@ -541,34 +728,55 @@ pub async fn update_edge(
             edge.name
         )));
     }
-    with_project(&state, |store| store.write_edge(&edge).map_err(Into::into))?;
-    state.emit_mutation(
+    with_project(&state, &project, |store| {
+        store.write_edge(&edge).map_err(Into::into)
+    })?;
+    emit_mutation(
+        &state,
+        &project,
         topic::EDGES,
         MutationDetail::EdgeUpserted { name: name.clone() },
     );
-    state.emit_mutation(topic::edge(&name), MutationDetail::EdgeUpserted { name });
+    emit_mutation(
+        &state,
+        &project,
+        topic::edge(&name),
+        MutationDetail::EdgeUpserted { name },
+    );
     Ok(Json(RunResponse { ok: true }))
 }
 
 pub async fn delete_edge(
     State(state): State<AppState>,
+    project: ProjectName,
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<RunResponse>, ApiError> {
-    with_project(&state, |store| store.delete_edge(&name).map_err(Into::into))?;
+    with_project(&state, &project, |store| {
+        store.delete_edge(&name).map_err(Into::into)
+    })?;
+    let project_name = resolve_project_name(&state, &project)?;
     // Drop any active attachment for this edge so we don't leak ssh procs.
-    state.attachments.detach(&name);
-    state.emit_mutation(topic::EDGES, MutationDetail::EdgeDeleted { name });
+    state.attachments.detach(&project_name, &name);
+    emit_mutation(
+        &state,
+        &project,
+        topic::EDGES,
+        MutationDetail::EdgeDeleted { name },
+    );
     Ok(Json(RunResponse { ok: true }))
 }
 
 pub async fn create_edge_folder(
     State(state): State<AppState>,
+    project: ProjectName,
     Json(req): Json<CreateFolderRequest>,
 ) -> Result<Json<RunResponse>, ApiError> {
-    with_project(&state, |store| {
+    with_project(&state, &project, |store| {
         store.create_edge_folder(&req.path).map_err(Into::into)
     })?;
-    state.emit_mutation(
+    emit_mutation(
+        &state,
+        &project,
         topic::EDGES,
         MutationDetail::EdgeFolderCreated { path: req.path },
     );
@@ -577,22 +785,24 @@ pub async fn create_edge_folder(
 
 pub async fn probe_edge_route(
     State(state): State<AppState>,
+    project: ProjectName,
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<EdgeProbe>, ApiError> {
-    let edge = with_project(&state, |store| store.read_edge(&name).map_err(Into::into))?;
+    let edge = with_project(&state, &project, |store| {
+        store.read_edge(&name).map_err(Into::into)
+    })?;
     Ok(Json(probe_edge(&edge).await))
 }
 
 pub async fn deploy_edge_route(
     State(state): State<AppState>,
+    project: ProjectName,
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<DeployReport>, ApiError> {
-    let (edge, project_dir) = {
-        let guard = state.project.lock().expect("project mutex");
-        let store = guard.as_ref().ok_or(ApiError::NoProject)?;
+    let (edge, project_dir) = with_project(&state, &project, |store| {
         let edge = store.read_edge(&name).map_err(crate::error::project_err)?;
-        (edge, store.root().to_path_buf())
-    };
+        Ok((edge, store.root().to_path_buf()))
+    })?;
     let runtime_binary = find_runtime_binary();
     deploy_to_edge(&edge, &project_dir, runtime_binary.as_deref())
         .await
@@ -602,13 +812,19 @@ pub async fn deploy_edge_route(
 
 pub async fn attach_edge_route(
     State(state): State<AppState>,
+    project: ProjectName,
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<AttachInfo>, ApiError> {
-    let edge = with_project(&state, |store| store.read_edge(&name).map_err(Into::into))?;
-    let info = attach_edge(&edge, &state.attachments)
+    let edge = with_project(&state, &project, |store| {
+        store.read_edge(&name).map_err(Into::into)
+    })?;
+    let project_name = resolve_project_name(&state, &project)?;
+    let info = attach_edge(&project_name, &edge, &state.attachments)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    state.emit_mutation(
+    emit_mutation(
+        &state,
+        &project,
         topic::edge(&name),
         MutationDetail::EdgeAttached {
             name,
@@ -620,10 +836,24 @@ pub async fn attach_edge_route(
 
 pub async fn detach_edge_route(
     State(state): State<AppState>,
+    project: ProjectName,
     AxumPath(name): AxumPath<String>,
 ) -> Json<RunResponse> {
-    state.attachments.detach(&name);
-    state.emit_mutation(topic::edge(&name), MutationDetail::EdgeDetached { name });
+    let project_name = match resolve_project_name(&state, &project) {
+        Ok(n) => n,
+        Err(_) => {
+            // No project resolved — nothing to detach scoped to one
+            // project. Silent no-op keeps the API idempotent.
+            return Json(RunResponse { ok: true });
+        }
+    };
+    state.attachments.detach(&project_name, &name);
+    emit_mutation(
+        &state,
+        &project,
+        topic::edge(&name),
+        MutationDetail::EdgeDetached { name },
+    );
     Json(RunResponse { ok: true })
 }
 
@@ -643,9 +873,13 @@ pub struct AttachmentStatus {
 
 pub async fn attachment_status(
     State(state): State<AppState>,
+    project: ProjectName,
     AxumPath(name): AxumPath<String>,
 ) -> Json<AttachmentStatus> {
-    let port = state.attachments.current_port(&name);
+    let project_name = resolve_project_name(&state, &project).ok();
+    let port = project_name
+        .as_deref()
+        .and_then(|pname| state.attachments.current_port(pname, &name));
     Json(AttachmentStatus {
         attached: port.is_some(),
         local_port: port,
@@ -677,18 +911,25 @@ fn find_runtime_binary() -> Option<std::path::PathBuf> {
 //  IO Mapping
 // ============================================================
 
-pub async fn get_iomap(State(state): State<AppState>) -> Result<Json<IoMap>, ApiError> {
-    with_project(&state, |store| store.read_iomap().map_err(Into::into)).map(Json)
+pub async fn get_iomap(
+    State(state): State<AppState>,
+    project: ProjectName,
+) -> Result<Json<IoMap>, ApiError> {
+    with_project(&state, &project, |store| {
+        store.read_iomap().map_err(Into::into)
+    })
+    .map(Json)
 }
 
 pub async fn put_iomap(
     State(state): State<AppState>,
+    project: ProjectName,
     Json(iomap): Json<IoMap>,
 ) -> Result<Json<RunResponse>, ApiError> {
-    with_project(&state, |store| {
+    with_project(&state, &project, |store| {
         store.write_iomap(&iomap).map_err(Into::into)
     })?;
-    state.emit_mutation(topic::IOMAP, MutationDetail::IoMapChanged);
+    emit_mutation(&state, &project, topic::IOMAP, MutationDetail::IoMapChanged);
     Ok(Json(RunResponse { ok: true }))
 }
 
@@ -696,18 +937,25 @@ pub async fn put_iomap(
 //  Tasks (project-level scheduling)
 // ============================================================
 
-pub async fn get_tasks(State(state): State<AppState>) -> Result<Json<Tasks>, ApiError> {
-    with_project(&state, |store| Ok(store.read_tasks()?.unwrap_or_default())).map(Json)
+pub async fn get_tasks(
+    State(state): State<AppState>,
+    project: ProjectName,
+) -> Result<Json<Tasks>, ApiError> {
+    with_project(&state, &project, |store| {
+        Ok(store.read_tasks()?.unwrap_or_default())
+    })
+    .map(Json)
 }
 
 pub async fn put_tasks(
     State(state): State<AppState>,
+    project: ProjectName,
     Json(tasks): Json<Tasks>,
 ) -> Result<Json<RunResponse>, ApiError> {
-    with_project(&state, |store| {
+    with_project(&state, &project, |store| {
         store.write_tasks(&tasks).map_err(Into::into)
     })?;
-    state.emit_mutation(topic::TASKS, MutationDetail::TasksChanged);
+    emit_mutation(&state, &project, topic::TASKS, MutationDetail::TasksChanged);
     Ok(Json(RunResponse { ok: true }))
 }
 
@@ -725,8 +973,11 @@ pub struct MigrationResponse {
 /// already-migrated project is a no-op.
 pub async fn migrate_tasks(
     State(state): State<AppState>,
+    project: ProjectName,
 ) -> Result<Json<MigrationResponse>, ApiError> {
-    let report = with_project(&state, |store| store.migrate_tasks().map_err(Into::into))?;
+    let report = with_project(&state, &project, |store| {
+        store.migrate_tasks().map_err(Into::into)
+    })?;
     let resp = match report {
         MigrationReport::Skipped => MigrationResponse {
             migrated: false,
@@ -749,8 +1000,18 @@ pub async fn migrate_tasks(
         // Migration touches both task config and POU sources, so
         // invalidate the broad project key too. The targeted topics
         // keep individual panes responsive.
-        state.emit_mutation(topic::TASKS, MutationDetail::TasksMigrated);
-        state.emit_mutation(topic::PROJECT, MutationDetail::TasksMigrated);
+        emit_mutation(
+            &state,
+            &project,
+            topic::TASKS,
+            MutationDetail::TasksMigrated,
+        );
+        emit_mutation(
+            &state,
+            &project,
+            topic::PROJECT,
+            MutationDetail::TasksMigrated,
+        );
     }
     Ok(Json(resp))
 }
@@ -821,8 +1082,9 @@ pub async fn check(Query(q): Query<CheckQuery>, body: String) -> Json<Vec<CheckD
 /// because no bridge thread or devices are touched.
 pub async fn validate_project(
     State(state): State<AppState>,
+    project: ProjectName,
 ) -> Result<Json<Vec<CheckDiagnostic>>, ApiError> {
-    with_project(&state, |store| {
+    with_project(&state, &project, |store| {
         // compile_project returns Ok(Container) when clean, Err on any
         // problem. Convert the error into a single CheckDiagnostic for
         // the agent — full per-line diagnostics live in /api/check for
@@ -881,8 +1143,11 @@ pub struct ProjectPous {
 /// multiple POUs (FB + PROGRAM + FUNCTION side by side); each appears
 /// as its own entry here. Agents and the Tasks pane both use this to
 /// populate the "PROGRAM to schedule" dropdown.
-pub async fn project_pous(State(state): State<AppState>) -> Result<Json<ProjectPous>, ApiError> {
-    with_project(&state, |store| {
+pub async fn project_pous(
+    State(state): State<AppState>,
+    project: ProjectName,
+) -> Result<Json<ProjectPous>, ApiError> {
+    with_project(&state, &project, |store| {
         let paths = store.list_pou_paths()?;
         let mut out = Vec::new();
         for path in paths {
@@ -928,8 +1193,9 @@ pub struct ProjectVariables {
 /// per-POU.
 pub async fn project_variables(
     State(state): State<AppState>,
+    project: ProjectName,
 ) -> Result<Json<ProjectVariables>, ApiError> {
-    with_project(&state, |store| {
+    with_project(&state, &project, |store| {
         let paths = store.list_pou_paths()?;
         let mut out = Vec::new();
         for path in paths {
@@ -950,9 +1216,16 @@ pub async fn project_variables(
 
 pub async fn run(
     State(state): State<AppState>,
+    project: ProjectName,
     body: Option<Json<RunRequest>>,
 ) -> Result<Json<RunResponse>, ApiError> {
     let req = body.map(|Json(b)| b).unwrap_or_default();
+
+    // Resolve which project this run targets up front. Multi-project
+    // servers route `/api/run` to whichever project the X-IA2-Project
+    // header names (falling back to the active one). We capture the
+    // name now so the RunningProgram entry can label what's running.
+    let project_name = resolve_project_name(&state, &project)?;
 
     // Two modes (matched in the handler so the bridge stays simple):
     //  - `program: None`           → compile_project (reads tasks.toml)
@@ -960,8 +1233,16 @@ pub async fn run(
     //                                 single-instance schedule; tasks.toml
     //                                 untouched on disk)
     let (container, scan_interval_ms, device_specs, mappings, retain_vars) = {
-        let store_guard = state.project.lock().expect("project mutex");
-        let store = store_guard.as_ref().ok_or(ApiError::NoProject)?;
+        let mut projects_guard = state.projects.lock().expect("projects mutex");
+        // Locate the project in the registry; mark it active as a
+        // side-effect so subsequent header-less requests follow this
+        // window. Error if the named project isn't open.
+        if !projects_guard.set_active(&project_name) {
+            return Err(ApiError::NoProject);
+        }
+        let store = projects_guard
+            .get(&project_name)
+            .ok_or(ApiError::NoProject)?;
 
         // Determine the effective Tasks for this run — tasks.toml when
         // running the whole project, synthesised single-program when
@@ -1060,7 +1341,7 @@ pub async fn run(
     {
         let mut guard = state.program.lock().expect("program mutex");
         if let Some(old) = guard.take() {
-            old.stop();
+            old.handle.stop();
         }
     }
 
@@ -1088,7 +1369,14 @@ pub async fn run(
         }
     });
 
-    state.program.lock().expect("program mutex").replace(handle);
+    state
+        .program
+        .lock()
+        .expect("program mutex")
+        .replace(RunningProgram {
+            project_name: project_name.clone(),
+            handle,
+        });
 
     // Record what kind of run this is so /api/runtime/status can label
     // the Monitor pane on a fresh page load (which would otherwise have
@@ -1107,10 +1395,10 @@ pub async fn run(
             // names (instances are bookkeeping; PROGRAM names are what
             // humans recognise from the POU tree).
             let programs = state
-                .project
+                .projects
                 .lock()
-                .expect("project mutex")
-                .as_ref()
+                .expect("projects mutex")
+                .get(&project_name)
                 .and_then(|s| s.read_tasks().ok().flatten())
                 .map(|t| t.programs.into_iter().map(|p| p.program).collect())
                 .unwrap_or_default();
@@ -1125,8 +1413,11 @@ pub async fn run(
 }
 
 pub async fn stop(State(state): State<AppState>) -> Json<RunResponse> {
-    if let Some(handle) = state.program.lock().expect("program mutex").take() {
-        handle.stop();
+    // Global stop — only one program can be running at a time
+    // (hardware constraint), so a single `/api/stop` always targets
+    // it regardless of which window the request came from.
+    if let Some(rp) = state.program.lock().expect("program mutex").take() {
+        rp.handle.stop();
     }
     *state.running_info.lock().expect("running_info mutex") = None;
     let _ = state.event_tx.send(AppEvent::Stopped);
@@ -1210,12 +1501,27 @@ pub struct ForceEntry {
 /// One-shot overview of the runtime — designed for agents who want
 /// "what's going on right now" without composing /health + /api/project
 /// + the SSE stream.
-pub async fn runtime_status(State(state): State<AppState>) -> Json<RuntimeStatus> {
-    let project_open = state.project.lock().expect("project").is_some();
+///
+/// Multi-project note: status is scoped to whichever project the
+/// caller named in `X-IA2-Project` (falling back to active). The
+/// `running_info` field reports the globally-running program even if
+/// it doesn't belong to the queried project; the IDE renders this as
+/// "running: <project>/<program>" so the user can see when their
+/// window is observing a sibling project's run.
+pub async fn runtime_status(
+    State(state): State<AppState>,
+    project: ProjectName,
+) -> Json<RuntimeStatus> {
     let running = state.program.lock().expect("program").is_some();
+    // Project-scoped fields: pulled from whichever project the
+    // header (or active fallback) names. None if no project matched.
     let (project_name, programs, devices) = {
-        let guard = state.project.lock().expect("project");
-        match guard.as_ref() {
+        let guard = state.projects.lock().expect("projects mutex");
+        let store = match project.as_deref() {
+            Some(name) => guard.get(name),
+            None => guard.active(),
+        };
+        match store {
             Some(store) => {
                 let tasks = store.read_tasks().ok().flatten().unwrap_or_default();
                 let programs = tasks.programs.iter().map(|p| p.instance.clone()).collect();
@@ -1231,20 +1537,20 @@ pub async fn runtime_status(State(state): State<AppState>) -> Json<RuntimeStatus
     let snap = state.last_snapshot.lock().expect("last_snapshot").clone();
     let last_error = state.last_error.lock().expect("last_error").clone();
     let running_info = state.running_info.lock().expect("running_info").clone();
-    let _ = project_open; // suppress unused — kept for symmetry with runtime
-                          // Mode + forces come from the live ProgramHandle, when there is
-                          // one. Clone the handle out of the mutex briefly to avoid holding
-                          // the sync lock across the calls.
+    // Mode + forces come from the live ProgramHandle, when there is
+    // one. Clone the handle out of the mutex briefly to avoid holding
+    // the sync lock across the calls.
     let (mode, forces) = {
         let guard = state.program.lock().expect("program");
         match guard.as_ref() {
-            Some(h) => {
-                let forces = h
+            Some(rp) => {
+                let forces = rp
+                    .handle
                     .forces()
                     .into_iter()
                     .map(|(name, value)| ForceEntry { name, value })
                     .collect();
-                (Some(h.mode()), forces)
+                (Some(rp.handle.mode()), forces)
             }
             None => (None, vec![]),
         }
@@ -1285,18 +1591,17 @@ pub struct WriteVariableResponse {
 /// running.
 pub async fn write_runtime_variable(
     State(state): State<AppState>,
+    _project: ProjectName,
     AxumPath(name): AxumPath<String>,
     Json(req): Json<WriteVariableRequest>,
 ) -> Result<Json<WriteVariableResponse>, ApiError> {
-    // Clone the handle out of the mutex so we don't hold a sync lock
-    // across the .await below — see the bridge::ProgramHandle docs.
-    let handle: ProgramHandle = state
-        .program
-        .lock()
-        .expect("program")
-        .as_ref()
-        .cloned()
-        .ok_or(ApiError::Conflict("no program running".into()))?;
+    // The runtime is global (one PROGRAM at a time, hardware constraint);
+    // the `X-IA2-Project` header is accepted for symmetry but not used
+    // to select a program — clients can poll runtime_status to see which
+    // project's program is actually running. Clone the handle out of the
+    // mutex so we don't hold a sync lock across the .await below — see
+    // the bridge::ProgramHandle docs.
+    let handle: ProgramHandle = live_program(&state)?;
     match handle.write_variable(&name, req.value).await {
         Ok(value) => Ok(Json(WriteVariableResponse { name, value })),
         Err(RuntimeWriteError::UnknownVariable(n)) => {
@@ -1345,14 +1650,17 @@ pub struct ModeResponse {
 }
 
 /// Look up the live program handle or return 409. Used by every
-/// debug-control endpoint below.
+/// debug-control endpoint below. The handle is global (one PROGRAM
+/// runs at a time, hardware constraint), so this helper doesn't take
+/// a project name — callers that want to know *which* project owns
+/// the running program use `/api/runtime/status.running_info`.
 fn live_program(state: &AppState) -> Result<ProgramHandle, ApiError> {
     state
         .program
         .lock()
         .expect("program")
         .as_ref()
-        .cloned()
+        .map(|rp| rp.handle.clone())
         .ok_or(ApiError::Conflict("no program running".into()))
 }
 
@@ -1396,6 +1704,7 @@ pub struct ForceResponse {
 /// isn't declared in this POU; 409 if nothing's running.
 pub async fn force_runtime_variable(
     State(state): State<AppState>,
+    _project: ProjectName,
     AxumPath(name): AxumPath<String>,
     Json(req): Json<ForceRequest>,
 ) -> Result<Json<ForceResponse>, ApiError> {
@@ -1416,6 +1725,7 @@ pub async fn force_runtime_variable(
 /// forced — convenient for idempotent agent retries.
 pub async fn unforce_runtime_variable(
     State(state): State<AppState>,
+    _project: ProjectName,
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let handle = live_program(&state)?;
@@ -1434,8 +1744,9 @@ pub async fn list_runtime_forces(State(state): State<AppState>) -> Json<Vec<Forc
         .lock()
         .expect("program")
         .as_ref()
-        .map(|h| {
-            h.forces()
+        .map(|rp| {
+            rp.handle
+                .forces()
                 .into_iter()
                 .map(|(name, value)| ForceEntry { name, value })
                 .collect()
@@ -1451,23 +1762,35 @@ pub async fn list_runtime_forces(State(state): State<AppState>) -> Json<Vec<Forc
 
 pub async fn delete_device_folder(
     State(state): State<AppState>,
+    project: ProjectName,
     AxumPath(path): AxumPath<String>,
 ) -> Result<Json<RunResponse>, ApiError> {
-    with_project(&state, |store| {
+    with_project(&state, &project, |store| {
         store.delete_device_folder(&path).map_err(Into::into)
     })?;
-    state.emit_mutation(topic::DEVICES, MutationDetail::DeviceFolderDeleted { path });
+    emit_mutation(
+        &state,
+        &project,
+        topic::DEVICES,
+        MutationDetail::DeviceFolderDeleted { path },
+    );
     Ok(Json(RunResponse { ok: true }))
 }
 
 pub async fn delete_edge_folder(
     State(state): State<AppState>,
+    project: ProjectName,
     AxumPath(path): AxumPath<String>,
 ) -> Result<Json<RunResponse>, ApiError> {
-    with_project(&state, |store| {
+    with_project(&state, &project, |store| {
         store.delete_edge_folder(&path).map_err(Into::into)
     })?;
-    state.emit_mutation(topic::EDGES, MutationDetail::EdgeFolderDeleted { path });
+    emit_mutation(
+        &state,
+        &project,
+        topic::EDGES,
+        MutationDetail::EdgeFolderDeleted { path },
+    );
     Ok(Json(RunResponse { ok: true }))
 }
 
@@ -1490,6 +1813,10 @@ pub struct DemoSlavePoke {
 /// from real hardware. `kind` matches `ModbusChannelKind`.
 pub async fn poke_demo_slave(
     State(state): State<AppState>,
+    // The demo slave is a process-wide singleton — there's only one,
+    // regardless of which project is open. We still accept the header
+    // for transport symmetry but don't use it for routing.
+    _project: ProjectName,
     AxumPath((kind, addr)): AxumPath<(String, u16)>,
     Json(req): Json<DemoSlavePoke>,
 ) -> Result<Json<RunResponse>, ApiError> {
@@ -1652,13 +1979,154 @@ async fn handle_lsp_ws(socket: WebSocket) {
 //  Helpers
 // ============================================================
 
+/// Resolve a `ProjectName` (parsed `X-IA2-Project` header) to the
+/// project's store and pass it to `f`.
+///
+///   - `ProjectName(Some(name))` → look up the project by name. Errors
+///     with `NoProject` if no such project is open. The found project
+///     is also marked active, so subsequent requests without a header
+///     in this same window continue to land on it (LRU behaviour).
+///   - `ProjectName(None)` → use the server's currently-active project
+///     (the last-touched one). Errors with `NoProject` if no project
+///     is open at all.
+///
+/// This is the **only** project-state access shape the route handlers
+/// should use. Direct `state.projects.lock()` is reserved for
+/// lifecycle handlers (create / open / close / list).
 fn with_project<T>(
     state: &AppState,
+    project: &ProjectName,
     f: impl FnOnce(&ProjectStore) -> Result<T, ApiError>,
 ) -> Result<T, ApiError> {
-    let guard = state.project.lock().expect("project mutex");
-    let store = guard.as_ref().ok_or(ApiError::NoProject)?;
+    let mut guard = state.projects.lock().expect("projects mutex");
+    let store = match project.as_deref() {
+        Some(name) => {
+            if !guard.set_active(name) {
+                return Err(ApiError::BadRequest(format!(
+                    "project '{name}' is not open on this server",
+                )));
+            }
+            guard.get(name).ok_or(ApiError::NoProject)?
+        }
+        None => guard.active().ok_or(ApiError::NoProject)?,
+    };
     f(store)
+}
+
+/// Convenience: resolve the project name and broadcast a mutation
+/// event tagged with it. Designed for callsites that have already
+/// succeeded at a `with_project` call (so the project is known to
+/// exist) — silently no-ops if resolution fails, since by that point
+/// the response has already been written and there's nowhere to
+/// surface an error. Replaces the 2-arg `state.emit_mutation` so
+/// every event on the wire carries its project tag.
+fn emit_mutation(
+    state: &AppState,
+    project: &ProjectName,
+    topic: impl Into<String>,
+    detail: MutationDetail,
+) {
+    if let Ok(name) = resolve_project_name(state, project) {
+        state.emit_mutation(name, topic, detail);
+    }
+}
+
+/// Pull a clone of the active-project's name (resolved per
+/// `ProjectName`) out of the registry. Used by mutation-emission
+/// callsites that need to tag the event with `project: …` but don't
+/// need the full store.
+fn resolve_project_name(state: &AppState, project: &ProjectName) -> Result<String, ApiError> {
+    let guard = state.projects.lock().expect("projects mutex");
+    match project.as_deref() {
+        Some(name) => {
+            if guard.get(name).is_some() {
+                Ok(name.to_string())
+            } else {
+                Err(ApiError::BadRequest(format!(
+                    "project '{name}' is not open on this server",
+                )))
+            }
+        }
+        None => guard
+            .active_name()
+            .map(str::to_string)
+            .ok_or(ApiError::NoProject),
+    }
+}
+
+/// Write the current set of open projects to disk so a server
+/// restart re-opens them. Best-effort — a failure here is logged and
+/// swallowed (the server's state is the source of truth at runtime).
+///
+/// Path: `<projects_dir>/.ia2-open-projects.json`, sibling of the
+/// projects so the file travels with the user's workspace.
+pub fn save_open_projects(state: &AppState) {
+    let path = open_projects_state_path();
+    let guard = state.projects.lock().expect("projects mutex");
+    let paths: Vec<String> = guard
+        .iter()
+        .map(|store| store.root().display().to_string())
+        .collect();
+    let payload = OpenProjectsPersistence {
+        paths,
+        active: guard.active_name().map(str::to_string),
+    };
+    drop(guard);
+    if let Err(e) = (|| -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, serde_json::to_vec_pretty(&payload)?)
+    })() {
+        tracing::warn!(?path, %e, "failed to persist open-projects list");
+    }
+}
+
+/// Restore the open-projects set saved by `save_open_projects`. Any
+/// path that no longer exists on disk is silently dropped — the
+/// expected outcome when a user deletes a project directory between
+/// sessions.
+pub fn load_open_projects(state: &AppState) {
+    let path = open_projects_state_path();
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            tracing::warn!(?path, %e, "open-projects file unreadable; starting empty");
+            return;
+        }
+    };
+    let payload: OpenProjectsPersistence = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(?path, %e, "open-projects file is corrupt; starting empty");
+            return;
+        }
+    };
+    let mut guard = state.projects.lock().expect("projects mutex");
+    for p in &payload.paths {
+        match ProjectStore::open(PathBuf::from(p)) {
+            Ok(store) => guard.insert_and_activate(store),
+            Err(e) => tracing::warn!(path = %p, %e, "could not re-open project; skipping"),
+        }
+    }
+    if let Some(name) = payload.active {
+        // `insert_and_activate` left `active` on whichever was
+        // restored last. Override with the persisted active so the
+        // user lands on the same project they last viewed.
+        guard.set_active(&name);
+    }
+    tracing::info!(open = guard.len(), "restored open projects");
+}
+
+fn open_projects_state_path() -> PathBuf {
+    default_projects_dir().join(".ia2-open-projects.json")
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct OpenProjectsPersistence {
+    paths: Vec<String>,
+    active: Option<String>,
 }
 
 /// Walk the default projects dir and surface anything that looks like a

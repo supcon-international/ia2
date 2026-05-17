@@ -160,6 +160,10 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/projects/open", post(routes::open_project))
         .route("/api/projects/close", post(routes::close_project))
+        // Returns every project the server currently has open, plus
+        // which one is the active fallback. The multi-window IDE
+        // calls this on new-window to populate its project picker.
+        .route("/api/projects/open-list", get(routes::list_open_projects))
         .route("/api/project", get(routes::project_tree))
         .route("/api/project/validate", post(routes::validate_project))
         .route("/api/project/variables", get(routes::project_variables))
@@ -442,13 +446,29 @@ async fn spa_index(path: PathBuf) -> Response {
 }
 
 fn try_open_last_project(state: &AppState) {
+    // First, try restoring the full open-projects set from the
+    // multi-project persistence file. If that file exists, it's the
+    // authoritative source and we skip the legacy `last_opened` path
+    // — multi-window users have multiple projects to restore.
+    crate::routes::load_open_projects(state);
+    if !state.projects.lock().expect("projects mutex").is_empty() {
+        return;
+    }
+    // Legacy fallback (pre-multi-project IDE installations): the
+    // single-project `last_opened` file still wins. Once opened, the
+    // first `save_open_projects` triggered by any CRUD action
+    // migrates the user forward.
     let Some(path) = load_last_opened() else {
         return;
     };
     match ProjectStore::open(path.clone()) {
         Ok(store) => {
             tracing::info!(path = %store.root().display(), "reopened last project");
-            *state.project.lock().expect("project mutex") = Some(store);
+            state
+                .projects
+                .lock()
+                .expect("projects mutex")
+                .insert_and_activate(store);
         }
         Err(e) => tracing::warn!(?path, %e, "failed to reopen last project"),
     }

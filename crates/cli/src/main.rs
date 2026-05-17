@@ -63,6 +63,16 @@ machine-readable JSON on stdout.
 "
 )]
 struct Cli {
+    /// Target a specific open project on a multi-project server. When
+    /// absent (the default for single-project setups), the CLI lets
+    /// the server pick its "active project" — i.e. whichever project
+    /// was most recently opened. Multi-window IDE users pass this to
+    /// target a specific workbench window's project. Wired up as a
+    /// top-level flag so every subcommand inherits it without repeating
+    /// the option per command.
+    #[arg(long, global = true)]
+    project: Option<String>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -377,6 +387,19 @@ enum ProjectCmd {
         #[arg(long, default_value = "http://127.0.0.1:3001")]
         server: String,
     },
+
+    /// List every project the server currently has open, plus which
+    /// one is the active fallback for `--project`-less requests.
+    /// Useful when scripting against a multi-window IDE: pick a name
+    /// from this list, then pass it to subsequent commands via the
+    /// top-level `--project` flag.
+    List {
+        /// JSON output on stdout instead of human pretty-print.
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -429,6 +452,15 @@ enum PouCmd {
 fn main() {
     let args = Cli::parse();
 
+    // Stash the optional --project flag in a process-wide OnceLock
+    // so every HTTP helper can pick it up and add the
+    // X-IA2-Project header. Single-window users who never pass
+    // --project see header-less requests, which is the same wire
+    // shape we always shipped — back-compat.
+    if let Some(p) = args.project.as_deref() {
+        PROJECT_OVERRIDE.set(p.to_string()).ok();
+    }
+
     // Heartbeat: if this command is going to mutate server state,
     // announce to the IDE *before* dispatching. The IDE shows a
     // "takeover" overlay while at least one CLI session is active
@@ -451,6 +483,7 @@ fn main() {
         Command::Project(ProjectCmd::Create { name, server }) => cmd_project_create(&name, &server),
         Command::Project(ProjectCmd::Open { path, server }) => cmd_project_open(&path, &server),
         Command::Project(ProjectCmd::Close { server }) => cmd_project_close(&server),
+        Command::Project(ProjectCmd::List { json, server }) => cmd_project_list(&server, json),
         Command::Pou(p) => cmd_pou(p),
         Command::Run {
             program,
@@ -832,6 +865,47 @@ fn cmd_project_open(path: &Path, server: &str) -> Result<i32> {
 fn cmd_project_close(server: &str) -> Result<i32> {
     let resp = post_json(&format!("{server}/api/projects/close"), &())?;
     println!("{}", serde_json::to_string_pretty(&resp)?);
+    Ok(0)
+}
+
+fn cmd_project_list(server: &str, json: bool) -> Result<i32> {
+    let value = get_json(&format!("{server}/api/projects/open-list"))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(0);
+    }
+    // Human-readable: active marked with `*`, names padded into a
+    // column. Path on the right for orientation.
+    let active = value
+        .get("active")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let projects = value
+        .get("projects")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if projects.is_empty() {
+        eprintln!("no projects open");
+        return Ok(0);
+    }
+    let name_width = projects
+        .iter()
+        .filter_map(|p| p.get("name").and_then(|v| v.as_str()).map(str::len))
+        .max()
+        .unwrap_or(0);
+    for p in &projects {
+        let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+        let path = p.get("path").and_then(|v| v.as_str()).unwrap_or("?");
+        let marker = if name == active { "*" } else { " " };
+        println!("{marker} {name:<name_width$}  {path}");
+    }
+    eprintln!(
+        "{} project{} open · active marked with *",
+        projects.len(),
+        if projects.len() == 1 { "" } else { "s" },
+    );
     Ok(0)
 }
 
@@ -1299,6 +1373,7 @@ fn announce_target(cmd: &Command) -> Option<(&str, &'static str)> {
         | Command::Probe { .. } // read-only — just a status check
         | Command::Project(ProjectCmd::Check { .. })
         | Command::Project(ProjectCmd::Info { .. })
+        | Command::Project(ProjectCmd::List { .. })
         | Command::Runtime(RuntimeCmd::Status { .. }) => None,
 
         Command::Project(ProjectCmd::Create { server, .. }) => Some((server, "project create")),
@@ -1389,9 +1464,27 @@ fn http_agent() -> &'static ureq::Agent {
     })
 }
 
+/// Stores the `--project NAME` value parsed off the command line.
+/// When present, every HTTP request adds an `X-IA2-Project` header
+/// so the server routes the call to the named project; otherwise
+/// the header is omitted and the server uses its active fallback
+/// (back-compat with all the existing single-window flows).
+pub static PROJECT_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Wrap a `ureq::Request` so it carries the X-IA2-Project header when
+/// the user passed `--project NAME`. The builder pattern means each
+/// call site is a one-line `with_project_header(http_agent().post(url))`
+/// or similar.
+fn with_project_header(req: ureq::Request) -> ureq::Request {
+    if let Some(name) = PROJECT_OVERRIDE.get() {
+        req.set("X-IA2-Project", name)
+    } else {
+        req
+    }
+}
+
 fn post_json(url: &str, body: &impl serde::Serialize) -> Result<serde_json::Value> {
-    let resp = http_agent()
-        .post(url)
+    let resp = with_project_header(http_agent().post(url))
         .set("Content-Type", "application/json")
         .send_json(body)
         .map_err(|e| anyhow::anyhow!("POST {url}: {e}"))?;
@@ -1402,8 +1495,7 @@ fn post_json(url: &str, body: &impl serde::Serialize) -> Result<serde_json::Valu
 }
 
 fn get_json(url: &str) -> Result<serde_json::Value> {
-    let resp = http_agent()
-        .get(url)
+    let resp = with_project_header(http_agent().get(url))
         .call()
         .map_err(|e| anyhow::anyhow!("GET {url}: {e}"))?;
     let value: serde_json::Value = resp
@@ -1413,8 +1505,7 @@ fn get_json(url: &str) -> Result<serde_json::Value> {
 }
 
 fn delete_json(url: &str) -> Result<serde_json::Value> {
-    let resp = http_agent()
-        .delete(url)
+    let resp = with_project_header(http_agent().delete(url))
         .call()
         .map_err(|e| anyhow::anyhow!("DELETE {url}: {e}"))?;
     let value: serde_json::Value = resp

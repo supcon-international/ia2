@@ -37,10 +37,12 @@ struct ActiveAttachment {
 
 #[derive(Default)]
 pub struct AttachmentRegistry {
-    /// Keyed by edge name. Replacing an entry drops the previous Child,
-    /// which (because the runtime spawned it with `kill_on_drop(true)`)
-    /// terminates the ssh tunnel cleanly.
-    by_name: Mutex<HashMap<String, ActiveAttachment>>,
+    /// Keyed by `(project_name, edge_name)`. Two projects with an
+    /// identically-named edge keep separate tunnels; closing one
+    /// doesn't touch the other. Replacing an entry drops the previous
+    /// Child, which (because the runtime spawned it with
+    /// `kill_on_drop(true)`) terminates the ssh tunnel cleanly.
+    by_key: Mutex<HashMap<(String, String), ActiveAttachment>>,
 }
 
 impl AttachmentRegistry {
@@ -48,26 +50,36 @@ impl AttachmentRegistry {
         Arc::new(Self::default())
     }
 
-    pub fn current_port(&self, edge_name: &str) -> Option<u16> {
-        self.by_name
+    pub fn current_port(&self, project_name: &str, edge_name: &str) -> Option<u16> {
+        self.by_key
             .lock()
             .expect("attach registry")
-            .get(edge_name)
+            .get(&(project_name.to_string(), edge_name.to_string()))
             .map(|a| a.local_port)
     }
 
-    pub fn insert(&self, edge_name: String, local_port: u16, child: Child) {
-        self.by_name
-            .lock()
-            .expect("attach registry")
-            .insert(edge_name, ActiveAttachment { local_port, child });
+    pub fn insert(&self, project_name: String, edge_name: String, local_port: u16, child: Child) {
+        self.by_key.lock().expect("attach registry").insert(
+            (project_name, edge_name),
+            ActiveAttachment { local_port, child },
+        );
     }
 
     /// Stop the port-forward for one edge (if any). Returns whether
     /// something was actually running.
-    pub fn detach(&self, edge_name: &str) -> bool {
-        let mut guard = self.by_name.lock().expect("attach registry");
-        guard.remove(edge_name).is_some()
+    pub fn detach(&self, project_name: &str, edge_name: &str) -> bool {
+        let mut guard = self.by_key.lock().expect("attach registry");
+        guard
+            .remove(&(project_name.to_string(), edge_name.to_string()))
+            .is_some()
+    }
+
+    /// Drop every tunnel attached to a given project. Called from
+    /// `/api/projects/{name}/close` so closing a project tears down
+    /// its tunnels without affecting other projects' tunnels.
+    pub fn detach_all_for_project(&self, project_name: &str) {
+        let mut guard = self.by_key.lock().expect("attach registry");
+        guard.retain(|(p, _), _| p != project_name);
     }
 }
 
@@ -357,9 +369,15 @@ pub struct AttachInfo {
 }
 
 /// Start an `ssh -N -L 127.0.0.1:<local_port>:127.0.0.1:<edge.runtime_port> <host>`
-/// and stash the child in `registry` keyed by `edge.name`. Re-attaching
-/// while one is live replaces the previous tunnel.
-pub async fn attach_edge(edge: &Edge, registry: &AttachmentRegistry) -> io::Result<AttachInfo> {
+/// and stash the child in `registry` keyed by `(project_name, edge.name)`.
+/// Re-attaching the same `(project, edge)` pair while one is live
+/// replaces the previous tunnel; an identically-named edge in a
+/// different project is independent.
+pub async fn attach_edge(
+    project_name: &str,
+    edge: &Edge,
+    registry: &AttachmentRegistry,
+) -> io::Result<AttachInfo> {
     // Pick an ephemeral local port by binding briefly then releasing it
     // back to the OS — ssh will grab it a moment later. Tiny race window;
     // for an MVP dev tool it's acceptable.
@@ -367,8 +385,8 @@ pub async fn attach_edge(edge: &Edge, registry: &AttachmentRegistry) -> io::Resu
     let local_port = probe.local_addr()?.port();
     drop(probe);
 
-    // Kill any previous tunnel for this edge first.
-    registry.detach(&edge.name);
+    // Kill any previous tunnel for this (project, edge) pair first.
+    registry.detach(project_name, &edge.name);
 
     let forward = format!("{local_port}:127.0.0.1:{}", edge.runtime_port);
     let mut child = ssh_cmd(edge)
@@ -414,7 +432,12 @@ pub async fn attach_edge(edge: &Edge, registry: &AttachmentRegistry) -> io::Resu
         )));
     }
 
-    registry.insert(edge.name.clone(), local_port, child);
+    registry.insert(
+        project_name.to_string(),
+        edge.name.clone(),
+        local_port,
+        child,
+    );
     Ok(AttachInfo { local_port })
 }
 

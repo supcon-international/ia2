@@ -25,6 +25,15 @@ final class WebViewHost: NSObject {
     /// in one place.
     var onTitleChange: ((String) -> Void)?
 
+    /// Called when the page invokes `window.open(url)` on a URL with
+    /// the same origin as the workbench (i.e. another `/?project=…`
+    /// view of the same server). The AppDelegate's handler spawns a
+    /// fresh `WindowController` for the URL — that's what makes the
+    /// multi-window picker actually open a real second Mac window
+    /// rather than a browser tab. Cross-origin opens still go to
+    /// Safari via the existing WKUIDelegate path.
+    var onSameOriginOpen: ((URL) -> Void)?
+
     override init() {
         NSLog("WebViewHost: init begin")
         let config = WKWebViewConfiguration()
@@ -200,15 +209,31 @@ extension WebViewHost: WKNavigationDelegate {
 }
 
 extension WebViewHost: WKUIDelegate {
-    // Open `target="_blank"` links in the user's default browser
-    // (Safari), not as new WebView windows.
+    // `window.open(url)` and `target="_blank"` clicks land here.
+    // Routing policy:
+    //   - Same-origin → spawn another IA2 NSWindow via the host's
+    //     `onSameOriginOpen` callback. The multi-project picker uses
+    //     this to make "Open in new window" actually create a fresh
+    //     Mac window rather than a Safari tab.
+    //   - Cross-origin (external links the user clicked on) → open
+    //     in their default browser. Embedded WebView is not a
+    //     general browsing surface; nobody wants the IA2 app to
+    //     become Safari.
     func webView(
         _ webView: WKWebView,
         createWebViewWith configuration: WKWebViewConfiguration,
         for navigationAction: WKNavigationAction,
         windowFeatures: WKWindowFeatures
     ) -> WKWebView? {
-        if let url = navigationAction.request.url {
+        guard let url = navigationAction.request.url else {
+            return nil
+        }
+        let myOrigin = webView.url.map { ($0.scheme ?? "", $0.host ?? "", $0.port) }
+        let theirOrigin = (url.scheme ?? "", url.host ?? "", url.port)
+        let sameOrigin = myOrigin.map { $0 == theirOrigin } ?? false
+        if sameOrigin, let cb = onSameOriginOpen {
+            cb(url)
+        } else {
             NSWorkspace.shared.open(url)
         }
         return nil

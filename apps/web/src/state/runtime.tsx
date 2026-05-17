@@ -27,6 +27,7 @@ import { invalidationBus, Topic } from "@/state/invalidation"
 import {
   attachEdge as apiAttachEdge,
   closeProject as apiCloseProject,
+  currentProject,
   createDevice as apiCreateDevice,
   createDeviceFolder as apiCreateDeviceFolder,
   createEdge as apiCreateEdge,
@@ -85,6 +86,19 @@ function handleMutationEvent(
     ((path: string) => Promise<void>) | null
   >,
 ): void {
+  // Project-scoping: the SSE channel is single, but server tags every
+  // mutation with its `project` so windows can filter. A window with
+  // `?project=foo` ignores mutations from `?project=bar` so editing
+  // one project doesn't auto-jump or invalidate state in the other.
+  //
+  // `event.project === ""` means a server still tagged something
+  // without a name (defensive) — treat as universal and let it
+  // through so we don't lose events from edge cases.
+  const ours = currentProject()
+  if (ours && event.project && event.project !== ours) {
+    return
+  }
+
   // (1) Fan out cache invalidation. Any hook subscribed via
   // useInvalidate refetches its own slice.
   invalidationBus.emit(event.topic)

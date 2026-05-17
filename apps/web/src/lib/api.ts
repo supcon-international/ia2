@@ -12,6 +12,7 @@ import type { MigrationResponse } from "@/types/generated/MigrationResponse"
 import type { Pou } from "@/types/generated/Pou"
 import type { PouLanguage } from "@/types/generated/PouLanguage"
 import type { PouType } from "@/types/generated/PouType"
+import type { OpenProjectsList } from "@/types/generated/OpenProjectsList"
 import type { ProjectListing } from "@/types/generated/ProjectListing"
 import type { ProjectPous } from "@/types/generated/ProjectPous"
 import type { ProjectTree } from "@/types/generated/ProjectTree"
@@ -29,22 +30,78 @@ async function jsonOrThrow<T>(res: Response, label: string): Promise<T> {
   return res.json() as Promise<T>
 }
 
+// ---------- Multi-project routing --------------------------------
+//
+// Every window in the IDE picks its target project from the URL
+// `?project=<name>` search parameter. The server-side routes take
+// the project from an `X-IA2-Project` request header (with a fallback
+// to "the active project" so legacy single-window flows still work).
+//
+// Two helpers wire this together:
+//
+//   - `currentProject()` reads the URL fresh each call (no module-
+//     level cache; tabs that change their `?project=` via History
+//     API see the new value next request).
+//   - `apiFetch()` is a thin wrapper around `fetch` that attaches
+//     the header when a project is known. All API functions below
+//     use it instead of bare `fetch` so the routing is consistent.
+//
+// We deliberately do NOT prefix the URL with the project name — keeps
+// URLs flat and lets the server treat the header as a per-request
+// concern, not a routing concern. (URL paths still look like
+// `/api/pous/main`.)
+
+/** Read the active project's name out of the URL's `?project=` search
+ * param. Returns `null` if absent — callers (and the server) fall back
+ * to whatever the server is treating as "active". */
+export function currentProject(): string | null {
+  if (typeof window === "undefined") return null
+  const params = new URLSearchParams(window.location.search)
+  const name = params.get("project")
+  return name && name.length > 0 ? name : null
+}
+
+/** `fetch` with the `X-IA2-Project` header injected automatically.
+ * Use this instead of bare `fetch` for every API call. */
+export async function apiFetch(input: string, init?: RequestInit): Promise<Response> {
+  const project = currentProject()
+  if (!project) {
+    return fetch(input, init)
+  }
+  // Merge with any caller-supplied headers; the caller wins if they
+  // explicitly set X-IA2-Project (unusual, but supported).
+  const headers = new Headers(init?.headers)
+  if (!headers.has("X-IA2-Project")) {
+    headers.set("X-IA2-Project", project)
+  }
+  return fetch(input, { ...init, headers })
+}
+
 // ---------- Project lifecycle ----------
 
 /** Returns null when no project is open (server replies 409). */
 export async function fetchProject(): Promise<ProjectTree | null> {
-  const res = await fetch(`/api/project`)
+  const res = await apiFetch(`/api/project`)
   if (res.status === 409) return null
   return jsonOrThrow<ProjectTree>(res, "GET /api/project")
 }
 
 export async function fetchProjects(): Promise<ProjectListing[]> {
-  return jsonOrThrow(await fetch(`/api/projects`), "GET /api/projects")
+  return jsonOrThrow(await apiFetch(`/api/projects`), "GET /api/projects")
+}
+
+/** List projects currently OPEN on the server (multi-window picker
+ * source). Distinct from `fetchProjects` which scans disk. */
+export async function fetchOpenProjects(): Promise<OpenProjectsList> {
+  return jsonOrThrow(
+    await apiFetch(`/api/projects/open-list`),
+    "GET /api/projects/open-list",
+  )
 }
 
 export async function createProject(name: string): Promise<ProjectInfo> {
   return jsonOrThrow(
-    await fetch(`/api/projects`, {
+    await apiFetch(`/api/projects`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name }),
@@ -55,7 +112,7 @@ export async function createProject(name: string): Promise<ProjectInfo> {
 
 export async function openProject(path: string): Promise<ProjectInfo> {
   return jsonOrThrow(
-    await fetch(`/api/projects/open`, {
+    await apiFetch(`/api/projects/open`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path }),
@@ -66,7 +123,7 @@ export async function openProject(path: string): Promise<ProjectInfo> {
 
 export async function closeProject(): Promise<RunResponse> {
   return jsonOrThrow(
-    await fetch(`/api/projects/close`, { method: "POST" }),
+    await apiFetch(`/api/projects/close`, { method: "POST" }),
     "POST /api/projects/close",
   )
 }
@@ -75,7 +132,7 @@ export async function closeProject(): Promise<RunResponse> {
 
 export async function fetchPou(path: string): Promise<Pou> {
   return jsonOrThrow(
-    await fetch(`/api/pous/${encodeURIComponent(path)}`),
+    await apiFetch(`/api/pous/${encodeURIComponent(path)}`),
     `GET /api/pous/${path}`,
   )
 }
@@ -86,7 +143,7 @@ export async function createPou(
   language: PouLanguage = "st",
 ): Promise<Pou> {
   return jsonOrThrow(
-    await fetch(`/api/pous`, {
+    await apiFetch(`/api/pous`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path, type: type_, language }),
@@ -100,7 +157,7 @@ export async function savePou(
   source: string,
 ): Promise<RunResponse> {
   return jsonOrThrow(
-    await fetch(`/api/pous/${encodeURIComponent(path)}`, {
+    await apiFetch(`/api/pous/${encodeURIComponent(path)}`, {
       method: "PUT",
       headers: { "Content-Type": "text/plain" },
       body: source,
@@ -111,7 +168,7 @@ export async function savePou(
 
 export async function deletePou(path: string): Promise<RunResponse> {
   return jsonOrThrow(
-    await fetch(`/api/pous/${encodeURIComponent(path)}`, {
+    await apiFetch(`/api/pous/${encodeURIComponent(path)}`, {
       method: "DELETE",
     }),
     `DELETE /api/pous/${path}`,
@@ -120,7 +177,7 @@ export async function deletePou(path: string): Promise<RunResponse> {
 
 export async function createPouFolder(path: string): Promise<RunResponse> {
   return jsonOrThrow(
-    await fetch(`/api/pous/folders`, {
+    await apiFetch(`/api/pous/folders`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path }),
@@ -131,7 +188,7 @@ export async function createPouFolder(path: string): Promise<RunResponse> {
 
 export async function fetchPouVariables(path: string): Promise<VariableInfo[]> {
   return jsonOrThrow(
-    await fetch(`/api/pous/${encodeURIComponent(path)}/variables`),
+    await apiFetch(`/api/pous/${encodeURIComponent(path)}/variables`),
     `GET /api/pous/${path}/variables`,
   )
 }
@@ -140,7 +197,7 @@ export async function fetchPouVariables(path: string): Promise<VariableInfo[]> {
 
 export async function fetchDevice(name: string): Promise<Device> {
   return jsonOrThrow(
-    await fetch(`/api/devices/${encodeURIComponent(name)}`),
+    await apiFetch(`/api/devices/${encodeURIComponent(name)}`),
     `GET /api/devices/${name}`,
   )
 }
@@ -150,7 +207,7 @@ export async function createDevice(
   protocol: Protocol,
 ): Promise<Device> {
   return jsonOrThrow(
-    await fetch(`/api/devices`, {
+    await apiFetch(`/api/devices`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name, protocol }),
@@ -164,7 +221,7 @@ export async function updateDevice(
   device: Device,
 ): Promise<RunResponse> {
   return jsonOrThrow(
-    await fetch(`/api/devices/${encodeURIComponent(name)}`, {
+    await apiFetch(`/api/devices/${encodeURIComponent(name)}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(device),
@@ -175,7 +232,7 @@ export async function updateDevice(
 
 export async function deleteDevice(name: string): Promise<RunResponse> {
   return jsonOrThrow(
-    await fetch(`/api/devices/${encodeURIComponent(name)}`, {
+    await apiFetch(`/api/devices/${encodeURIComponent(name)}`, {
       method: "DELETE",
     }),
     `DELETE /api/devices/${name}`,
@@ -184,7 +241,7 @@ export async function deleteDevice(name: string): Promise<RunResponse> {
 
 export async function createDeviceFolder(path: string): Promise<RunResponse> {
   return jsonOrThrow(
-    await fetch(`/api/devices/folders`, {
+    await apiFetch(`/api/devices/folders`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path }),
@@ -196,12 +253,12 @@ export async function createDeviceFolder(path: string): Promise<RunResponse> {
 // ---------- Tasks (project-level scheduling) ----------
 
 export async function fetchTasks(): Promise<Tasks> {
-  return jsonOrThrow(await fetch(`/api/tasks`), "GET /api/tasks")
+  return jsonOrThrow(await apiFetch(`/api/tasks`), "GET /api/tasks")
 }
 
 export async function updateTasks(tasks: Tasks): Promise<RunResponse> {
   return jsonOrThrow(
-    await fetch(`/api/tasks`, {
+    await apiFetch(`/api/tasks`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(tasks),
@@ -212,14 +269,14 @@ export async function updateTasks(tasks: Tasks): Promise<RunResponse> {
 
 export async function migrateTasks(): Promise<MigrationResponse> {
   return jsonOrThrow(
-    await fetch(`/api/project/migrate-tasks`, { method: "POST" }),
+    await apiFetch(`/api/project/migrate-tasks`, { method: "POST" }),
     "POST /api/project/migrate-tasks",
   )
 }
 
 export async function fetchProjectPous(): Promise<ProjectPous> {
   return jsonOrThrow(
-    await fetch(`/api/project/pous`),
+    await apiFetch(`/api/project/pous`),
     "GET /api/project/pous",
   )
 }
@@ -227,12 +284,12 @@ export async function fetchProjectPous(): Promise<ProjectPous> {
 // ---------- IO Mapping ----------
 
 export async function fetchIomap(): Promise<IoMap> {
-  return jsonOrThrow(await fetch(`/api/iomap`), "GET /api/iomap")
+  return jsonOrThrow(await apiFetch(`/api/iomap`), "GET /api/iomap")
 }
 
 export async function updateIomap(iomap: IoMap): Promise<RunResponse> {
   return jsonOrThrow(
-    await fetch(`/api/iomap`, {
+    await apiFetch(`/api/iomap`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(iomap),
@@ -263,7 +320,7 @@ export async function fetchSymbols(
   const contentType =
     language === "st" ? "text/plain" : "application/json"
   return jsonOrThrow(
-    await fetch(url, {
+    await apiFetch(url, {
       method: "POST",
       headers: { "Content-Type": contentType },
       body: source,
@@ -285,7 +342,7 @@ export async function checkProgram(
   const contentType =
     language === "st" ? "text/plain" : "application/json"
   return jsonOrThrow(
-    await fetch(url, {
+    await apiFetch(url, {
       method: "POST",
       headers: { "Content-Type": contentType },
       body: source,
@@ -310,7 +367,7 @@ export async function runProgram(
 ): Promise<RunResponse> {
   const body = program ? (file_path ? { program, file_path } : { program }) : {}
   return jsonOrThrow(
-    await fetch(`/api/run`, {
+    await apiFetch(`/api/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -321,7 +378,7 @@ export async function runProgram(
 
 export async function stopProgram(): Promise<RunResponse> {
   return jsonOrThrow(
-    await fetch(`/api/stop`, { method: "POST" }),
+    await apiFetch(`/api/stop`, { method: "POST" }),
     "POST /api/stop",
   )
 }
@@ -336,7 +393,7 @@ export function eventsUrl(): string {
  *  no SSE `started` event will fire for an already-running program). */
 export async function fetchRuntimeStatus(): Promise<RuntimeStatus> {
   return jsonOrThrow(
-    await fetch(`/api/runtime/status`),
+    await apiFetch(`/api/runtime/status`),
     "GET /api/runtime/status",
   )
 }
@@ -364,7 +421,7 @@ export async function writeVariable(
 ): Promise<void> {
   const i32 = encodeForWrite(value, typeName)
   await jsonOrThrow(
-    await fetch(`/api/runtime/variables/${encodeURIComponent(name)}`, {
+    await apiFetch(`/api/runtime/variables/${encodeURIComponent(name)}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ value: i32 }),
@@ -379,7 +436,7 @@ export async function writeVariable(
  *  Variable writes and forces still apply while paused. */
 export async function pauseRuntime(): Promise<void> {
   await jsonOrThrow(
-    await fetch(`/api/runtime/pause`, { method: "POST" }),
+    await apiFetch(`/api/runtime/pause`, { method: "POST" }),
     "POST /api/runtime/pause",
   )
 }
@@ -387,7 +444,7 @@ export async function pauseRuntime(): Promise<void> {
 /** Resume continuous scanning. */
 export async function resumeRuntime(): Promise<void> {
   await jsonOrThrow(
-    await fetch(`/api/runtime/resume`, { method: "POST" }),
+    await apiFetch(`/api/runtime/resume`, { method: "POST" }),
     "POST /api/runtime/resume",
   )
 }
@@ -395,7 +452,7 @@ export async function resumeRuntime(): Promise<void> {
 /** Run `cycles` scan rounds then auto-pause (default 1). */
 export async function stepRuntime(cycles: number = 1): Promise<void> {
   await jsonOrThrow(
-    await fetch(`/api/runtime/step`, {
+    await apiFetch(`/api/runtime/step`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ cycles }),
@@ -413,7 +470,7 @@ export async function forceVariable(
 ): Promise<void> {
   const i32 = encodeForWrite(value, typeName)
   await jsonOrThrow(
-    await fetch(`/api/runtime/forces/${encodeURIComponent(name)}`, {
+    await apiFetch(`/api/runtime/forces/${encodeURIComponent(name)}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ value: i32 }),
@@ -425,7 +482,7 @@ export async function forceVariable(
 /** Release a forced variable. Idempotent — no-op if not currently forced. */
 export async function unforceVariable(name: string): Promise<void> {
   await jsonOrThrow(
-    await fetch(`/api/runtime/forces/${encodeURIComponent(name)}`, {
+    await apiFetch(`/api/runtime/forces/${encodeURIComponent(name)}`, {
       method: "DELETE",
     }),
     `DELETE /api/runtime/forces/${name}`,
@@ -446,21 +503,21 @@ function encodeForWrite(value: number, typeName: string): number {
 }
 
 export async function fetchDemoSlaveSnapshot(): Promise<DemoSlaveSnapshot> {
-  return jsonOrThrow(await fetch(`/api/_demo/slave`), "GET /api/_demo/slave")
+  return jsonOrThrow(await apiFetch(`/api/_demo/slave`), "GET /api/_demo/slave")
 }
 
 // ---------- Edges ----------
 
 export async function fetchEdge(name: string): Promise<Edge> {
   return jsonOrThrow(
-    await fetch(`/api/edges/${encodeURIComponent(name)}`),
+    await apiFetch(`/api/edges/${encodeURIComponent(name)}`),
     `GET /api/edges/${name}`,
   )
 }
 
 export async function createEdge(name: string, host: string): Promise<Edge> {
   return jsonOrThrow(
-    await fetch(`/api/edges`, {
+    await apiFetch(`/api/edges`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name, host }),
@@ -471,7 +528,7 @@ export async function createEdge(name: string, host: string): Promise<Edge> {
 
 export async function updateEdge(name: string, edge: Edge): Promise<RunResponse> {
   return jsonOrThrow(
-    await fetch(`/api/edges/${encodeURIComponent(name)}`, {
+    await apiFetch(`/api/edges/${encodeURIComponent(name)}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(edge),
@@ -482,14 +539,14 @@ export async function updateEdge(name: string, edge: Edge): Promise<RunResponse>
 
 export async function deleteEdge(name: string): Promise<RunResponse> {
   return jsonOrThrow(
-    await fetch(`/api/edges/${encodeURIComponent(name)}`, { method: "DELETE" }),
+    await apiFetch(`/api/edges/${encodeURIComponent(name)}`, { method: "DELETE" }),
     `DELETE /api/edges/${name}`,
   )
 }
 
 export async function createEdgeFolder(path: string): Promise<RunResponse> {
   return jsonOrThrow(
-    await fetch(`/api/edges/folders`, {
+    await apiFetch(`/api/edges/folders`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path }),
@@ -500,14 +557,14 @@ export async function createEdgeFolder(path: string): Promise<RunResponse> {
 
 export async function probeEdge(name: string): Promise<EdgeProbe> {
   return jsonOrThrow(
-    await fetch(`/api/edges/${encodeURIComponent(name)}/probe`),
+    await apiFetch(`/api/edges/${encodeURIComponent(name)}/probe`),
     `GET /api/edges/${name}/probe`,
   )
 }
 
 export async function deployEdge(name: string): Promise<DeployReport> {
   return jsonOrThrow(
-    await fetch(`/api/edges/${encodeURIComponent(name)}/deploy`, {
+    await apiFetch(`/api/edges/${encodeURIComponent(name)}/deploy`, {
       method: "POST",
     }),
     `POST /api/edges/${name}/deploy`,
@@ -516,7 +573,7 @@ export async function deployEdge(name: string): Promise<DeployReport> {
 
 export async function attachEdge(name: string): Promise<AttachInfo> {
   return jsonOrThrow(
-    await fetch(`/api/edges/${encodeURIComponent(name)}/attach`, {
+    await apiFetch(`/api/edges/${encodeURIComponent(name)}/attach`, {
       method: "POST",
     }),
     `POST /api/edges/${name}/attach`,
@@ -525,7 +582,7 @@ export async function attachEdge(name: string): Promise<AttachInfo> {
 
 export async function detachEdge(name: string): Promise<RunResponse> {
   return jsonOrThrow(
-    await fetch(`/api/edges/${encodeURIComponent(name)}/detach`, {
+    await apiFetch(`/api/edges/${encodeURIComponent(name)}/detach`, {
       method: "POST",
     }),
     `POST /api/edges/${name}/detach`,
@@ -534,7 +591,7 @@ export async function detachEdge(name: string): Promise<RunResponse> {
 
 export async function fetchAttachment(name: string): Promise<AttachmentStatus> {
   return jsonOrThrow(
-    await fetch(`/api/edges/${encodeURIComponent(name)}/attachment`),
+    await apiFetch(`/api/edges/${encodeURIComponent(name)}/attachment`),
     `GET /api/edges/${name}/attachment`,
   )
 }

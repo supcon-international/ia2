@@ -66,6 +66,13 @@ pub struct AgentActivity {
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct MutationEvent {
+    /// Which project this mutation belongs to. Server broadcasts on a
+    /// single SSE channel; each frontend window filters to events
+    /// matching its currently-displayed project so window A doesn't
+    /// auto-jump on window B's POU save. CLI agents that run without
+    /// `--project` set this to whatever the server's active project
+    /// was at the time of the mutation.
+    pub project: String,
     /// Cache-bust key. Stable, lowercase, optionally namespaced with
     /// `:` for per-resource granularity (e.g. `pou:main`). The
     /// frontend's `invalidationBus` matches subscribers on this
