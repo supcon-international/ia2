@@ -245,9 +245,20 @@ async fn main() -> anyhow::Result<()> {
             "/api/runtime/variables/{name}",
             post(routes::write_runtime_variable),
         )
-        // Agent activity heartbeat — see crates/server/src/events.rs::
-        // AgentActivity for the takeover-overlay protocol.
+        // Agent activity heartbeat — transient one-off path; the
+        // overlay flashes on then ages out after TRANSIENT_TTL.
+        // See crates/server/src/events.rs::AgentActivity for the
+        // takeover-overlay protocol.
         .route("/api/agent/heartbeat", post(routes::agent_heartbeat))
+        // Explicit session enter / leave. The recommended path for
+        // any multi-step agent workflow — the overlay stays on for
+        // the full duration with the agent-supplied label rather
+        // than flickering between commands.
+        .route(
+            "/api/agent/session/start",
+            post(routes::start_agent_session),
+        )
+        .route("/api/agent/session/end", post(routes::end_agent_session))
         // LSP bridge — WebSocket-upgraded; the browser-side monaco-
         // languageclient connects here and talks LSP JSON-RPC to a
         // freshly-spawned ironplc LSP process.
@@ -344,12 +355,19 @@ async fn main() -> anyhow::Result<()> {
 
 /// Trailing edge of the agent-activity flag. Runs forever; cheap; the
 /// leading edge (active=true) is handled inline by
-/// `AppState::record_agent_heartbeat`.
+/// `AppState::record_agent_heartbeat` / `start_agent_session`.
+///
+/// Two distinct timeouts:
+///   - `TRANSIENT_TTL` (3 s) ages out individual heartbeats from
+///     one-off `cs` commands. After this much idle, the overlay
+///     flashes off.
+///   - `SESSION_TTL` (30 s) ages out an open session whose agent
+///     stopped heartbeat-pinging (process crashed, network
+///     dropped). Generous so a slow-running agent doesn't get
+///     kicked mid-thought.
 async fn agent_watchdog(state: AppState) {
-    // TTL: how long a heartbeat is considered fresh. 3 s comfortably
-    // covers the gap between fast successive `cs` commands (each one
-    // is a separate process so each sends ONE heartbeat at startup).
-    const TTL: std::time::Duration = std::time::Duration::from_secs(3);
+    const TRANSIENT_TTL: std::time::Duration = std::time::Duration::from_secs(3);
+    const SESSION_TTL: std::time::Duration = std::time::Duration::from_secs(30);
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(500));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -359,20 +377,45 @@ async fn agent_watchdog(state: AppState) {
             if !s.active {
                 continue;
             }
-            let Some(last) = s.last_heartbeat else {
+            // Session crash recovery: end any session that hasn't
+            // heartbeat-pinged in SESSION_TTL. This is the only
+            // place the watchdog touches `s.session`.
+            let session_expired = s
+                .session
+                .as_ref()
+                .is_some_and(|sess| sess.last_heartbeat.elapsed() >= SESSION_TTL);
+            if session_expired {
+                tracing::warn!(
+                    "agent session expired (no heartbeat for {SESSION_TTL:?}); auto-ending"
+                );
+                s.session = None;
+            }
+            // After potentially clearing the session, decide if the
+            // public `active` flag should drop. A session being
+            // open pins active=true regardless of heartbeats.
+            if s.session.is_some() {
                 continue;
-            };
-            let elapsed = last.elapsed();
-            if elapsed >= TTL {
-                s.active = false;
-                Some(events::AppEvent::AgentActivity(events::AgentActivity {
-                    active: false,
-                    command: s.command.clone(),
-                    session: s.session.clone(),
-                    since_ms: elapsed.as_millis() as u64,
-                }))
-            } else {
-                None
+            }
+            // No session — fall back to transient-heartbeat aging.
+            // If `active` is set with no heartbeat to age against,
+            // that's a state-shape bug; clear active so we exit the
+            // hot path next tick instead of looping.
+            match s.last_heartbeat.map(|h| h.elapsed()) {
+                Some(e) if e >= TRANSIENT_TTL => {
+                    s.active = false;
+                    Some(events::AppEvent::AgentActivity(events::AgentActivity {
+                        active: false,
+                        command: s.command.clone(),
+                        session: s.session_hint.clone(),
+                        session_label: None,
+                        since_ms: e.as_millis() as u64,
+                    }))
+                }
+                None => {
+                    s.active = false;
+                    None
+                }
+                _ => None,
             }
         };
         if let Some(ev) = event {

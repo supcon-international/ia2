@@ -1,6 +1,7 @@
 import { useState } from "react"
-import { Bot, ChevronDown, ChevronUp, Shield, ShieldCheck } from "lucide-react"
+import { Bot, ChevronDown, ChevronUp, Shield, ShieldCheck, X } from "lucide-react"
 
+import { apiFetch } from "@/lib/api"
 import { agentActivityStore, useAgentActivity } from "@/state/agent-activity"
 import { cn } from "@/lib/utils"
 
@@ -96,7 +97,14 @@ function BorderGlow() {
 function Banner({ agent }: { agent: ReturnType<typeof useAgentActivity> }) {
   const [expanded, setExpanded] = useState(false)
 
-  const lastCommand = agent.command ?? agent.recent[0]?.command ?? "running"
+  // When an explicit session is open, its label is the authoritative
+  // banner text — it persists across many commands so the user sees
+  // "rebuilding tank controller" not the per-command flicker.
+  // Otherwise we fall back to the most-recent transient command.
+  const inSession = agent.sessionLabel != null
+  const primaryLabel =
+    agent.sessionLabel ??
+    (agent.command ? `cs ${agent.command}` : agent.recent[0]?.command ?? "running")
 
   return (
     <div
@@ -119,10 +127,15 @@ function Banner({ agent }: { agent: ReturnType<typeof useAgentActivity> }) {
         </div>
         <div className="flex flex-1 flex-col min-w-0">
           <div className="text-[11px] font-semibold uppercase tracking-wider text-emerald-600 dark:text-emerald-400">
-            Agent in control
+            {inSession ? "Agent session" : "Agent in control"}
           </div>
-          <div className="truncate font-mono text-[13px] text-foreground">
-            cs {lastCommand}
+          <div
+            className={cn(
+              "truncate text-[13px] text-foreground",
+              inSession ? "font-medium" : "font-mono",
+            )}
+          >
+            {primaryLabel}
           </div>
         </div>
         {agent.recent.length > 1 && (
@@ -140,19 +153,49 @@ function Banner({ agent }: { agent: ReturnType<typeof useAgentActivity> }) {
             )}
           </button>
         )}
-        <button
-          type="button"
-          onClick={() => agentActivityStore.requestUserOverride()}
-          className={cn(
-            "inline-flex items-center gap-1.5 rounded-md px-2.5 py-1",
-            "border border-foreground/10 bg-background text-[12px] font-medium",
-            "hover:bg-accent/40 hover:text-foreground",
-          )}
-          title="Suppress the agent overlay for 8 seconds and regain pointer control."
-        >
-          <Shield className="size-3.5" />
-          Take over
-        </button>
+        {inSession ? (
+          // For an explicit session, the visible action is "End"
+          // — POSTs to /api/agent/session/end with no id to
+          // force-close the session server-side. The overlay drops
+          // immediately when the SSE AgentActivity { active:false }
+          // event arrives, so the user gets sub-second feedback.
+          <button
+            type="button"
+            onClick={() => {
+              void apiFetch("/api/agent/session/end", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: "{}",
+              })
+            }}
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-md px-2.5 py-1",
+              "border border-foreground/10 bg-background text-[12px] font-medium",
+              "hover:bg-destructive/10 hover:text-destructive",
+            )}
+            title="End the agent session and return control to you."
+          >
+            <X className="size-3.5" />
+            End session
+          </button>
+        ) : (
+          // For a transient heartbeat (no session), use the local
+          // override — heartbeats keep coming for a few seconds and
+          // re-end-sessioning them server-side would be noisy.
+          <button
+            type="button"
+            onClick={() => agentActivityStore.requestUserOverride()}
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-md px-2.5 py-1",
+              "border border-foreground/10 bg-background text-[12px] font-medium",
+              "hover:bg-accent/40 hover:text-foreground",
+            )}
+            title="Suppress the agent overlay for 8 seconds and regain pointer control."
+          >
+            <Shield className="size-3.5" />
+            Take over
+          </button>
+        )}
       </div>
 
       {expanded && agent.recent.length > 0 && (

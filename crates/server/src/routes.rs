@@ -112,6 +112,67 @@ pub async fn agent_heartbeat(
     state.record_agent_heartbeat(req.command, req.session);
     Json(RunResponse { ok: true })
 }
+
+#[derive(SerdeDeserialize, Debug)]
+pub struct StartAgentSessionRequest {
+    /// Client-generated unique id. `end` must pass the same id back
+    /// — a stale `cs agent leave` from an old terminal won't kick a
+    /// fresh agent that's already taken over.
+    pub id: String,
+    /// Human-readable label rendered in the IDE banner.
+    /// "rebuilding tank controller" / "running tests" / etc.
+    pub label: String,
+}
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct AgentSessionResponse {
+    pub ok: bool,
+    /// Echo back the started session so the client knows the
+    /// authoritative server-side state (in case the request was
+    /// re-tried and an older session was replaced).
+    pub session: crate::state::AgentSession,
+}
+
+/// Open an explicit agent takeover session. The IDE's overlay
+/// banner stays on with the supplied label until the matching
+/// `/api/agent/session/end` arrives — replaces the old "every
+/// command blinks the overlay" pattern with explicit enter/leave.
+///
+/// Policy: a fresh `start` replaces any existing session (single
+/// human, single agent at a time — strict-locking with 409 errors
+/// would be more frustrating than useful here).
+pub async fn start_agent_session(
+    State(state): State<AppState>,
+    Json(req): Json<StartAgentSessionRequest>,
+) -> Json<AgentSessionResponse> {
+    let session = state.start_agent_session(req.id, req.label);
+    Json(AgentSessionResponse { ok: true, session })
+}
+
+#[derive(SerdeDeserialize, Debug, Default)]
+pub struct EndAgentSessionRequest {
+    /// Session id to end. Server only closes if this matches the
+    /// currently-open session. Omit (or send `null`) to force-end
+    /// whatever session is open — the IDE's "kick agent" button
+    /// uses this empty-body form.
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
+/// Close an agent takeover session. Idempotent. Returns `{ok}`
+/// indicating whether a session was actually closed (false if the
+/// id didn't match or no session was open). Same shape as `stop`
+/// so the CLI can treat them uniformly.
+pub async fn end_agent_session(
+    State(state): State<AppState>,
+    body: Option<Json<EndAgentSessionRequest>>,
+) -> Json<RunResponse> {
+    let id = body.and_then(|Json(b)| b.id);
+    let ok = state.end_agent_session(id.as_deref());
+    Json(RunResponse { ok })
+}
+
 use crate::state::{AppState, RunningInfo};
 
 // ============================================================

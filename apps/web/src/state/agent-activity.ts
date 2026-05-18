@@ -26,6 +26,11 @@ export type AgentActivityState = {
   active: boolean
   command: string | null
   session: string | null
+  /** Label of an explicit takeover session ("rebuilding tank
+   * controller"). Set by `/api/agent/session/start`; takes
+   * precedence over `command` in the IDE banner. `null` when the
+   * activity is just a transient heartbeat. */
+  sessionLabel: string | null
   /** Wall-clock ms at which we last received an event. */
   lastEventAt: number
   /**
@@ -44,6 +49,7 @@ const initialState: AgentActivityState = {
   active: false,
   command: null,
   session: null,
+  sessionLabel: null,
   lastEventAt: 0,
   recent: [],
   overrideUntil: 0,
@@ -64,19 +70,29 @@ class AgentActivityStore {
     }
   }
 
-  ingest(event: { active: boolean; command?: string | null; session?: string | null }): void {
+  ingest(event: {
+    active: boolean
+    command?: string | null
+    session?: string | null
+    session_label?: string | null
+  }): void {
     const now = Date.now()
     const command = event.command ?? null
     const session = event.session ?? null
+    const sessionLabel = event.session_label ?? null
+    // What goes into the "recent" tail: if a session is open, the
+    // label IS the visible activity (it doesn't change per-command);
+    // otherwise the per-command label is what the user sees.
     const recent =
-      event.active && command
-        ? this.appendRecent(command, now)
+      event.active && (sessionLabel || command)
+        ? this.appendRecent(sessionLabel ?? command!, now)
         : this.state.recent
     this.state = {
       ...this.state,
       active: event.active,
       command,
       session,
+      sessionLabel,
       lastEventAt: now,
       recent,
     }

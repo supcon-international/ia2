@@ -102,25 +102,75 @@ impl ProjectRegistry {
     }
 }
 
-/// Tracks the most recent agent (typically `cs` CLI) heartbeat. The
-/// frontend's takeover overlay reads this — see the `agent_watchdog`
-/// task in main.rs for the broadcast loop.
+/// Tracks agent activity — the source of truth for the IDE's
+/// "agent in control" takeover overlay. Two distinct shapes:
+///
+///   1. **Session** (`AgentSession`) — an *explicit* enter / leave
+///      pair around a coherent stretch of work. The agent decides
+///      when control starts (e.g. "rebuilding tank controller") and
+///      when it ends. While the session is open the overlay stays
+///      ON; individual heartbeats only matter for crash detection.
+///      This is the recommended path for any multi-step agent
+///      workflow.
+///
+///   2. **Transient heartbeats** — a single `cs` command that posts
+///      to `/api/agent/heartbeat` without holding a session. The
+///      overlay flashes on, then ages out after `TRANSIENT_TTL`.
+///      Kept for back-compat with simple one-off CLI calls (and as
+///      the underlying mechanism for session crash recovery).
+///
+/// The `active` field is the union — true if a session is open OR a
+/// recent transient heartbeat hasn't aged out. The watchdog task in
+/// `main.rs` is responsible for clearing both and re-emitting
+/// AgentActivity SSE on the trailing edge.
 #[derive(Debug, Default)]
 pub struct AgentActivityState {
     /// `None` until at least one heartbeat is received. Holds the
     /// latest heartbeat time after that.
     pub last_heartbeat: Option<Instant>,
     /// What the agent identified itself as ("pou create", "runtime
-    /// force", etc.). Surfaced in the IDE banner.
+    /// force", etc.). Surfaced in the IDE banner when no session is
+    /// active.
     pub command: Option<String>,
-    /// Stable per-CLI-run identifier (a UUID generated at `cs`
-    /// startup). Lets us tell "one agent running fast" apart from
-    /// "many agents".
-    pub session: Option<String>,
-    /// The current public flag — `true` after a heartbeat and until
-    /// `agent_watchdog` ages it out past the TTL. Stored so we only
-    /// emit AgentActivity events on edges, not every tick.
+    /// Stable per-CLI-run identifier sent on individual heartbeats —
+    /// distinct from the session id below. Lets us tell "one agent
+    /// running fast" apart from "many agents".
+    pub session_hint: Option<String>,
+    /// Long-running session, if the agent opened one with
+    /// `/api/agent/session/start`. None when no session is active.
+    pub session: Option<AgentSession>,
+    /// Public flag — true when EITHER `session` is Some OR a
+    /// transient heartbeat is still inside its TTL. Mirrored as a
+    /// field (not recomputed each read) so the watchdog can emit
+    /// edge-transition SSE events without comparing against the
+    /// previous tick.
     pub active: bool,
+}
+
+/// One open agent takeover session. Lifetime: `POST /api/agent/session/start`
+/// → server creates this; `POST /api/agent/session/end { id }` (or the
+/// watchdog detecting no-heartbeat-for-too-long) → drops it.
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct AgentSession {
+    /// Client-generated unique id. Used by `end` to confirm the
+    /// caller owns the session it's ending (so a stale `cs agent
+    /// leave` from an old terminal can't kick a fresh agent).
+    pub id: String,
+    /// Human-readable label for the IDE banner ("rebuilding tank
+    /// controller", "running tests", "agent: investigating leak").
+    pub label: String,
+    /// Microseconds since UNIX epoch — for "started 12 s ago" UI
+    /// rendering. We don't use `Instant` because that's not
+    /// serializable.
+    pub started_us: u64,
+    /// Last heartbeat we got for THIS session. Drives crash
+    /// recovery: if the agent process dies, we age the session out
+    /// instead of leaving the overlay stuck on forever. Skipped on
+    /// the wire — the watchdog cares but the frontend doesn't.
+    #[serde(skip)]
+    #[ts(skip)]
+    pub last_heartbeat: Instant,
 }
 
 #[derive(Clone)]
@@ -207,28 +257,129 @@ impl AppState {
         }
     }
 
-    /// Stamp a heartbeat from an agent client. Flips the public
-    /// `active` flag (and emits an SSE) on the leading edge; the
-    /// trailing edge is driven by the watchdog task that ages out
-    /// stale heartbeats.
-    pub fn record_agent_heartbeat(&self, command: Option<String>, session: Option<String>) {
+    /// Stamp a heartbeat from an agent client. If `session_id`
+    /// matches the currently-open session, refresh its watchdog
+    /// timer (and ignore the command label — the session label wins).
+    /// Otherwise, fall into the legacy "transient" path: refresh the
+    /// per-heartbeat command + age out after TRANSIENT_TTL.
+    ///
+    /// The leading-edge AgentActivity event fires when overall
+    /// activity transitions from inactive → active; the trailing
+    /// edge is the watchdog's job.
+    pub fn record_agent_heartbeat(&self, command: Option<String>, session_id: Option<String>) {
         let edge = {
             let mut s = self.agent.lock().expect("agent mutex");
             let was_active = s.active;
-            s.last_heartbeat = Some(Instant::now());
+            let now = Instant::now();
+            // If a session is open and the heartbeat's session_id
+            // matches, refresh the session's own watchdog. We still
+            // bump `last_heartbeat` so a "session is active" view
+            // and a "wire still healthy" view stay in sync.
+            if let (Some(sess), Some(id)) = (s.session.as_mut(), session_id.as_deref()) {
+                if sess.id == id {
+                    sess.last_heartbeat = now;
+                }
+            }
+            s.last_heartbeat = Some(now);
             s.command = command.clone();
-            s.session = session.clone();
+            s.session_hint = session_id.clone();
             s.active = true;
             !was_active
         };
         if edge {
+            // Snapshot the session label so the wire event carries
+            // it (the frontend renders the label as the banner text).
+            let label = self
+                .agent
+                .lock()
+                .ok()
+                .and_then(|s| s.session.as_ref().map(|sess| sess.label.clone()));
             let _ = self.event_tx.send(AppEvent::AgentActivity(AgentActivity {
                 active: true,
                 command,
-                session,
+                session: session_id,
+                session_label: label,
                 since_ms: 0,
             }));
         }
+    }
+
+    /// Open an explicit agent takeover session. The IDE overlay
+    /// stays on until `end_agent_session(id)` is called (or the
+    /// watchdog ages it out after SESSION_TTL of no heartbeats).
+    ///
+    /// Returns the session that was actually opened. If another
+    /// session is already running, the policy here is **replace** —
+    /// a new agent kicks the previous, broadcasting a fresh
+    /// AgentActivity event with the new label. That matches the
+    /// real-world usage (one human, one agent at a time on a given
+    /// server); strict mutex semantics with 409 errors would be
+    /// surprising when, say, a previous `cs agent run` left a
+    /// session stranded.
+    pub fn start_agent_session(&self, id: String, label: String) -> AgentSession {
+        let session = AgentSession {
+            id: id.clone(),
+            label: label.clone(),
+            started_us: now_unix_us(),
+            last_heartbeat: Instant::now(),
+        };
+        {
+            let mut s = self.agent.lock().expect("agent mutex");
+            s.session = Some(session.clone());
+            s.last_heartbeat = Some(Instant::now());
+            s.active = true;
+        }
+        // Always emit on session start — even if `active` was already
+        // true (a transient heartbeat was in flight), the label now
+        // changes, so subscribers need to repaint.
+        let _ = self.event_tx.send(AppEvent::AgentActivity(AgentActivity {
+            active: true,
+            command: None,
+            session: Some(id),
+            session_label: Some(label),
+            since_ms: 0,
+        }));
+        session
+    }
+
+    /// Close the agent takeover session. If `id` is `Some(...)` we
+    /// only close when it matches the active session's id —
+    /// idempotent + race-safe (a stale `cs agent leave` from an old
+    /// terminal won't kick a fresh agent). If `None`, force-close
+    /// whatever session is open — this is the "kick" path used by
+    /// the IDE's "Take over" button.
+    ///
+    /// Returns `true` if a session was actually ended.
+    pub fn end_agent_session(&self, id: Option<&str>) -> bool {
+        let closed = {
+            let mut s = self.agent.lock().expect("agent mutex");
+            match s.session.as_ref() {
+                Some(sess) if id.is_none_or(|i| i == sess.id) => {
+                    s.session = None;
+                    // Wipe the heartbeat baseline too so the
+                    // overlay actually disappears — without this,
+                    // a still-fresh `last_heartbeat` would keep
+                    // `active` true via the transient path until
+                    // its TTL elapsed.
+                    s.last_heartbeat = None;
+                    s.command = None;
+                    s.session_hint = None;
+                    s.active = false;
+                    true
+                }
+                _ => false,
+            }
+        };
+        if closed {
+            let _ = self.event_tx.send(AppEvent::AgentActivity(AgentActivity {
+                active: false,
+                command: None,
+                session: None,
+                session_label: None,
+                since_ms: 0,
+            }));
+        }
+        closed
     }
 
     /// Fire-and-forget mutation notification scoped to one project.
@@ -258,4 +409,15 @@ impl AppState {
             detail,
         }));
     }
+}
+
+/// Wall-clock microseconds since the UNIX epoch. Used for session
+/// `started_us` so the frontend can render "started 12 s ago". We
+/// don't use `Instant` because that's a monotonic-clock-only type
+/// (no calendar time) and not serializable.
+fn now_unix_us() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0)
 }

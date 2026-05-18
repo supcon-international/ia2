@@ -43,20 +43,25 @@ pub enum AppEvent {
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct AgentActivity {
-    /// `true` while at least one agent session has heartbeat-pinged
-    /// within the TTL window (default 3 s). Drops to `false` after
-    /// the last heartbeat ages out.
+    /// `true` while a takeover session is open OR a transient
+    /// heartbeat is still within its TTL window. Drops to `false`
+    /// when the session is ended (explicit `cs agent leave` / IDE
+    /// kick / watchdog) AND the last transient heartbeat ages out.
     pub active: bool,
-    /// Most recent command label the agent identified itself with —
-    /// usually the `cs` subcommand name (e.g. `"pou create"`). Used
-    /// in the IDE banner so the user can see *what* the agent is
-    /// doing right now, not just *that* something's happening.
+    /// Most recent command label from a heartbeat (e.g. `"pou
+    /// create"`). Used in the banner ONLY when no session label is
+    /// set — when a session is open, the session's label wins.
     pub command: Option<String>,
-    /// Stable per-CLI-run identifier. Lets the frontend tell apart
-    /// "one agent doing many commands fast" from "multiple agents
-    /// piling on". Best-effort; the CLI generates a fresh UUID at
-    /// process start.
+    /// Stable per-CLI-run identifier — the value the agent set via
+    /// `/api/agent/session/start` (or guessed via heartbeat).
+    /// Lets the frontend tell apart "one agent doing many commands"
+    /// from "two agents stepping on each other".
     pub session: Option<String>,
+    /// Session label — what `cs agent run --label TEXT` was given.
+    /// Surfaced in the banner ("AGENT IN CONTROL · rebuilding tank
+    /// controller"). `None` when there's no session, only transient
+    /// heartbeats (then `command` is what the banner shows).
+    pub session_label: Option<String>,
     /// Milliseconds since the last heartbeat at the time this event
     /// fired. Lets the frontend show "agent active 0.3 s ago" instead
     /// of just a binary indicator.

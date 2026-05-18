@@ -241,6 +241,51 @@ enum Command {
         server: String,
     },
 
+    /// CRUD on devices in the open project. Mirrors the IDE's
+    /// Device pane: create, list, get full config, replace from a
+    /// JSON file, delete. The complex shapes (Modbus channels,
+    /// EtherCAT PDO maps) are easiest to manage via `set --from
+    /// file.json` after editing a config snapshot.
+    #[command(subcommand)]
+    Device(DeviceCmd),
+
+    /// CRUD on edges (deploy targets) in the open project. Same
+    /// shape as `cs device` but for SSH-reachable runtime hosts.
+    /// Edge deploy / probe live as top-level commands (`cs deploy`
+    /// / `cs probe`).
+    #[command(subcommand)]
+    Edge(EdgeCmd),
+
+    /// Read or write the project's IoMap (variable → device.channel
+    /// bindings the scan loop uses).
+    #[command(subcommand)]
+    Iomap(IomapCmd),
+
+    /// Read or write the project's task schedule (tasks.toml).
+    #[command(subcommand)]
+    Tasks(TasksCmd),
+
+    /// Take a long-running agent session around a wrapped command.
+    ///
+    /// The single most important command for any multi-step agent
+    /// workflow. Server-side, this opens an explicit takeover
+    /// session before running the inner command and closes it
+    /// afterwards — the IDE banner stays on with `--label` text the
+    /// whole time, instead of flickering between every `cs` call.
+    /// A background heartbeat thread refreshes the session every
+    /// second so the watchdog never thinks the agent crashed.
+    ///
+    /// Pattern:
+    ///   `cs agent run --label "rebuilding tank" -- bash -c '...'`
+    ///   `cs agent run --label "tests" -- pytest`
+    ///
+    /// If the inner command exits non-zero, the session is still
+    /// closed cleanly (try/finally semantics). Ctrl-C closes the
+    /// session before propagating SIGINT to the inner command.
+    #[command(verbatim_doc_comment)]
+    #[command(subcommand)]
+    Agent(AgentCmd),
+
     /// List the symbols declared in a POU — variables, FB instances,
     /// program-level declarations.
     ///
@@ -402,6 +447,195 @@ enum ProjectCmd {
     },
 }
 
+// =================================================================
+//   cs device — CRUD on devices
+// =================================================================
+#[derive(Subcommand, Debug)]
+enum DeviceCmd {
+    /// Create an empty device of the given protocol. Channels (the
+    /// per-coil / per-PDO addresses) default to empty — populate
+    /// them via `cs device set --from cfg.json`.
+    Create {
+        /// Device name (project-unique, used as the iomap key).
+        name: String,
+        #[arg(long, value_parser = ["modbus","ethercat"])]
+        protocol: String,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+    /// List every device in the open project (name + protocol).
+    List {
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+    /// Dump the full device config (protocol-specific) as JSON. Use
+    /// before `set --from` to edit a snapshot rather than build the
+    /// shape from scratch.
+    Get {
+        name: String,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+    /// Replace a device's entire config from a JSON file. The shape
+    /// is the same one `get` returns — round-trip-friendly.
+    Set {
+        name: String,
+        /// Path to a JSON file matching the `Device` shape. Pass `-`
+        /// to read from stdin.
+        #[arg(long)]
+        from: String,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+    /// Delete a device. Any iomap bindings against it are left in
+    /// place but will warn-skip at run time.
+    Delete {
+        name: String,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+}
+
+// =================================================================
+//   cs edge — CRUD on deploy targets
+// =================================================================
+#[derive(Subcommand, Debug)]
+enum EdgeCmd {
+    /// Create an edge entry. `host` is anything ssh(1) accepts —
+    /// `user@host`, a `~/.ssh/config` alias, etc.
+    Create {
+        name: String,
+        #[arg(long)]
+        host: String,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+    /// List every edge in the open project.
+    List {
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+    /// Dump the full edge config as JSON (host, ssh_port, ssh_user,
+    /// install_dir, runtime_port, notes).
+    Get {
+        name: String,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+    /// Replace an edge's full config from a JSON file. Shape matches
+    /// `get` output. Use this to set `install_dir` or `runtime_port`.
+    Set {
+        name: String,
+        #[arg(long)]
+        from: String,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+    /// Delete an edge. If a tunnel is attached for it, it's torn
+    /// down at the same time.
+    Delete {
+        name: String,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+}
+
+// =================================================================
+//   cs iomap — read / write the variable-to-channel binding table
+// =================================================================
+#[derive(Subcommand, Debug)]
+enum IomapCmd {
+    /// Print the project's current IoMap as JSON.
+    Get {
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+    /// Replace the entire IoMap from a JSON file. The shape matches
+    /// `get` output: `{ mappings: [{ variable, device, channel,
+    /// direction }] }`.
+    Set {
+        #[arg(long)]
+        from: String,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+}
+
+// =================================================================
+//   cs tasks — read / write tasks.toml
+// =================================================================
+#[derive(Subcommand, Debug)]
+enum TasksCmd {
+    /// Print the project's current Tasks (tasks + program bindings)
+    /// as JSON.
+    Get {
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+    /// Replace the entire tasks.toml content from a JSON file.
+    /// Shape: `{ tasks: [{name, interval_ms, priority}], programs:
+    /// [{instance, program, task}] }`.
+    Set {
+        #[arg(long)]
+        from: String,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+}
+
+// =================================================================
+//   cs agent — explicit takeover-session enter / leave / wrap
+// =================================================================
+#[derive(Subcommand, Debug)]
+enum AgentCmd {
+    /// Wrap a command in an agent takeover session. The IDE banner
+    /// stays on with `--label` text for the entire duration, instead
+    /// of flickering between every `cs` call. On exit (whether the
+    /// inner command succeeds, fails, or is interrupted), the
+    /// session is closed cleanly.
+    ///
+    /// Example:
+    ///   `cs agent run --label "build tank demo" -- bash -c 'cs ...; cs ...'`
+    #[command(verbatim_doc_comment)]
+    Run {
+        /// Banner text shown in the IDE overlay while the session is
+        /// open. Pick something the user will recognise — "rebuilding
+        /// tank controller" reads better than "agent".
+        #[arg(long)]
+        label: String,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+        /// The command + args to run. Use `--` to separate from `cs`
+        /// own flags. Example: `cs agent run -l X -- bash -c 'foo'`.
+        #[arg(last = true, required = true)]
+        cmd: Vec<String>,
+    },
+    /// Open a session and print its id, then exit. Intended for
+    /// shell scripts that want to set `IA2_AGENT_SESSION` and run
+    /// many `cs` calls; pair with `cs agent leave` at the end.
+    /// Prefer `cs agent run -- cmd` when possible — it cleans up
+    /// even on Ctrl-C.
+    Enter {
+        #[arg(long)]
+        label: String,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+    /// Close the agent session whose id is in the
+    /// `IA2_AGENT_SESSION` env var (or the value passed to
+    /// `--id`). Idempotent — no-op when nothing's open.
+    Leave {
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+}
+
 #[derive(Subcommand, Debug)]
 enum PouCmd {
     /// Create an empty POU file in the open project's `pous/` dir.
@@ -496,6 +730,11 @@ fn main() {
         Command::Runtime(r) => cmd_runtime(r),
         Command::Deploy { name, json, server } => cmd_deploy(&name, json, &server),
         Command::Probe { name, json, server } => cmd_probe(&name, json, &server),
+        Command::Device(d) => cmd_device(d),
+        Command::Edge(e) => cmd_edge(e),
+        Command::Iomap(i) => cmd_iomap(i),
+        Command::Tasks(t) => cmd_tasks(t),
+        Command::Agent(a) => cmd_agent(a),
     };
     match result {
         Ok(exit) => std::process::exit(exit),
@@ -1095,6 +1334,304 @@ fn cmd_probe(name: &str, json: bool, server: &str) -> Result<i32> {
 }
 
 // =================================================================
+//   Subcommand: device CRUD
+// =================================================================
+
+fn cmd_device(cmd: DeviceCmd) -> Result<i32> {
+    match cmd {
+        DeviceCmd::Create {
+            name,
+            protocol,
+            server,
+        } => {
+            let resp = post_json(
+                &format!("{server}/api/devices"),
+                &serde_json::json!({ "name": name, "protocol": protocol }),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+            Ok(0)
+        }
+        DeviceCmd::List { json, server } => {
+            // Devices live inside ProjectTree — call /api/project and
+            // pluck the `devices` array. Cheap enough; avoids a new
+            // dedicated endpoint for what's already exposed.
+            let tree = get_json(&format!("{server}/api/project"))?;
+            let devices = tree
+                .get("devices")
+                .cloned()
+                .unwrap_or(serde_json::json!([]));
+            if json {
+                println!("{}", serde_json::to_string_pretty(&devices)?);
+            } else if let Some(arr) = devices.as_array() {
+                if arr.is_empty() {
+                    eprintln!("no devices");
+                } else {
+                    for d in arr {
+                        let n = d.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                        let p = d.get("protocol").and_then(|v| v.as_str()).unwrap_or("?");
+                        println!("{p:<10}  {n}");
+                    }
+                }
+            }
+            Ok(0)
+        }
+        DeviceCmd::Get { name, server } => {
+            let resp = get_json(&format!("{server}/api/devices/{}", url_encode(&name)))?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+            Ok(0)
+        }
+        DeviceCmd::Set { name, from, server } => {
+            let body = read_json_blob(&from)?;
+            let resp = put_json(
+                &format!("{server}/api/devices/{}", url_encode(&name)),
+                &body,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+            Ok(0)
+        }
+        DeviceCmd::Delete { name, server } => {
+            let resp = delete_json(&format!("{server}/api/devices/{}", url_encode(&name)))?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+            Ok(0)
+        }
+    }
+}
+
+// =================================================================
+//   Subcommand: edge CRUD
+// =================================================================
+
+fn cmd_edge(cmd: EdgeCmd) -> Result<i32> {
+    match cmd {
+        EdgeCmd::Create { name, host, server } => {
+            let resp = post_json(
+                &format!("{server}/api/edges"),
+                &serde_json::json!({ "name": name, "host": host }),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+            Ok(0)
+        }
+        EdgeCmd::List { json, server } => {
+            let tree = get_json(&format!("{server}/api/project"))?;
+            let edges = tree.get("edges").cloned().unwrap_or(serde_json::json!([]));
+            if json {
+                println!("{}", serde_json::to_string_pretty(&edges)?);
+            } else if let Some(arr) = edges.as_array() {
+                if arr.is_empty() {
+                    eprintln!("no edges");
+                } else {
+                    for e in arr {
+                        let n = e.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                        let h = e.get("host").and_then(|v| v.as_str()).unwrap_or("?");
+                        println!("{n:<24}  {h}");
+                    }
+                }
+            }
+            Ok(0)
+        }
+        EdgeCmd::Get { name, server } => {
+            let resp = get_json(&format!("{server}/api/edges/{}", url_encode(&name)))?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+            Ok(0)
+        }
+        EdgeCmd::Set { name, from, server } => {
+            let body = read_json_blob(&from)?;
+            let resp = put_json(&format!("{server}/api/edges/{}", url_encode(&name)), &body)?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+            Ok(0)
+        }
+        EdgeCmd::Delete { name, server } => {
+            let resp = delete_json(&format!("{server}/api/edges/{}", url_encode(&name)))?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+            Ok(0)
+        }
+    }
+}
+
+// =================================================================
+//   Subcommand: iomap / tasks  (small read/write helpers)
+// =================================================================
+
+fn cmd_iomap(cmd: IomapCmd) -> Result<i32> {
+    match cmd {
+        IomapCmd::Get { server } => {
+            let resp = get_json(&format!("{server}/api/iomap"))?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+            Ok(0)
+        }
+        IomapCmd::Set { from, server } => {
+            let body = read_json_blob(&from)?;
+            let resp = put_json(&format!("{server}/api/iomap"), &body)?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+            Ok(0)
+        }
+    }
+}
+
+fn cmd_tasks(cmd: TasksCmd) -> Result<i32> {
+    match cmd {
+        TasksCmd::Get { server } => {
+            let resp = get_json(&format!("{server}/api/tasks"))?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+            Ok(0)
+        }
+        TasksCmd::Set { from, server } => {
+            let body = read_json_blob(&from)?;
+            let resp = put_json(&format!("{server}/api/tasks"), &body)?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+            Ok(0)
+        }
+    }
+}
+
+// =================================================================
+//   Subcommand: agent — explicit takeover session
+// =================================================================
+
+/// Env var holding the active session id between `cs agent enter`
+/// and `cs agent leave`. Set by the user (`export
+/// IA2_AGENT_SESSION=$(cs agent enter --label ...)`) or by `cs
+/// agent run` when it spawns the inner command.
+const SESSION_ENV: &str = "IA2_AGENT_SESSION";
+
+fn cmd_agent(cmd: AgentCmd) -> Result<i32> {
+    match cmd {
+        AgentCmd::Run { label, server, cmd } => cmd_agent_run(&label, &server, cmd),
+        AgentCmd::Enter { label, server } => {
+            let id = session_id().to_string();
+            agent_session_start(&server, &id, &label)?;
+            // Print the id on stdout so shell scripts can capture it:
+            //   SESSION=$(cs agent enter --label ...)
+            //   ...
+            //   cs agent leave --id "$SESSION"
+            println!("{id}");
+            Ok(0)
+        }
+        AgentCmd::Leave { id, server } => {
+            let target = id.or_else(|| std::env::var(SESSION_ENV).ok());
+            let body = match target {
+                Some(id) => serde_json::json!({ "id": id }),
+                None => serde_json::json!({}),
+            };
+            let _ = post_json(&format!("{server}/api/agent/session/end"), &body)?;
+            Ok(0)
+        }
+    }
+}
+
+fn cmd_agent_run(label: &str, server: &str, cmd: Vec<String>) -> Result<i32> {
+    use std::process::{Command, Stdio};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    if cmd.is_empty() {
+        anyhow::bail!("cs agent run: expected a command after `--`");
+    }
+
+    // Generate session id. We reuse the same per-process id helper
+    // the heartbeat path uses so a session id is comparable in logs
+    // to a heartbeat session hint.
+    let id = session_id().to_string();
+    agent_session_start(server, &id, label)?;
+
+    // Background heartbeat keeper. Every second, refresh the
+    // session-side last_heartbeat so the server-side watchdog
+    // (SESSION_TTL = 30s) doesn't age us out mid-execution.
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_for_keeper = stop.clone();
+    let server_owned = server.to_string();
+    let id_for_keeper = id.clone();
+    let keeper = std::thread::spawn(move || {
+        while !stop_for_keeper.load(Ordering::Relaxed) {
+            // Best-effort — short timeout, swallow errors. A failed
+            // heartbeat only matters after SESSION_TTL of failures
+            // in a row.
+            let _ = http_agent()
+                .post(&format!("{server_owned}/api/agent/heartbeat"))
+                .timeout(std::time::Duration::from_millis(500))
+                .set("Content-Type", "application/json")
+                .send_json(serde_json::json!({
+                    "command": null,
+                    "session": id_for_keeper,
+                }));
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    });
+
+    // Run the inner command. Expose the session id in its env so
+    // any cs subcalls within `bash -c '...'` carry the same session.
+    let mut child = Command::new(&cmd[0]);
+    child
+        .args(&cmd[1..])
+        .env(SESSION_ENV, &id)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    let status = child
+        .status()
+        .with_context(|| format!("spawning `{}`", cmd[0]))?;
+
+    // Cleanup: stop the keeper, then close the session. Done in
+    // try/finally style — even if the inner command crashed, we
+    // close so the overlay doesn't get stuck on.
+    stop.store(true, Ordering::Relaxed);
+    let _ = keeper.join();
+    let _ = post_json(
+        &format!("{server}/api/agent/session/end"),
+        &serde_json::json!({ "id": id }),
+    );
+
+    Ok(status.code().unwrap_or(1))
+}
+
+/// Open a session on the server. Errors propagate so the caller
+/// can decide whether to still run the wrapped command — current
+/// policy is "fail fast" since the user explicitly asked for
+/// session-mode visual feedback.
+fn agent_session_start(server: &str, id: &str, label: &str) -> Result<()> {
+    let url = format!("{server}/api/agent/session/start");
+    let resp = http_agent()
+        .post(&url)
+        .set("Content-Type", "application/json")
+        .send_json(serde_json::json!({ "id": id, "label": label }))
+        .map_err(|e| anyhow::anyhow!("POST {url}: {e}"))?;
+    // Drain the body so the connection can be reused.
+    let _: serde_json::Value = resp
+        .into_json()
+        .map_err(|e| anyhow::anyhow!("decode JSON from {url}: {e}"))?;
+    Ok(())
+}
+
+/// Shared helper: read a JSON document from a file path, or from
+/// stdin if `from == "-"`. Used by every `set --from` subcommand
+/// so the shape is consistent (matches what `cs pou save` already
+/// does for source text).
+fn read_json_blob(from: &str) -> Result<serde_json::Value> {
+    use std::io::Read;
+    let bytes = if from == "-" {
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .context("reading stdin")?;
+        buf.into_bytes()
+    } else {
+        std::fs::read(from).with_context(|| format!("reading {from}"))?
+    };
+    serde_json::from_slice(&bytes).with_context(|| format!("parsing JSON from {from}"))
+}
+
+fn put_json(url: &str, body: &impl serde::Serialize) -> Result<serde_json::Value> {
+    let resp = with_project_header(http_agent().put(url))
+        .set("Content-Type", "application/json")
+        .send_json(body)
+        .map_err(|e| anyhow::anyhow!("PUT {url}: {e}"))?;
+    let value: serde_json::Value = resp
+        .into_json()
+        .map_err(|e| anyhow::anyhow!("decode JSON from {url}: {e}"))?;
+    Ok(value)
+}
+
+// =================================================================
 //   Subcommand: symbols
 // =================================================================
 
@@ -1374,7 +1911,17 @@ fn announce_target(cmd: &Command) -> Option<(&str, &'static str)> {
         | Command::Project(ProjectCmd::Check { .. })
         | Command::Project(ProjectCmd::Info { .. })
         | Command::Project(ProjectCmd::List { .. })
+        | Command::Device(DeviceCmd::List { .. })
+        | Command::Device(DeviceCmd::Get { .. })
+        | Command::Edge(EdgeCmd::List { .. })
+        | Command::Edge(EdgeCmd::Get { .. })
+        | Command::Iomap(IomapCmd::Get { .. })
+        | Command::Tasks(TasksCmd::Get { .. })
         | Command::Runtime(RuntimeCmd::Status { .. }) => None,
+
+        // Agent subcommands manage the session directly — they
+        // don't piggyback on the transient heartbeat path.
+        Command::Agent(_) => None,
 
         Command::Project(ProjectCmd::Create { server, .. }) => Some((server, "project create")),
         Command::Project(ProjectCmd::Open { server, .. }) => Some((server, "project open")),
@@ -1383,6 +1930,15 @@ fn announce_target(cmd: &Command) -> Option<(&str, &'static str)> {
         Command::Pou(PouCmd::Create { server, .. }) => Some((server, "pou create")),
         Command::Pou(PouCmd::Save { server, .. }) => Some((server, "pou save")),
         Command::Pou(PouCmd::Delete { server, .. }) => Some((server, "pou delete")),
+
+        Command::Device(DeviceCmd::Create { server, .. }) => Some((server, "device create")),
+        Command::Device(DeviceCmd::Set { server, .. }) => Some((server, "device set")),
+        Command::Device(DeviceCmd::Delete { server, .. }) => Some((server, "device delete")),
+        Command::Edge(EdgeCmd::Create { server, .. }) => Some((server, "edge create")),
+        Command::Edge(EdgeCmd::Set { server, .. }) => Some((server, "edge set")),
+        Command::Edge(EdgeCmd::Delete { server, .. }) => Some((server, "edge delete")),
+        Command::Iomap(IomapCmd::Set { server, .. }) => Some((server, "iomap set")),
+        Command::Tasks(TasksCmd::Set { server, .. }) => Some((server, "tasks set")),
 
         Command::Run { server, .. } => Some((server, "run")),
         Command::Stop { server } => Some((server, "stop")),
@@ -1415,13 +1971,23 @@ fn session_id() -> &'static str {
 
 /// Fire-and-forget heartbeat. Short timeout because we'd rather miss
 /// the visual cue than hold up a command's actual work.
+///
+/// Session attribution: if the caller is inside a `cs agent run`
+/// wrapper (or a manually-`enter`ed session), the parent's session
+/// id lives in `IA2_AGENT_SESSION`. We forward it so the server's
+/// session-watchdog refreshes the right session instead of starting
+/// a competing transient heartbeat that would race the overlay's
+/// label back and forth.
 fn announce_agent(server: &str, command_label: &str) {
+    let session = std::env::var(SESSION_ENV)
+        .ok()
+        .unwrap_or_else(|| session_id().to_string());
     let _ = http_agent()
         .post(&format!("{server}/api/agent/heartbeat"))
         .timeout(std::time::Duration::from_millis(300))
         .send_json(serde_json::json!({
             "command": command_label,
-            "session": session_id(),
+            "session": session,
         }));
 }
 
