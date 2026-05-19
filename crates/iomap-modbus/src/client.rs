@@ -1,12 +1,19 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use iocore::{ChannelValue, IoDevice, IoError};
-use project::{ModbusChannel, ModbusChannelKind, ModbusConfig};
-use tokio_modbus::client::{tcp, Context, Reader, Writer};
+use project::{
+    ModbusChannel, ModbusChannelKind, ModbusConfig, ModbusDataBits, ModbusParity, ModbusRtuParams,
+    ModbusStopBits, ModbusTcpParams, ModbusTransport,
+};
+use tokio_modbus::client::{rtu, tcp, Context, Reader, Writer};
 use tokio_modbus::Slave;
+use tokio_serial::{
+    DataBits as SerialDataBits, Parity as SerialParity, SerialStream, StopBits as SerialStopBits,
+};
 
 pub struct ModbusDevice {
     name: String,
@@ -16,12 +23,15 @@ pub struct ModbusDevice {
 
 impl ModbusDevice {
     pub async fn connect(name: String, config: &ModbusConfig) -> Result<Self, IoError> {
-        let addr_str = format!("{}:{}", config.host, config.port);
-        let socket = SocketAddr::from_str(&addr_str)
-            .map_err(|e| IoError::Connect(format!("invalid address {addr_str}: {e}")))?;
-        let client = tcp::connect_slave(socket, Slave(config.slave_id))
-            .await
-            .map_err(|e| IoError::Connect(e.to_string()))?;
+        // Branch on transport: TCP opens a socket, RTU opens a
+        // serial port. After this point both yield a
+        // `tokio_modbus::client::Context` and the read/write paths
+        // below are identical — Modbus PDUs are byte-for-byte the
+        // same across both transports.
+        let client = match &config.transport {
+            ModbusTransport::Tcp(p) => Self::connect_tcp(p, config.slave_id).await?,
+            ModbusTransport::Rtu(p) => Self::connect_rtu(p, config.slave_id).await?,
+        };
         let channels = config
             .channels
             .iter()
@@ -32,6 +42,51 @@ impl ModbusDevice {
             client,
             channels,
         })
+    }
+
+    async fn connect_tcp(p: &ModbusTcpParams, slave_id: u8) -> Result<Context, IoError> {
+        let addr_str = format!("{}:{}", p.host, p.port);
+        let socket = SocketAddr::from_str(&addr_str)
+            .map_err(|e| IoError::Connect(format!("invalid address {addr_str}: {e}")))?;
+        tcp::connect_slave(socket, Slave(slave_id))
+            .await
+            .map_err(|e| IoError::Connect(e.to_string()))
+    }
+
+    async fn connect_rtu(p: &ModbusRtuParams, slave_id: u8) -> Result<Context, IoError> {
+        // Build the serial port spec from our enum mirrors. Each
+        // value maps 1:1 to a tokio_serial variant — we keep our
+        // own enum so the wire/JSON shape doesn't depend on a
+        // third-party crate's enum naming.
+        //
+        // 500 ms read timeout is generous for most slaves but short
+        // enough that a missing slave doesn't wedge the scan loop;
+        // tokio-modbus will surface it as a transport error which
+        // the bridge logs and continues past.
+        let builder = tokio_serial::new(&p.serial_device, p.baud_rate)
+            .data_bits(match p.data_bits {
+                ModbusDataBits::Five => SerialDataBits::Five,
+                ModbusDataBits::Six => SerialDataBits::Six,
+                ModbusDataBits::Seven => SerialDataBits::Seven,
+                ModbusDataBits::Eight => SerialDataBits::Eight,
+            })
+            .parity(match p.parity {
+                ModbusParity::None => SerialParity::None,
+                ModbusParity::Even => SerialParity::Even,
+                ModbusParity::Odd => SerialParity::Odd,
+            })
+            .stop_bits(match p.stop_bits {
+                ModbusStopBits::One => SerialStopBits::One,
+                ModbusStopBits::Two => SerialStopBits::Two,
+            })
+            .timeout(Duration::from_millis(500));
+        let stream = SerialStream::open(&builder).map_err(|e| {
+            IoError::Connect(format!(
+                "opening serial port {device}: {e}",
+                device = p.serial_device
+            ))
+        })?;
+        Ok(rtu::attach_slave(stream, Slave(slave_id)))
     }
 
     fn channel(&self, name: &str) -> Result<ModbusChannel, IoError> {

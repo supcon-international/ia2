@@ -47,6 +47,12 @@ ts-rs = { version = "10", features = ["serde-compat", "no-serde-warnings"] }
 
 # I/O
 tokio-modbus = { version = "0.17", features = ["rtu", "tcp", "rtu-server", "tcp-server"] }
+# Direct dep so `iomap-modbus` can construct a SerialStream for RTU
+# without going through tokio-modbus's internal types. tokio-modbus
+# pulls tokio-serial transitively via its `rtu` feature, but pinning
+# it explicitly here keeps the Parity / StopBits / DataBits enums we
+# use in `project::types` stable across tokio-modbus upgrades.
+tokio-serial = "5"
 ethercrab = "0.7"
 # Drives ethercrab's async-io-based tx_rx_task on a dedicated thread; we
 # don't impose smol on the rest of the codebase (everything else is tokio).

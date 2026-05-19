@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use iocore::{ChannelValue, IoDevice};
 use iomap_modbus::{run_demo_slave, DemoSlave, ModbusDevice};
-use project::{ModbusChannel, ModbusChannelKind, ModbusConfig};
+use project::{ModbusChannel, ModbusChannelKind, ModbusConfig, ModbusTcpParams, ModbusTransport};
 use tokio::net::TcpListener;
 
 /// Bind the demo slave to `127.0.0.1:0` (kernel-assigned port), spawn the
@@ -42,8 +42,10 @@ async fn spawn_slave() -> (u16, DemoSlave) {
 
 fn config_with_mixed_channels(port: u16) -> ModbusConfig {
     ModbusConfig {
-        host: "127.0.0.1".into(),
-        port,
+        transport: ModbusTransport::Tcp(ModbusTcpParams {
+            host: "127.0.0.1".into(),
+            port,
+        }),
         slave_id: 1,
         poll_interval_ms: 100,
         channels: vec![

@@ -1163,9 +1163,15 @@ fn template_for_sfc(name: &str, type_: PouType) -> String {
 
 fn default_config_for(protocol: Protocol) -> ProtocolConfig {
     match protocol {
+        // New devices default to Modbus TCP on the demo slave port —
+        // that's what `cs device create --protocol modbus` lands a
+        // user on. RTU users do `cs device set --from rtu.json`
+        // to swap the transport variant after creation.
         Protocol::Modbus => ProtocolConfig::Modbus(ModbusConfig {
-            host: "127.0.0.1".into(),
-            port: 502,
+            transport: crate::types::ModbusTransport::Tcp(crate::types::ModbusTcpParams {
+                host: "127.0.0.1".into(),
+                port: 502,
+            }),
             slave_id: 1,
             poll_interval_ms: 100,
             channels: vec![],

@@ -37,7 +37,8 @@ pub use store::{MigrationReport, ProjectStore};
 pub use types::{
     Device, Direction, Edge, EthercatChannel, EthercatConfig, EthercatDataType,
     EthercatPdoDirection, EthercatSlave, IoMap, Mapping, ModbusChannel, ModbusChannelKind,
-    ModbusConfig, Pou, PouDecl, PouFile, PouFileSource, PouLanguage, PouType, ProgramInstance,
+    ModbusConfig, ModbusDataBits, ModbusParity, ModbusRtuParams, ModbusStopBits, ModbusTcpParams,
+    ModbusTransport, Pou, PouDecl, PouFile, PouFileSource, PouLanguage, PouType, ProgramInstance,
     ProjectListing, ProjectManifest, ProjectTree, ProjectTreeSkeleton, Protocol, ProtocolConfig,
     Task, Tasks,
 };

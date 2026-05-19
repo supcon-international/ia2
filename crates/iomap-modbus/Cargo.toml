@@ -8,6 +8,10 @@ publish.workspace = true
 [dependencies]
 tokio.workspace = true
 tokio-modbus.workspace = true
+# Direct dep — the RTU connect path opens a SerialStream and hands
+# it to tokio-modbus's `rtu::attach_slave`. Without this we'd have
+# to traffic in tokio-modbus's re-exports which aren't stable.
+tokio-serial.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

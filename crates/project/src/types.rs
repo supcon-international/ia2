@@ -151,17 +151,168 @@ impl ProtocolConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+/// Modbus device config. The transport is either TCP (host + port) or
+/// RTU (a serial port + line settings).
+///
+/// **Back-compat note** — projects saved before RTU support landed
+/// had `host` + `port` as top-level fields rather than wrapped in a
+/// `transport` variant. The custom `Deserialize` below accepts both
+/// shapes: a config with `transport` deserialises directly, and one
+/// with just `host` + `port` is upgraded in-place to a Tcp variant.
+/// On the next write the new shape is persisted, so old projects
+/// migrate silently on first save.
+#[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct ModbusConfig {
-    pub host: String,
-    pub port: u16,
+    pub transport: ModbusTransport,
     pub slave_id: u8,
     /// Polling interval in milliseconds (u32 so it round-trips through JSON
     /// as a number rather than a TS bigint).
     pub poll_interval_ms: u32,
     #[serde(default)]
     pub channels: Vec<ModbusChannel>,
+}
+
+// Custom deserialize so projects authored against the old flat
+// `{host, port, …}` shape keep loading. `untagged` tries variants in
+// order — the new shape wins because it has a `transport` field;
+// the old shape matches when `transport` is missing.
+impl<'de> Deserialize<'de> for ModbusConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Compat {
+            New {
+                transport: ModbusTransport,
+                slave_id: u8,
+                #[serde(default = "default_poll_interval_ms")]
+                poll_interval_ms: u32,
+                #[serde(default)]
+                channels: Vec<ModbusChannel>,
+            },
+            // Legacy: TCP fields at the top level, no `transport`.
+            // Auto-upgrades to ModbusTransport::Tcp on read.
+            Old {
+                host: String,
+                port: u16,
+                slave_id: u8,
+                #[serde(default = "default_poll_interval_ms")]
+                poll_interval_ms: u32,
+                #[serde(default)]
+                channels: Vec<ModbusChannel>,
+            },
+        }
+        let v = Compat::deserialize(deserializer)?;
+        Ok(match v {
+            Compat::New {
+                transport,
+                slave_id,
+                poll_interval_ms,
+                channels,
+            } => Self {
+                transport,
+                slave_id,
+                poll_interval_ms,
+                channels,
+            },
+            Compat::Old {
+                host,
+                port,
+                slave_id,
+                poll_interval_ms,
+                channels,
+            } => Self {
+                transport: ModbusTransport::Tcp(ModbusTcpParams { host, port }),
+                slave_id,
+                poll_interval_ms,
+                channels,
+            },
+        })
+    }
+}
+
+fn default_poll_interval_ms() -> u32 {
+    100
+}
+
+/// Either Modbus TCP (open a socket) or Modbus RTU (open a serial
+/// port). The wire payloads are byte-identical; only the transport
+/// differs. JSON tag is `"kind"`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ModbusTransport {
+    Tcp(ModbusTcpParams),
+    Rtu(ModbusRtuParams),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ModbusTcpParams {
+    pub host: String,
+    pub port: u16,
+}
+
+/// Modbus RTU serial-line parameters. The defaults match the most
+/// common configuration in the wild (9600-8-N-1) so a minimal
+/// `{"kind":"rtu","serial_device":"/dev/ttyUSB0","baud_rate":9600}`
+/// JSON is valid input.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ModbusRtuParams {
+    /// OS device path. macOS: `/dev/cu.usbserial-*` (or
+    /// `/dev/tty.usbserial-*` for synchronous open). Linux:
+    /// `/dev/ttyUSB0` / `/dev/ttyS0`. Windows: `COM3`.
+    pub serial_device: String,
+    /// Bits per second. Modbus RTU is typically one of
+    /// 1200 / 2400 / 4800 / 9600 / 19200 / 38400 / 57600 / 115200.
+    pub baud_rate: u32,
+    /// 5 / 6 / 7 / 8 data bits. Modbus RTU is 8 in practice; we
+    /// expose the choice so non-standard slaves still work.
+    #[serde(default)]
+    pub data_bits: ModbusDataBits,
+    /// 1 / 2 stop bits. Spec: 2 when parity is None, 1 when parity
+    /// is Even/Odd. We let the user set it explicitly — vendor
+    /// variations are common.
+    #[serde(default)]
+    pub stop_bits: ModbusStopBits,
+    /// None / Even / Odd. Even is the spec default; None is what
+    /// Modicon / many Chinese inverters actually ship.
+    #[serde(default)]
+    pub parity: ModbusParity,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq, Default)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum ModbusParity {
+    #[default]
+    None,
+    Even,
+    Odd,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq, Default)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum ModbusDataBits {
+    Five,
+    Six,
+    Seven,
+    #[default]
+    Eight,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq, Default)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum ModbusStopBits {
+    #[default]
+    One,
+    Two,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -180,6 +331,75 @@ pub enum ModbusChannelKind {
     DiscreteInput,
     HoldingRegister,
     InputRegister,
+}
+
+#[cfg(test)]
+mod modbus_config_compat_tests {
+    use super::*;
+
+    /// Old-shape JSON without `transport` upgrades to a Tcp variant.
+    /// Same shape the IDE / on-disk project files have been writing
+    /// since v0.
+    #[test]
+    fn deserializes_legacy_flat_shape_as_tcp() {
+        let json = serde_json::json!({
+            "host": "192.168.1.50",
+            "port": 502,
+            "slave_id": 1,
+            "poll_interval_ms": 100,
+            "channels": [],
+        });
+        let cfg: ModbusConfig = serde_json::from_value(json).unwrap();
+        match cfg.transport {
+            ModbusTransport::Tcp(p) => {
+                assert_eq!(p.host, "192.168.1.50");
+                assert_eq!(p.port, 502);
+            }
+            other => panic!("expected Tcp, got {other:?}"),
+        }
+    }
+
+    /// New-shape JSON with `transport.kind = "tcp"` round-trips.
+    #[test]
+    fn roundtrips_new_tcp_shape() {
+        let json = serde_json::json!({
+            "transport": { "kind": "tcp", "host": "127.0.0.1", "port": 5502 },
+            "slave_id": 7,
+            "poll_interval_ms": 50,
+            "channels": [],
+        });
+        let cfg: ModbusConfig = serde_json::from_value(json.clone()).unwrap();
+        let back = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(back["transport"]["kind"], "tcp");
+        assert_eq!(back["slave_id"], 7);
+    }
+
+    /// RTU shape with minimal fields uses sensible defaults
+    /// (8-N-1 — the universal Modbus RTU default).
+    #[test]
+    fn parses_rtu_with_defaults_filled_in() {
+        let json = serde_json::json!({
+            "transport": {
+                "kind": "rtu",
+                "serial_device": "/dev/ttyUSB0",
+                "baud_rate": 19200,
+            },
+            "slave_id": 2,
+            "poll_interval_ms": 100,
+            "channels": [],
+        });
+        let cfg: ModbusConfig = serde_json::from_value(json).unwrap();
+        match cfg.transport {
+            ModbusTransport::Rtu(p) => {
+                assert_eq!(p.serial_device, "/dev/ttyUSB0");
+                assert_eq!(p.baud_rate, 19200);
+                assert_eq!(p.data_bits, ModbusDataBits::Eight);
+                assert_eq!(p.parity, ModbusParity::None);
+                assert_eq!(p.stop_bits, ModbusStopBits::One);
+            }
+            other => panic!("expected Rtu, got {other:?}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

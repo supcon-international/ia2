@@ -447,7 +447,24 @@ async fn connect_devices(device_specs: Vec<DeviceSpec>) -> Vec<Box<dyn IoDevice>
             ProtocolConfig::Modbus(cfg) => {
                 match iomap_modbus::ModbusDevice::connect(spec.name.clone(), cfg).await {
                     Ok(d) => {
-                        tracing::info!(name = %spec.name, host = %cfg.host, port = cfg.port, "modbus connected");
+                        // Log the transport-relevant detail so the
+                        // operator sees "tcp 192.168.x.y:502" vs
+                        // "rtu /dev/ttyUSB0 @ 9600" — same line
+                        // pattern, transport-specific payload.
+                        match &cfg.transport {
+                            project::ModbusTransport::Tcp(p) => {
+                                tracing::info!(name = %spec.name, transport = "tcp", host = %p.host, port = p.port, "modbus connected");
+                            }
+                            project::ModbusTransport::Rtu(p) => {
+                                tracing::info!(
+                                    name = %spec.name,
+                                    transport = "rtu",
+                                    device = %p.serial_device,
+                                    baud = p.baud_rate,
+                                    "modbus connected"
+                                );
+                            }
+                        }
                         devices.push(Box::new(d));
                     }
                     Err(e) => tracing::warn!(name = %spec.name, %e, "modbus connect failed"),

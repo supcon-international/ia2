@@ -23,6 +23,10 @@ import type { IoMap } from "@/types/generated/IoMap"
 import type { Mapping } from "@/types/generated/Mapping"
 import type { ModbusChannel } from "@/types/generated/ModbusChannel"
 import type { ModbusChannelKind } from "@/types/generated/ModbusChannelKind"
+import type { ModbusDataBits } from "@/types/generated/ModbusDataBits"
+import type { ModbusParity } from "@/types/generated/ModbusParity"
+import type { ModbusStopBits } from "@/types/generated/ModbusStopBits"
+import type { ModbusTransport } from "@/types/generated/ModbusTransport"
 import type { VariableInfo } from "@/types/generated/VariableInfo"
 
 export function DevicePane() {
@@ -195,22 +199,11 @@ function ModbusDeviceEditor({
           <div className="mb-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
             Connection
           </div>
-          <div className="grid grid-cols-2 gap-3 max-w-xl">
-            <Field label="Host">
-              <Input
-                value={draft.host}
-                onChange={(e) => update({ host: e.target.value })}
-              />
-            </Field>
-            <Field label="Port">
-              <Input
-                type="number"
-                value={draft.port}
-                onChange={(e) =>
-                  update({ port: Number(e.target.value) || 0 })
-                }
-              />
-            </Field>
+          <ModbusTransportEditor
+            transport={draft.transport}
+            onTransport={(t) => update({ transport: t })}
+          />
+          <div className="mt-3 grid grid-cols-2 gap-3 max-w-xl">
             <Field label="Slave ID">
               <Input
                 type="number"
@@ -347,6 +340,242 @@ function Field({
       {children}
     </div>
   )
+}
+
+// ============================================================
+//  Modbus transport editor (TCP vs RTU picker)
+// ============================================================
+
+/**
+ * Two-mode form: TCP shows host/port, RTU shows serial device +
+ * baud + parity + stop bits + data bits. Switching transports
+ * preserves whatever you'd already typed in the other one (the
+ * collapsed branch is kept in a closure so flipping back and forth
+ * doesn't wipe the user's input).
+ *
+ * Common Modbus RTU defaults: 9600-8-N-1, slave_id ranges 1-247.
+ */
+function ModbusTransportEditor({
+  transport,
+  onTransport,
+}: {
+  transport: ModbusTransport
+  onTransport: (t: ModbusTransport) => void
+}) {
+  // Hold the "other" branch's last-edited shape so toggling kind
+  // doesn't lose work in progress.
+  const [tcpDraft, setTcpDraft] = useState(() =>
+    transport.kind === "tcp"
+      ? { host: transport.host, port: transport.port }
+      : { host: "127.0.0.1", port: 502 },
+  )
+  const [rtuDraft, setRtuDraft] = useState(() =>
+    transport.kind === "rtu"
+      ? {
+          serial_device: transport.serial_device,
+          baud_rate: transport.baud_rate,
+          data_bits: transport.data_bits,
+          stop_bits: transport.stop_bits,
+          parity: transport.parity,
+        }
+      : {
+          serial_device: defaultSerialPath(),
+          baud_rate: 9600,
+          data_bits: "eight" as ModbusDataBits,
+          stop_bits: "one" as ModbusStopBits,
+          parity: "none" as ModbusParity,
+        },
+  )
+
+  // Mirror the upstream transport into the relevant draft so save +
+  // reset still works correctly.
+  useEffect(() => {
+    if (transport.kind === "tcp") {
+      setTcpDraft({ host: transport.host, port: transport.port })
+    } else {
+      setRtuDraft({
+        serial_device: transport.serial_device,
+        baud_rate: transport.baud_rate,
+        data_bits: transport.data_bits,
+        stop_bits: transport.stop_bits,
+        parity: transport.parity,
+      })
+    }
+  }, [transport])
+
+  return (
+    <>
+      <div className="mb-3 flex items-center gap-2">
+        <Label className="text-[11px] uppercase tracking-wider text-muted-foreground">
+          Transport
+        </Label>
+        <div className="inline-flex overflow-hidden rounded-md border border-border text-xs">
+          <button
+            type="button"
+            onClick={() => onTransport({ kind: "tcp", ...tcpDraft })}
+            className={
+              "px-3 py-1 transition-colors " +
+              (transport.kind === "tcp"
+                ? "bg-accent text-foreground"
+                : "text-muted-foreground hover:bg-accent/40")
+            }
+          >
+            TCP
+          </button>
+          <button
+            type="button"
+            onClick={() => onTransport({ kind: "rtu", ...rtuDraft })}
+            className={
+              "border-l border-border px-3 py-1 transition-colors " +
+              (transport.kind === "rtu"
+                ? "bg-accent text-foreground"
+                : "text-muted-foreground hover:bg-accent/40")
+            }
+          >
+            RTU (serial)
+          </button>
+        </div>
+      </div>
+
+      {transport.kind === "tcp" ? (
+        <div className="grid grid-cols-2 gap-3 max-w-xl">
+          <Field label="Host">
+            <Input
+              value={transport.host}
+              onChange={(e) =>
+                onTransport({ kind: "tcp", host: e.target.value, port: transport.port })
+              }
+            />
+          </Field>
+          <Field label="Port">
+            <Input
+              type="number"
+              value={transport.port}
+              onChange={(e) =>
+                onTransport({
+                  kind: "tcp",
+                  host: transport.host,
+                  port: Number(e.target.value) || 0,
+                })
+              }
+            />
+          </Field>
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 gap-3 max-w-xl">
+          <Field label="Serial device">
+            <Input
+              value={transport.serial_device}
+              placeholder={defaultSerialPath()}
+              onChange={(e) =>
+                onTransport({ ...transport, serial_device: e.target.value })
+              }
+            />
+          </Field>
+          <Field label="Baud rate">
+            <Select
+              value={String(transport.baud_rate)}
+              onValueChange={(v) =>
+                onTransport({ ...transport, baud_rate: Number(v) || 9600 })
+              }
+            >
+              <SelectTrigger className="h-9 w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {BAUD_RATES.map((b) => (
+                  <SelectItem key={b} value={String(b)}>
+                    {b}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </Field>
+          <Field label="Parity">
+            <Select
+              value={transport.parity}
+              onValueChange={(v) =>
+                onTransport({ ...transport, parity: v as ModbusParity })
+              }
+            >
+              <SelectTrigger className="h-9 w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">None</SelectItem>
+                <SelectItem value="even">Even</SelectItem>
+                <SelectItem value="odd">Odd</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
+          <Field label="Data bits">
+            <Select
+              value={transport.data_bits}
+              onValueChange={(v) =>
+                onTransport({ ...transport, data_bits: v as ModbusDataBits })
+              }
+            >
+              <SelectTrigger className="h-9 w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="five">5</SelectItem>
+                <SelectItem value="six">6</SelectItem>
+                <SelectItem value="seven">7</SelectItem>
+                <SelectItem value="eight">8 (standard)</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
+          <Field label="Stop bits">
+            <Select
+              value={transport.stop_bits}
+              onValueChange={(v) =>
+                onTransport({ ...transport, stop_bits: v as ModbusStopBits })
+              }
+            >
+              <SelectTrigger className="h-9 w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="one">1</SelectItem>
+                <SelectItem value="two">2</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
+          <div className="col-span-2 mt-1 flex items-start gap-2 text-[11px] text-muted-foreground">
+            <Info className="mt-0.5 size-3 shrink-0" />
+            <span>
+              On macOS the device path usually looks like{" "}
+              <span className="font-mono">/dev/cu.usbserial-*</span>; on Linux{" "}
+              <span className="font-mono">/dev/ttyUSB0</span>; on Windows{" "}
+              <span className="font-mono">COM3</span>. Run{" "}
+              <span className="font-mono">ls /dev/cu.*</span> (macOS) /{" "}
+              <span className="font-mono">dmesg | tail</span> (Linux) to see
+              what your USB-RS485 adapter exposes.
+            </span>
+          </div>
+        </div>
+      )}
+    </>
+  )
+}
+
+const BAUD_RATES = [1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200] as const
+
+/** Best-guess default serial device path for the current OS, used
+ * as a placeholder so first-time users see what to type. The actual
+ * default value stored on the device stays empty until the user
+ * explicitly enters a path — better to fail loudly than connect to
+ * the wrong port. */
+function defaultSerialPath(): string {
+  // navigator.platform is deprecated but still the most reliable
+  // sync identification in browsers and WKWebView. Falls back to a
+  // POSIX-shaped guess if unavailable.
+  const plat =
+    typeof navigator !== "undefined" ? navigator.platform.toLowerCase() : ""
+  if (plat.includes("mac")) return "/dev/cu.usbserial-1410"
+  if (plat.includes("win")) return "COM3"
+  return "/dev/ttyUSB0"
 }
 
 // ============================================================
