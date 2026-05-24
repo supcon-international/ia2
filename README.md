@@ -18,7 +18,7 @@ A simple, agent-first IDE + runtime for IEC 61131-3 PLC programming.
 | **`crates/ironplc-bridge/`** | Rust | Wraps vendored [ironplc](https://github.com/ironplc/ironplc) compiler + VM. Adds LD / FBD / SFC → ST transpilers + diagnostics enrichment. |
 | **`crates/runtime/`** | Rust | Headless edge runtime (`ia2-runtime` binary). Same scan loop as the IDE-side bridge but with no HTTP / LSP / CORS — designed for Linux edge boxes. |
 | **`crates/project/`** | Rust | On-disk project schema (POU files, devices, edges, iomap, tasks). |
-| **`crates/iomap-modbus/` `iomap-ethercat/`** | Rust | I/O adapters: Modbus TCP (tokio-modbus), EtherCAT (ethercrab). |
+| **`crates/iomap-modbus/` `iomap-ethercat/`** | Rust | I/O adapters: Modbus TCP **and RTU/serial** (tokio-modbus + tokio-serial), EtherCAT (ethercrab). |
 | **`vendor/ironplc/`** | git submodule | The compiler + VM. |
 
 ## Two interfaces, one source of truth
@@ -45,18 +45,24 @@ table immediately.
 
 ## Agent takeover overlay
 
-When the `cs` CLI is mid-flight, the IDE shows a pulsing green border
-plus a top-centre "Agent in control" banner. User input is softly
-blocked while takeover is active. Click **Take over** to suppress for
-8 seconds and regain pointer control — designed for the case where a
-human needs to step in mid-agent-run without race-conditioning on the
-same files.
+When an agent is driving, the IDE shows a pulsing green border plus a
+top-centre banner so the human knows not to fight it for state. Two
+modes:
 
-The signal is a 3-second TTL heartbeat: every mutating `cs` subcommand
-pings `POST /api/agent/heartbeat` at start, the server holds the
-"active" flag for 3 s of silence, then drops it. Read-only commands
-(`cs check`, `cs project info`, `cs runtime status`) don't trigger the
-overlay — querying state isn't "operating."
+- **Session mode (preferred).** `cs agent run --label "rebuilding tank
+  controller" -- <cmd>` opens an explicit takeover session: the banner
+  stays on with that label for the whole workflow, then drops when the
+  command exits (success, failure, or Ctrl-C — a background heartbeat
+  thread keeps it alive in between, and the server's 30 s watchdog
+  recovers if the agent crashes). The banner's button reads **End
+  session** — clicking it force-returns control to the human.
+- **Transient mode (back-compat).** A single mutating `cs` subcommand
+  pings `POST /api/agent/heartbeat`; the overlay flashes on with the
+  command name and ages out after 3 s of silence. Fine for one-offs;
+  multi-step work should use session mode so the banner doesn't strobe.
+
+Read-only commands (`cs check`, `cs project list`, `cs runtime status`)
+don't trigger the overlay — querying state isn't "operating."
 
 ## Quickstart
 
@@ -90,10 +96,16 @@ cs project check ~/Documents/IA2/demo   # full compile
 
 # project CRUD (talks to a running server)
 cs project create my_line               # → ~/Documents/IA2/my_line/
-cs project open ~/Documents/IA2/my_line
+cs project list                         # open projects; --project NAME targets one
 cs pou create motor --language ld
 cs pou save motor --from motor.ld.json
-cs pou delete motor
+
+# devices / wiring / scheduling (get → edit → set, JSON shapes)
+cs device create hmi --protocol modbus  # then `cs device set hmi --from -` for TCP/RTU + channels
+cs iomap set --from iomap.json          # variable ↔ device.channel bindings
+cs tasks set --from tasks.json          # PROGRAM ↔ task schedule
+cs edge create field_pi --host pi@plc.local
+cs deploy field_pi                      # tar → ssh → versioned swap → systemd restart
 
 # runtime control
 cs run                                  # schedule everything in tasks.toml
@@ -101,6 +113,9 @@ cs runtime status
 cs runtime force pump_pct 50.0          # type-aware: REAL bit-packed, BOOL as 0/1
 cs runtime pause / step / resume
 cs stop
+
+# wrap a whole multi-step workflow in one steady takeover session
+cs agent run --label "build my_line" -- bash -c 'cs project create my_line; cs pou save ...; cs run'
 ```
 
 Exit codes follow Unix: `0` clean / `1` source has errors / `2` usage /
@@ -136,6 +151,23 @@ reaching ironplc; the intermediate ST is observable via
 no LSP. Push it to a Linux edge box, install the systemd unit
 (`infra/ia2.service`), then `Deploy` from the IDE to atomically swap
 projects without restarting the runtime. See `docs/edge-deploy.md`.
+
+## Claude Code skill
+
+The repo ships an agent skill at **`.claude/skills/industrial-automation-skill/`**.
+When you open this project in Claude Code, the skill auto-loads on
+PLC/automation work (triggers on "ironplc", "modbus", "structured
+text", "PLC", "cs CLI", etc.) and teaches the agent the whole `cs`
+workflow: the mental model, every command, the mandatory
+`cs agent run` session pattern, end-to-end recipes, the exact
+device/iomap/tasks JSON shapes, IEC 61131-3 quirks ironplc actually
+accepts, and a troubleshooting table. It also carries two checklists —
+`first-contact` (find the server port, see what's open) and `handoff`
+(compile clean, release forces, report state) — so an agent starts and
+finishes a task the right way.
+
+It's committed (not gitignored) so every contributor and CI agent gets
+the same playbook. Skim `SKILL.md` to see what an agent is told.
 
 ## Design principles
 
