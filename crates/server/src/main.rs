@@ -217,6 +217,7 @@ async fn main() -> anyhow::Result<()> {
             get(routes::discover_edge_route),
         )
         .route("/api/edges/{name}/system", get(routes::system_edge_route))
+        .route("/api/edges/{name}/status", get(routes::status_edge_route))
         .route(
             "/api/edges/{name}/runtime/{op}",
             post(routes::edge_runtime_route),

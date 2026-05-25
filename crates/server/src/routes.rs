@@ -913,6 +913,23 @@ pub async fn system_edge_route(
         .map_err(ApiError::Internal)
 }
 
+/// Edge runtime `/status` (project + scan count + debug mode/forces +
+/// last snapshot with variable types). Backs `cs runtime --edge` status
+/// reads and force/write value-packing.
+pub async fn status_edge_route(
+    State(state): State<AppState>,
+    project: ProjectName,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let edge = with_project(&state, &project, |store| {
+        store.read_edge(&name).map_err(Into::into)
+    })?;
+    crate::edges::fetch_edge_status(&edge)
+        .await
+        .map(Json)
+        .map_err(ApiError::Internal)
+}
+
 /// Proxy an online-debug control op to the edge runtime over ssh. `op`
 /// is whitelisted (it's interpolated into the remote curl command). The
 /// request body (if any) is forwarded as the JSON payload — e.g.

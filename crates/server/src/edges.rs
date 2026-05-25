@@ -247,6 +247,28 @@ pub async fn fetch_edge_system(edge: &Edge) -> Result<serde_json::Value, String>
         .map_err(|e| format!("unexpected /system body: {} ({e})", first_line(&body)))
 }
 
+/// Fetch the edge runtime's `/status` (over ssh) — project + scan count +
+/// debug mode/forces + the last VarSnapshot (with per-variable types,
+/// which `cs runtime --edge` uses to pack force/write values).
+pub async fn fetch_edge_status(edge: &Edge) -> Result<serde_json::Value, String> {
+    let cmd = format!(
+        "curl --silent --max-time 4 http://127.0.0.1:{}/status",
+        edge.runtime_port
+    );
+    let output = ssh_cmd(edge)
+        .arg(cmd)
+        .output()
+        .await
+        .map_err(|e| format!("spawn ssh failed: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("edge unreachable: {}", first_line(&stderr)));
+    }
+    let body = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str::<serde_json::Value>(&body)
+        .map_err(|e| format!("unexpected /status body: {} ({e})", first_line(&body)))
+}
+
 // ============================================================
 //  Online debug control — proxy pause/step/write/force to the edge
 // ============================================================

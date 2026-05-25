@@ -321,11 +321,17 @@ enum RuntimeCmd {
     /// Halt the scan loop. IO is frozen and `run_round` is skipped
     /// until `resume` or `step`. Variable writes / forces still apply.
     Pause {
+        /// Target this edge runtime instead of the local server.
+        #[arg(long)]
+        edge: Option<String>,
         #[arg(long, default_value = "http://127.0.0.1:3001")]
         server: String,
     },
     /// Resume continuous scanning.
     Resume {
+        /// Target this edge runtime instead of the local server.
+        #[arg(long)]
+        edge: Option<String>,
         #[arg(long, default_value = "http://127.0.0.1:3001")]
         server: String,
     },
@@ -334,6 +340,9 @@ enum RuntimeCmd {
         /// Number of cycles to advance (default 1).
         #[arg(default_value_t = 1)]
         cycles: u32,
+        /// Target this edge runtime instead of the local server.
+        #[arg(long)]
+        edge: Option<String>,
         #[arg(long, default_value = "http://127.0.0.1:3001")]
         server: String,
     },
@@ -342,6 +351,9 @@ enum RuntimeCmd {
     Status {
         #[arg(long)]
         json: bool,
+        /// Target this edge runtime instead of the local server.
+        #[arg(long)]
+        edge: Option<String>,
         #[arg(long, default_value = "http://127.0.0.1:3001")]
         server: String,
     },
@@ -362,12 +374,18 @@ enum RuntimeCmd {
     Force {
         name: String,
         value: String,
+        /// Target this edge runtime instead of the local server.
+        #[arg(long)]
+        edge: Option<String>,
         #[arg(long, default_value = "http://127.0.0.1:3001")]
         server: String,
     },
     /// Release a forced variable.
     Unforce {
         name: String,
+        /// Target this edge runtime instead of the local server.
+        #[arg(long)]
+        edge: Option<String>,
         #[arg(long, default_value = "http://127.0.0.1:3001")]
         server: String,
     },
@@ -377,6 +395,9 @@ enum RuntimeCmd {
     Write {
         name: String,
         value: String,
+        /// Target this edge runtime instead of the local server.
+        #[arg(long)]
+        edge: Option<String>,
         #[arg(long, default_value = "http://127.0.0.1:3001")]
         server: String,
     },
@@ -1806,28 +1827,51 @@ fn cmd_symbols(file: &Path, name_filter: Option<&str>, json: bool) -> Result<i32
 
 fn cmd_runtime(cmd: RuntimeCmd) -> Result<i32> {
     match cmd {
-        RuntimeCmd::Pause { server } => {
-            let resp = post_json(&format!("{server}/api/runtime/pause"), &())?;
+        RuntimeCmd::Pause { edge, server } => {
+            let resp = match &edge {
+                Some(e) => post_json(
+                    &format!("{server}/api/edges/{}/runtime/pause", url_encode(e)),
+                    &serde_json::json!({}),
+                )?,
+                None => post_json(&format!("{server}/api/runtime/pause"), &())?,
+            };
             println!("{}", serde_json::to_string_pretty(&resp)?);
             Ok(0)
         }
-        RuntimeCmd::Resume { server } => {
-            let resp = post_json(&format!("{server}/api/runtime/resume"), &())?;
+        RuntimeCmd::Resume { edge, server } => {
+            let resp = match &edge {
+                Some(e) => post_json(
+                    &format!("{server}/api/edges/{}/runtime/resume", url_encode(e)),
+                    &serde_json::json!({}),
+                )?,
+                None => post_json(&format!("{server}/api/runtime/resume"), &())?,
+            };
             println!("{}", serde_json::to_string_pretty(&resp)?);
             Ok(0)
         }
-        RuntimeCmd::Step { cycles, server } => {
+        RuntimeCmd::Step {
+            cycles,
+            edge,
+            server,
+        } => {
             let body = serde_json::json!({ "cycles": cycles });
-            let resp = post_json(&format!("{server}/api/runtime/step"), &body)?;
+            let resp = match &edge {
+                Some(e) => post_json(
+                    &format!("{server}/api/edges/{}/runtime/step", url_encode(e)),
+                    &body,
+                )?,
+                None => post_json(&format!("{server}/api/runtime/step"), &body)?,
+            };
             println!("{}", serde_json::to_string_pretty(&resp)?);
             Ok(0)
         }
-        RuntimeCmd::Status { json, server } => {
-            // Status is on /api/runtime/status — full picture including
-            // mode + forces. We don't try to render it prettily here;
-            // the JSON is what agents actually want and humans can pipe
-            // it through `jq` if needed.
-            let status = get_json(&format!("{server}/api/runtime/status"))?;
+        RuntimeCmd::Status { json, edge, server } => {
+            // Local: /api/runtime/status. Edge: the runtime's /status via
+            // the server proxy (different shape, but carries mode + forces).
+            let status = match &edge {
+                Some(e) => get_json(&format!("{server}/api/edges/{}/status", url_encode(e)))?,
+                None => get_json(&format!("{server}/api/runtime/status"))?,
+            };
             if json {
                 println!("{}", serde_json::to_string_pretty(&status)?);
             } else {
@@ -1842,10 +1886,13 @@ fn cmd_runtime(cmd: RuntimeCmd) -> Result<i32> {
                     .and_then(|v| v.as_array())
                     .cloned()
                     .unwrap_or_default();
+                // Edge /status has no `running` bool — derive from mode.
                 let running = status
                     .get("running")
                     .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
+                    .unwrap_or_else(|| {
+                        mode.get("kind").and_then(|k| k.as_str()) == Some("running")
+                    });
                 println!(
                     "running: {running}  mode: {}  forces: {}",
                     serde_json::to_string(&mode)?,
@@ -1864,36 +1911,66 @@ fn cmd_runtime(cmd: RuntimeCmd) -> Result<i32> {
         RuntimeCmd::Force {
             name,
             value,
+            edge,
             server,
         } => {
-            let encoded = parse_value(&server, &name, &value)?;
-            let body = serde_json::json!({ "value": encoded });
-            let resp = post_json(
-                &format!("{server}/api/runtime/forces/{}", url_encode(&name)),
-                &body,
-            )?;
+            let resp = match &edge {
+                Some(e) => {
+                    let encoded =
+                        pack_value(&name, edge_var_type(&server, e, &name).as_deref(), &value)?;
+                    post_json(
+                        &format!("{server}/api/edges/{}/runtime/force", url_encode(e)),
+                        &serde_json::json!({ "name": name, "value": encoded }),
+                    )?
+                }
+                None => {
+                    let encoded = parse_value(&server, &name, &value)?;
+                    post_json(
+                        &format!("{server}/api/runtime/forces/{}", url_encode(&name)),
+                        &serde_json::json!({ "value": encoded }),
+                    )?
+                }
+            };
             println!("{}", serde_json::to_string_pretty(&resp)?);
             Ok(0)
         }
-        RuntimeCmd::Unforce { name, server } => {
-            let resp = delete_json(&format!(
-                "{server}/api/runtime/forces/{}",
-                url_encode(&name)
-            ))?;
+        RuntimeCmd::Unforce { name, edge, server } => {
+            let resp = match &edge {
+                Some(e) => post_json(
+                    &format!("{server}/api/edges/{}/runtime/unforce", url_encode(e)),
+                    &serde_json::json!({ "name": name }),
+                )?,
+                None => delete_json(&format!(
+                    "{server}/api/runtime/forces/{}",
+                    url_encode(&name)
+                ))?,
+            };
             println!("{}", serde_json::to_string_pretty(&resp)?);
             Ok(0)
         }
         RuntimeCmd::Write {
             name,
             value,
+            edge,
             server,
         } => {
-            let encoded = parse_value(&server, &name, &value)?;
-            let body = serde_json::json!({ "value": encoded });
-            let resp = post_json(
-                &format!("{server}/api/runtime/variables/{}", url_encode(&name)),
-                &body,
-            )?;
+            let resp = match &edge {
+                Some(e) => {
+                    let encoded =
+                        pack_value(&name, edge_var_type(&server, e, &name).as_deref(), &value)?;
+                    post_json(
+                        &format!("{server}/api/edges/{}/runtime/write", url_encode(e)),
+                        &serde_json::json!({ "name": name, "value": encoded }),
+                    )?
+                }
+                None => {
+                    let encoded = parse_value(&server, &name, &value)?;
+                    post_json(
+                        &format!("{server}/api/runtime/variables/{}", url_encode(&name)),
+                        &serde_json::json!({ "value": encoded }),
+                    )?
+                }
+            };
             println!("{}", serde_json::to_string_pretty(&resp)?);
             Ok(0)
         }
@@ -1923,6 +2000,29 @@ fn cmd_runtime(cmd: RuntimeCmd) -> Result<i32> {
 ///      decimal point implies REAL, otherwise INT. Print a stderr
 ///      note so users know we guessed.
 fn parse_value(server: &str, name: &str, raw: &str) -> Result<i32> {
+    let var_type = snapshot_var_type(server, name).unwrap_or_default();
+    pack_value(name, var_type.as_deref(), raw)
+}
+
+/// Resolve an edge variable's type from the edge runtime's `/status`
+/// (last snapshot, which carries per-variable `type_name`).
+fn edge_var_type(server: &str, edge: &str, name: &str) -> Option<String> {
+    let status = get_json(&format!("{server}/api/edges/{}/status", url_encode(edge))).ok()?;
+    let vars = status.get("last_snapshot")?.get("vars")?.as_array()?;
+    for v in vars {
+        if v.get("name").and_then(|n| n.as_str()) == Some(name) {
+            return v
+                .get("type_name")
+                .and_then(|t| t.as_str())
+                .map(String::from);
+        }
+    }
+    None
+}
+
+/// Bit-pack a human value string into the i32 force/write wire, given the
+/// variable's IEC `var_type` (None = unknown → guess from value format).
+fn pack_value(name: &str, var_type: Option<&str>, raw: &str) -> Result<i32> {
     // BOOL shortcuts. Case-insensitive because TRUE/FALSE are the IEC
     // canonical form but agents type either.
     match raw.to_ascii_lowercase().as_str() {
@@ -1931,9 +2031,7 @@ fn parse_value(server: &str, name: &str, raw: &str) -> Result<i32> {
         _ => {}
     }
 
-    let var_type = snapshot_var_type(server, name).unwrap_or_default();
-
-    match var_type.as_deref() {
+    match var_type {
         Some("BOOL") => {
             // We already handled TRUE/FALSE above; accept 0/1 too.
             let n: i32 = raw.parse().with_context(|| {
@@ -2076,8 +2174,8 @@ fn announce_target(cmd: &Command) -> Option<(&str, &'static str)> {
         Command::Stop { server } => Some((server, "stop")),
         Command::Deploy { server, .. } => Some((server, "deploy")),
 
-        Command::Runtime(RuntimeCmd::Pause { server }) => Some((server, "runtime pause")),
-        Command::Runtime(RuntimeCmd::Resume { server }) => Some((server, "runtime resume")),
+        Command::Runtime(RuntimeCmd::Pause { server, .. }) => Some((server, "runtime pause")),
+        Command::Runtime(RuntimeCmd::Resume { server, .. }) => Some((server, "runtime resume")),
         Command::Runtime(RuntimeCmd::Step { server, .. }) => Some((server, "runtime step")),
         Command::Runtime(RuntimeCmd::Force { server, .. }) => Some((server, "runtime force")),
         Command::Runtime(RuntimeCmd::Unforce { server, .. }) => Some((server, "runtime unforce")),
