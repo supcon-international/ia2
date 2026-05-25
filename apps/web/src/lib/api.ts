@@ -589,6 +589,69 @@ export async function detachEdge(name: string): Promise<RunResponse> {
   )
 }
 
+// --- Edge introspection: logs / discover / system ---
+// Lightweight inline types (mirror the runtime's wire shapes). These could
+// be replaced by ts-rs-generated bindings later.
+
+export interface EdgeLogs {
+  lines: string[]
+}
+
+/** Recent edge-runtime log lines (discovery, bus health, connect errors). */
+export async function fetchEdgeLogs(name: string, tail = 300): Promise<EdgeLogs> {
+  return jsonOrThrow(
+    await apiFetch(`/api/edges/${encodeURIComponent(name)}/logs?tail=${tail}`),
+    `GET /api/edges/${name}/logs`,
+  )
+}
+
+export interface DiscoveredSlave {
+  index: number
+  name: string
+  vendor_id: number
+  product_id: number
+  input_bytes: number
+  output_bytes: number
+}
+
+export interface DeviceReport {
+  name: string
+  protocol: string
+  connected: boolean
+  error: string | null
+  slaves: DiscoveredSlave[]
+}
+
+/** Per-device connect status + discovered EtherCAT topology. */
+export async function discoverEdge(name: string): Promise<DeviceReport[]> {
+  return jsonOrThrow(
+    await apiFetch(`/api/edges/${encodeURIComponent(name)}/discover`),
+    `GET /api/edges/${name}/discover`,
+  )
+}
+
+export interface EdgeNic {
+  name: string
+  mac: string
+  operstate: string
+  carrier: boolean
+}
+
+export interface EdgeSystem {
+  arch: string
+  os: string
+  nics: EdgeNic[]
+  serial_ports: string[]
+}
+
+/** Edge interfaces / serial ports / arch — for authoring device configs. */
+export async function fetchEdgeSystem(name: string): Promise<EdgeSystem> {
+  return jsonOrThrow(
+    await apiFetch(`/api/edges/${encodeURIComponent(name)}/system`),
+    `GET /api/edges/${name}/system`,
+  )
+}
+
 export async function fetchAttachment(name: string): Promise<AttachmentStatus> {
   return jsonOrThrow(
     await apiFetch(`/api/edges/${encodeURIComponent(name)}/attachment`),

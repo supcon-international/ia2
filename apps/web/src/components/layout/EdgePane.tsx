@@ -2,22 +2,36 @@ import {
   Activity,
   AlertCircle,
   CheckCircle2,
+  Cpu,
   Link2,
   Link2Off,
   Loader2,
+  Network,
+  RefreshCw,
   Rocket,
   Save,
+  ScrollText,
 } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
 
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { deployEdge, probeEdge } from "@/lib/api"
+import {
+  deployEdge,
+  discoverEdge,
+  fetchEdgeLogs,
+  fetchEdgeSystem,
+  probeEdge,
+  type DeviceReport,
+  type EdgeSystem,
+} from "@/lib/api"
 import { useRuntime } from "@/state/runtime"
 import type { DeployReport } from "@/types/generated/DeployReport"
 import type { Edge } from "@/types/generated/Edge"
 import type { EdgeProbe } from "@/types/generated/EdgeProbe"
+
+type EdgeTab = "config" | "logs" | "discover" | "system"
 
 export function EdgePane() {
   const {
@@ -70,6 +84,7 @@ function Editor({
   onDetach: () => Promise<void>
 }) {
   const [draft, setDraft] = useState<Edge>(edge)
+  const [tab, setTab] = useState<EdgeTab>("config")
   const [probe, setProbe] = useState<EdgeProbe | null>(null)
   const [probing, setProbing] = useState(false)
   const [deploying, setDeploying] = useState(false)
@@ -177,6 +192,9 @@ function Editor({
         </div>
       </div>
 
+      <EdgeTabs tab={tab} setTab={setTab} />
+
+      {tab === "config" && (
       <div className="flex-1 space-y-6 overflow-auto p-5">
         <section>
           <div className="mb-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
@@ -346,7 +364,297 @@ function Editor({
           </section>
         )}
       </div>
+      )}
+
+      {tab === "logs" && <LogsPanel name={edge.name} />}
+      {tab === "discover" && <DiscoverPanel name={edge.name} />}
+      {tab === "system" && <SystemPanel name={edge.name} />}
     </>
+  )
+}
+
+function EdgeTabs({
+  tab,
+  setTab,
+}: {
+  tab: EdgeTab
+  setTab: (t: EdgeTab) => void
+}) {
+  const tabs: [EdgeTab, string, React.ComponentType<{ className?: string }>][] = [
+    ["config", "Config", Save],
+    ["logs", "Logs", ScrollText],
+    ["discover", "Discover", Network],
+    ["system", "System", Cpu],
+  ]
+  return (
+    <div className="flex items-center gap-0.5 border-b border-border px-2">
+      {tabs.map(([id, label, Icon]) => (
+        <button
+          key={id}
+          onClick={() => setTab(id)}
+          className={`-mb-px flex items-center gap-1.5 border-b-2 px-2.5 py-1.5 text-xs transition-colors ${
+            tab === id
+              ? "border-foreground text-foreground"
+              : "border-transparent text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          <Icon className="size-3" />
+          {label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+/** Live edge-runtime log — polls GET /logs every 2s. */
+function LogsPanel({ name }: { name: string }) {
+  const [lines, setLines] = useState<string[]>([])
+  const [error, setError] = useState<string | null>(null)
+  const [paused, setPaused] = useState(false)
+  const pausedRef = useRef(false)
+  pausedRef.current = paused
+  useEffect(() => {
+    let cancelled = false
+    const tick = async () => {
+      if (cancelled || pausedRef.current) return
+      try {
+        const r = await fetchEdgeLogs(name, 400)
+        if (!cancelled) {
+          setLines(r.lines)
+          setError(null)
+        }
+      } catch (e) {
+        if (!cancelled) setError(String(e))
+      }
+    }
+    void tick()
+    const h = window.setInterval(tick, 2000)
+    return () => {
+      cancelled = true
+      window.clearInterval(h)
+    }
+  }, [name])
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex items-center justify-between border-b border-border px-3 py-1.5 text-[11px] text-muted-foreground">
+        <span className="font-mono">runtime log · polling /logs every 2s</span>
+        <button
+          onClick={() => setPaused((p) => !p)}
+          className="rounded border border-border px-1.5 py-0.5 hover:text-foreground"
+        >
+          {paused ? "Resume" : "Pause"}
+        </button>
+      </div>
+      {error && (
+        <div className="border-b border-red-500/30 bg-red-500/5 px-3 py-1.5 text-[11px] text-red-700 dark:text-red-400">
+          {error}
+        </div>
+      )}
+      <pre className="flex-1 overflow-auto whitespace-pre-wrap break-all bg-muted/20 p-3 font-mono text-[11px] leading-relaxed">
+        {lines.length ? lines.join("\n") : "(no log lines yet)"}
+      </pre>
+    </div>
+  )
+}
+
+/** Per-device connect status + discovered EtherCAT topology (GET /discover). */
+function DiscoverPanel({ name }: { name: string }) {
+  const [devs, setDevs] = useState<DeviceReport[] | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const load = async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      setDevs(await discoverEdge(name))
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setLoading(false)
+    }
+  }
+  useEffect(() => {
+    void load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [name])
+  return (
+    <div className="flex-1 space-y-4 overflow-auto p-4">
+      <div className="flex items-center justify-between">
+        <span className="text-[11px] uppercase tracking-wider text-muted-foreground">
+          Bus discovery
+        </span>
+        <Button size="sm" variant="outline" onClick={() => void load()} disabled={loading}>
+          {loading ? (
+            <Loader2 className="mr-1.5 size-3 animate-spin" />
+          ) : (
+            <RefreshCw className="mr-1.5 size-3" />
+          )}
+          Scan
+        </Button>
+      </div>
+      {error && (
+        <pre className="overflow-auto rounded-md border border-red-500/40 bg-red-500/5 p-2 text-[11px] text-red-700 dark:text-red-400">
+          {error}
+        </pre>
+      )}
+      {devs?.map((d) => (
+        <div key={d.name} className="overflow-hidden rounded-md border border-border">
+          <div className="flex items-center gap-2 border-b border-border bg-muted/30 px-3 py-2 text-sm">
+            {d.connected ? (
+              <CheckCircle2 className="size-3.5 text-emerald-600 dark:text-emerald-400" />
+            ) : (
+              <AlertCircle className="size-3.5 text-red-600 dark:text-red-400" />
+            )}
+            <span className="font-mono">{d.name}</span>
+            <span className="rounded border border-border px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+              {d.protocol}
+            </span>
+            {!d.connected && d.error && (
+              <span
+                className="truncate text-xs text-red-600 dark:text-red-400"
+                title={d.error}
+              >
+                {d.error}
+              </span>
+            )}
+          </div>
+          {d.connected &&
+            (d.slaves.length ? (
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-left text-[10px] uppercase tracking-wider text-muted-foreground">
+                    <th className="px-3 py-1 font-medium">#</th>
+                    <th className="py-1 font-medium">Name</th>
+                    <th className="py-1 font-medium">Vendor</th>
+                    <th className="py-1 font-medium">Product</th>
+                    <th className="py-1 font-medium">In</th>
+                    <th className="py-1 pr-3 font-medium">Out</th>
+                  </tr>
+                </thead>
+                <tbody className="font-mono">
+                  {d.slaves.map((s) => (
+                    <tr key={s.index} className="border-t border-border/50">
+                      <td className="px-3 py-1">{s.index}</td>
+                      <td className="py-1">{s.name}</td>
+                      <td className="py-1">
+                        0x{s.vendor_id.toString(16).padStart(8, "0")}
+                      </td>
+                      <td className="py-1">
+                        0x{s.product_id.toString(16).padStart(8, "0")}
+                      </td>
+                      <td className="py-1">{s.input_bytes}B</td>
+                      <td className="py-1 pr-3">{s.output_bytes}B</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <div className="px-3 py-2 text-xs text-muted-foreground">
+                no slaves on the bus
+              </div>
+            ))}
+        </div>
+      ))}
+      {devs && devs.length === 0 && (
+        <div className="text-xs text-muted-foreground">no devices in project</div>
+      )}
+    </div>
+  )
+}
+
+/** Edge interfaces / serial ports / arch (GET /system). */
+function SystemPanel({ name }: { name: string }) {
+  const [sys, setSys] = useState<EdgeSystem | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const load = async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      setSys(await fetchEdgeSystem(name))
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setLoading(false)
+    }
+  }
+  useEffect(() => {
+    void load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [name])
+  return (
+    <div className="flex-1 space-y-4 overflow-auto p-4">
+      <div className="flex items-center justify-between">
+        <span className="text-[11px] uppercase tracking-wider text-muted-foreground">
+          System
+          {sys && (
+            <span className="ml-1 font-mono normal-case lowercase">
+              · {sys.os}/{sys.arch}
+            </span>
+          )}
+        </span>
+        <Button size="sm" variant="outline" onClick={() => void load()} disabled={loading}>
+          {loading ? (
+            <Loader2 className="mr-1.5 size-3 animate-spin" />
+          ) : (
+            <RefreshCw className="mr-1.5 size-3" />
+          )}
+          Refresh
+        </Button>
+      </div>
+      {error && (
+        <pre className="overflow-auto rounded-md border border-red-500/40 bg-red-500/5 p-2 text-[11px] text-red-700 dark:text-red-400">
+          {error}
+        </pre>
+      )}
+      {sys && (
+        <>
+          <div>
+            <div className="mb-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+              Network interfaces (pick one for an EtherCAT nic)
+            </div>
+            <div className="overflow-hidden rounded-md border border-border">
+              <table className="w-full text-xs">
+                <tbody className="font-mono">
+                  {sys.nics.map((n) => (
+                    <tr key={n.name} className="border-b border-border/50 last:border-0">
+                      <td className="px-3 py-1.5">{n.name}</td>
+                      <td className="py-1.5 text-muted-foreground">{n.operstate}</td>
+                      <td className="py-1.5">
+                        {n.carrier ? (
+                          <span className="text-emerald-600 dark:text-emerald-400">
+                            carrier
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground">no-carrier</span>
+                        )}
+                      </td>
+                      <td className="py-1.5 pr-3 text-muted-foreground">{n.mac}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div>
+            <div className="mb-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+              Serial ports (pick one for a Modbus RTU device)
+            </div>
+            {sys.serial_ports.length ? (
+              <ul className="space-y-0.5 font-mono text-xs">
+                {sys.serial_ports.map((p) => (
+                  <li key={p} className="rounded border border-border px-2 py-1">
+                    {p}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <div className="text-xs text-muted-foreground">(none detected)</div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
   )
 }
 
