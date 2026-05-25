@@ -190,10 +190,7 @@ pub async fn fetch_edge_logs(edge: &Edge, tail: usize) -> Result<serde_json::Val
         .map_err(|e| format!("spawn ssh failed: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "edge unreachable: {}",
-            first_line(&stderr)
-        ));
+        return Err(format!("edge unreachable: {}", first_line(&stderr)));
     }
     let body = String::from_utf8_lossy(&output.stdout);
     serde_json::from_str::<serde_json::Value>(&body)

@@ -157,7 +157,7 @@ impl IoDevice for SimEthercat {
 /// Bytes occupied by a PDO entry of `bit_length` bits (rounded up; a
 /// sub-byte entry still occupies one byte).
 fn byte_size(bit_length: u8) -> u16 {
-    ((bit_length as u16) + 7) / 8
+    (bit_length as u16).div_ceil(8)
 }
 
 fn zero_for(ty: EthercatDataType) -> ChannelValue {

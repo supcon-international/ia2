@@ -1509,9 +1509,15 @@ fn cmd_edge(cmd: EdgeCmd) -> Result<i32> {
             for d in devs {
                 let dname = d.get("name").and_then(|v| v.as_str()).unwrap_or("?");
                 let proto = d.get("protocol").and_then(|v| v.as_str()).unwrap_or("?");
-                let connected = d.get("connected").and_then(|v| v.as_bool()).unwrap_or(false);
+                let connected = d
+                    .get("connected")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 if !connected {
-                    let err = d.get("error").and_then(|v| v.as_str()).unwrap_or("not connected");
+                    let err = d
+                        .get("error")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("not connected");
                     println!("✗ {dname} ({proto}) — {err}");
                     continue;
                 }
