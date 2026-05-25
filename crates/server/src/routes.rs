@@ -1052,21 +1052,44 @@ pub async fn attachment_status(
 /// release first, then debug, then env var override. Returns None if no
 /// binary is found — deploy falls back to "reuse current/runtime".
 fn find_runtime_binary() -> Option<std::path::PathBuf> {
+    // Explicit override wins — but only if it's a Linux ELF (see below).
     if let Ok(p) = std::env::var("IA2_RUNTIME_BIN") {
         let p = std::path::PathBuf::from(p);
         if p.exists() {
-            return Some(p);
+            if is_linux_elf(&p) {
+                return Some(p);
+            }
+            tracing::warn!(
+                path = %p.display(),
+                "IA2_RUNTIME_BIN is not a Linux ELF — not shipping it; the edge will reuse its \
+                 existing runtime binary"
+            );
         }
     }
     let exe = std::env::current_exe().ok()?;
     let parent = exe.parent()?.to_path_buf();
-    // Sibling of `server` binary in the same target dir.
+    // Sibling of `server` in the target dir — but ONLY ship a Linux ELF.
+    // Edges are Linux; on a macOS dev machine the local `ia2-runtime` is a
+    // Mach-O binary that would brick the edge on restart (exec format
+    // error). When no suitable binary is found we ship nothing and the
+    // deploy reuses the edge's existing `current/runtime` (carry-forward).
     [
         parent.join("ia2-runtime"),
         parent.parent()?.join("release").join("ia2-runtime"),
     ]
     .into_iter()
-    .find(|c| c.exists())
+    .find(|c| c.exists() && is_linux_elf(c))
+}
+
+/// True if `path` begins with the ELF magic (`\x7fELF`). We refuse to ship
+/// a non-ELF (e.g. macOS Mach-O) runtime to a Linux edge.
+fn is_linux_elf(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    let mut magic = [0u8; 4];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut magic))
+        .map(|_| magic == [0x7f, b'E', b'L', b'F'])
+        .unwrap_or(false)
 }
 
 // ============================================================
