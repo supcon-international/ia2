@@ -652,6 +652,52 @@ export async function fetchEdgeSystem(name: string): Promise<EdgeSystem> {
   )
 }
 
+export interface EdgeRuntimeMode {
+  kind: string
+  remaining?: number
+}
+export interface EdgeForce {
+  name: string
+  value: number
+}
+export interface EdgeSnapshotVar {
+  name: string
+  type_name: string
+  value: string
+}
+export interface EdgeStatus {
+  project: string
+  scan_count: number
+  uptime_secs: number
+  mode: EdgeRuntimeMode
+  forces: EdgeForce[]
+  last_snapshot: { scan_count: number; vars: EdgeSnapshotVar[] } | null
+}
+
+/** Edge runtime status: debug mode + forces + last snapshot (live vars). */
+export async function fetchEdgeStatus(name: string): Promise<EdgeStatus> {
+  return jsonOrThrow(
+    await apiFetch(`/api/edges/${encodeURIComponent(name)}/status`),
+    `GET /api/edges/${name}/status`,
+  )
+}
+
+/** Online-debug control op (pause/resume/step/write/force/unforce). */
+export async function edgeRuntimeOp(
+  name: string,
+  op: "pause" | "resume" | "step" | "write" | "force" | "unforce",
+  body?: Record<string, unknown>,
+): Promise<unknown> {
+  return jsonOrThrow(
+    await apiFetch(`/api/edges/${encodeURIComponent(name)}/runtime/${op}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body ?? {}),
+    }),
+    `POST /api/edges/${name}/runtime/${op}`,
+  )
+}
+
 export async function fetchAttachment(name: string): Promise<AttachmentStatus> {
   return jsonOrThrow(
     await apiFetch(`/api/edges/${encodeURIComponent(name)}/attachment`),

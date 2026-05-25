@@ -3,14 +3,20 @@ import {
   AlertCircle,
   CheckCircle2,
   Cpu,
+  Gauge,
   Link2,
   Link2Off,
   Loader2,
   Network,
+  Pause,
+  Pin,
+  PinOff,
+  Play,
   RefreshCw,
   Rocket,
   Save,
   ScrollText,
+  StepForward,
 } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
 
@@ -20,10 +26,13 @@ import { Label } from "@/components/ui/label"
 import {
   deployEdge,
   discoverEdge,
+  edgeRuntimeOp,
   fetchEdgeLogs,
+  fetchEdgeStatus,
   fetchEdgeSystem,
   probeEdge,
   type DeviceReport,
+  type EdgeStatus,
   type EdgeSystem,
 } from "@/lib/api"
 import { useRuntime } from "@/state/runtime"
@@ -31,7 +40,7 @@ import type { DeployReport } from "@/types/generated/DeployReport"
 import type { Edge } from "@/types/generated/Edge"
 import type { EdgeProbe } from "@/types/generated/EdgeProbe"
 
-type EdgeTab = "config" | "logs" | "discover" | "system"
+type EdgeTab = "config" | "logs" | "discover" | "system" | "debug"
 
 export function EdgePane() {
   const {
@@ -369,6 +378,7 @@ function Editor({
       {tab === "logs" && <LogsPanel name={edge.name} />}
       {tab === "discover" && <DiscoverPanel name={edge.name} />}
       {tab === "system" && <SystemPanel name={edge.name} />}
+      {tab === "debug" && <DebugPanel name={edge.name} />}
     </>
   )
 }
@@ -385,6 +395,7 @@ function EdgeTabs({
     ["logs", "Logs", ScrollText],
     ["discover", "Discover", Network],
     ["system", "System", Cpu],
+    ["debug", "Debug", Gauge],
   ]
   return (
     <div className="flex items-center gap-0.5 border-b border-border px-2">
@@ -654,6 +665,196 @@ function SystemPanel({ name }: { name: string }) {
           </div>
         </>
       )}
+    </div>
+  )
+}
+
+/** Online-debug control for the edge: mode + Pause/Resume/Step + live
+ *  variables with force/unforce. Drives the same server-proxy routes as
+ *  `cs runtime --edge` (/api/edges/{name}/runtime/{op} + /status). */
+function DebugPanel({ name }: { name: string }) {
+  const [status, setStatus] = useState<EdgeStatus | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [forceVar, setForceVar] = useState("")
+  const [forceVal, setForceVal] = useState("")
+
+  const refresh = async () => {
+    try {
+      setStatus(await fetchEdgeStatus(name))
+      setError(null)
+    } catch (e) {
+      setError(String(e))
+    }
+  }
+  useEffect(() => {
+    let cancelled = false
+    const tick = async () => {
+      if (!cancelled) await refresh()
+    }
+    void tick()
+    const h = window.setInterval(tick, 1500)
+    return () => {
+      cancelled = true
+      window.clearInterval(h)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [name])
+
+  const op = async (
+    o: "pause" | "resume" | "step" | "force" | "unforce",
+    body?: Record<string, unknown>,
+  ) => {
+    setBusy(true)
+    try {
+      await edgeRuntimeOp(name, o, body)
+      await refresh()
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const mode = status?.mode.kind ?? "—"
+  const halted = mode === "paused" || mode === "step"
+  const forced = new Set((status?.forces ?? []).map((f) => f.name))
+  const vars = status?.last_snapshot?.vars ?? []
+
+  return (
+    <div className="flex-1 space-y-4 overflow-auto p-4">
+      <div className="flex items-center gap-2">
+        <span
+          className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider ${
+            mode === "running"
+              ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
+              : "bg-amber-500/15 text-amber-700 dark:text-amber-400"
+          }`}
+        >
+          {mode}
+          {status?.mode.remaining != null ? ` ${status.mode.remaining}` : ""}
+        </span>
+        <span className="text-xs text-muted-foreground">
+          scan {status ? status.scan_count.toLocaleString() : "—"}
+        </span>
+        <div className="ml-auto flex gap-1.5">
+          {halted ? (
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => void op("resume")}>
+              <Play className="mr-1.5 size-3" />
+              Resume
+            </Button>
+          ) : (
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => void op("pause")}>
+              <Pause className="mr-1.5 size-3" />
+              Pause
+            </Button>
+          )}
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy}
+            onClick={() => void op("step", { cycles: 1 })}
+          >
+            <StepForward className="mr-1.5 size-3" />
+            Step
+          </Button>
+        </div>
+      </div>
+
+      {error && (
+        <pre className="overflow-auto rounded-md border border-red-500/40 bg-red-500/5 p-2 text-[11px] text-red-700 dark:text-red-400">
+          {error}
+        </pre>
+      )}
+
+      <p className="rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1.5 text-[11px] text-amber-700 dark:text-amber-400">
+        Force / write drive real outputs on a connected bus — make sure the area is clear before
+        forcing a motion variable.
+      </p>
+
+      <div className="overflow-hidden rounded-md border border-border">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-left text-[10px] uppercase tracking-wider text-muted-foreground">
+              <th className="px-3 py-1 font-medium">Variable</th>
+              <th className="py-1 font-medium">Type</th>
+              <th className="py-1 font-medium">Value</th>
+              <th className="py-1 pr-3" />
+            </tr>
+          </thead>
+          <tbody className="font-mono">
+            {vars.length === 0 && (
+              <tr>
+                <td colSpan={4} className="px-3 py-2 text-muted-foreground">
+                  no variables yet (runtime not reporting a snapshot)
+                </td>
+              </tr>
+            )}
+            {vars.map((v) => (
+              <tr key={v.name} className="border-t border-border/50">
+                <td className="px-3 py-1">{v.name}</td>
+                <td className="py-1 text-muted-foreground">{v.type_name}</td>
+                <td className="py-1">
+                  {v.value}
+                  {forced.has(v.name) && (
+                    <span className="ml-1.5 text-amber-600 dark:text-amber-400">forced</span>
+                  )}
+                </td>
+                <td className="py-1 pr-3 text-right">
+                  {forced.has(v.name) && (
+                    <button
+                      title="Unforce"
+                      disabled={busy}
+                      onClick={() => void op("unforce", { name: v.name })}
+                      className="text-muted-foreground hover:text-foreground"
+                    >
+                      <PinOff className="size-3.5" />
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="flex items-end gap-2">
+        <div className="flex-1 space-y-1.5">
+          <Label className="text-[11px] uppercase tracking-wider text-muted-foreground">
+            Force a variable (integer value)
+          </Label>
+          <select
+            value={forceVar}
+            onChange={(e) => setForceVar(e.target.value)}
+            className="block w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm"
+          >
+            <option value="">Select…</option>
+            {vars.map((v) => (
+              <option key={v.name} value={v.name}>
+                {v.name} ({v.type_name})
+              </option>
+            ))}
+          </select>
+        </div>
+        <Input
+          className="w-28"
+          placeholder="value"
+          value={forceVal}
+          onChange={(e) => setForceVal(e.target.value)}
+        />
+        <Button
+          size="sm"
+          disabled={busy || !forceVar || forceVal === "" || Number.isNaN(Number(forceVal))}
+          onClick={() =>
+            void op("force", { name: forceVar, value: Number(forceVal) }).then(() =>
+              setForceVal(""),
+            )
+          }
+        >
+          <Pin className="mr-1.5 size-3" />
+          Force
+        </Button>
+      </div>
     </div>
   )
 }
