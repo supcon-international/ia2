@@ -170,6 +170,64 @@ pub async fn probe_edge(edge: &Edge) -> EdgeProbe {
 }
 
 // ============================================================
+//  Logs — pull recent runtime log lines over ssh+curl
+// ============================================================
+
+/// Fetch the last `tail` log lines from the edge runtime's `/logs`
+/// endpoint (over ssh, same trust model as `probe`). Returns the
+/// runtime's JSON body (`{ "lines": [...] }`) verbatim so the IDE/CLI
+/// can render the EtherCAT discovery / bus-health / connect errors
+/// that otherwise only live in journald on the box.
+pub async fn fetch_edge_logs(edge: &Edge, tail: usize) -> Result<serde_json::Value, String> {
+    let cmd = format!(
+        "curl --silent --max-time 4 'http://127.0.0.1:{}/logs?tail={}'",
+        edge.runtime_port, tail
+    );
+    let output = ssh_cmd(edge)
+        .arg(cmd)
+        .output()
+        .await
+        .map_err(|e| format!("spawn ssh failed: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "edge unreachable: {}",
+            first_line(&stderr)
+        ));
+    }
+    let body = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str::<serde_json::Value>(&body)
+        .map_err(|e| format!("unexpected /logs body: {} ({e})", first_line(&body)))
+}
+
+// ============================================================
+//  Discover — pull device connect status + EtherCAT topology
+// ============================================================
+
+/// Fetch the edge runtime's `/discover` (over ssh, same trust model as
+/// `probe`). Returns the runtime's JSON array of per-device reports
+/// (connect status + discovered EtherCAT slaves) so the IDE can author
+/// PDO maps against the real bus topology.
+pub async fn fetch_edge_discover(edge: &Edge) -> Result<serde_json::Value, String> {
+    let cmd = format!(
+        "curl --silent --max-time 4 http://127.0.0.1:{}/discover",
+        edge.runtime_port
+    );
+    let output = ssh_cmd(edge)
+        .arg(cmd)
+        .output()
+        .await
+        .map_err(|e| format!("spawn ssh failed: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("edge unreachable: {}", first_line(&stderr)));
+    }
+    let body = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str::<serde_json::Value>(&body)
+        .map_err(|e| format!("unexpected /discover body: {} ({e})", first_line(&body)))
+}
+
+// ============================================================
 //  Deploy — atomic versioned dir + symlink swap + systemctl restart
 // ============================================================
 

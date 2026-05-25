@@ -27,9 +27,9 @@ pub use sfc_transpile::{
 
 pub use errors::BridgeError;
 pub use runtime::{
-    spawn, spawn_with_interval, spawn_with_options, DeviceSpec, ProgramHandle, RuntimeMode,
-    RuntimeWriteError, SpawnOptions, VarSnapshot, VarValue, DEFAULT_SCAN_INTERVAL_MS,
-    RETAIN_FLUSH_INTERVAL,
+    spawn, spawn_with_interval, spawn_with_options, DeviceReport, DeviceSpec, DiscoveredSlave,
+    ProgramHandle, RuntimeMode, RuntimeWriteError, SpawnOptions, VarSnapshot, VarValue,
+    DEFAULT_SCAN_INTERVAL_MS, RETAIN_FLUSH_INTERVAL,
 };
 
 use ironplc_container::Container;

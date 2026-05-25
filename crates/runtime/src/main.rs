@@ -9,6 +9,7 @@
 //! port-forward, not direct exposure. There's intentionally no auth on
 //! this server; the security perimeter is "only reachable via ssh".
 
+use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -17,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use axum::{
-    extract::State,
+    extract::{Query, State},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse,
@@ -26,7 +27,7 @@ use axum::{
     Json, Router,
 };
 use futures_util::stream::Stream;
-use ironplc_bridge::{DeviceSpec, ProgramHandle, VarSnapshot};
+use ironplc_bridge::{DeviceReport, DeviceSpec, ProgramHandle, VarSnapshot};
 use project::{ProjectStore, ProtocolConfig};
 use serde::Serialize;
 use tokio::signal;
@@ -37,6 +38,96 @@ use tower_http::cors::CorsLayer;
 use tracing_subscriber::EnvFilter;
 
 const DEFAULT_BIND: &str = "127.0.0.1:13001";
+
+// ============================================================
+//  Log capture — tee tracing output into a ring buffer + a live
+//  broadcast so the monitor server can surface it (GET /logs and
+//  /logs/stream). This is what makes edge-side truth (EtherCAT
+//  discovery, bus health, device connect failures) visible to the
+//  IDE / CLI over the SSH tunnel, instead of being trapped in
+//  journald on the box.
+// ============================================================
+
+#[derive(Clone)]
+struct LogCapture {
+    buf: Arc<Mutex<VecDeque<String>>>,
+    tx: broadcast::Sender<String>,
+    cap: usize,
+}
+
+impl LogCapture {
+    fn new(cap: usize) -> Self {
+        let (tx, _) = broadcast::channel(256);
+        Self {
+            buf: Arc::new(Mutex::new(VecDeque::new())),
+            tx,
+            cap,
+        }
+    }
+
+    fn push_line(&self, line: String) {
+        {
+            let mut b = self.buf.lock().expect("log buffer");
+            while b.len() >= self.cap {
+                b.pop_front();
+            }
+            b.push_back(line.clone());
+        }
+        // No subscribers is fine — ignore the send error.
+        let _ = self.tx.send(line);
+    }
+
+    /// Most recent `n` captured lines, oldest-first.
+    fn tail(&self, n: usize) -> Vec<String> {
+        let b = self.buf.lock().expect("log buffer");
+        let start = b.len().saturating_sub(n);
+        b.iter().skip(start).cloned().collect()
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+    type Writer = CaptureWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        CaptureWriter {
+            cap: self.clone(),
+            buf: Vec::new(),
+        }
+    }
+}
+
+/// One formatted event's bytes accumulate here; on Drop (end of that
+/// event's write) we split into lines and push them to the capture.
+/// `fmt` formats an event into one buffer then writes it once, so a
+/// fresh writer per event maps cleanly to "one (or few) line(s)".
+struct CaptureWriter {
+    cap: LogCapture,
+    buf: Vec<u8>,
+}
+
+impl std::io::Write for CaptureWriter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.buf.extend_from_slice(data);
+        Ok(data.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Drop for CaptureWriter {
+    fn drop(&mut self) {
+        if self.buf.is_empty() {
+            return;
+        }
+        let s = String::from_utf8_lossy(&self.buf);
+        for line in s.split('\n') {
+            let trimmed = line.trim_end();
+            if !trimmed.is_empty() {
+                self.cap.push_line(trimmed.to_string());
+            }
+        }
+    }
+}
 
 /// Parsed CLI args. Manual parsing (no clap) — three flags, still simple.
 struct Args {
@@ -150,11 +241,17 @@ struct AppState {
     latest: Arc<Mutex<Option<VarSnapshot>>>,
     /// Flips true when /stop is hit; the main loop watches this and exits.
     shutdown: Arc<tokio::sync::Notify>,
+    /// Captured tracing output (ring buffer + live broadcast) backing
+    /// GET /logs and /logs/stream.
+    logs: LogCapture,
+    /// Handle to the running scan loop — used by /discover to read the
+    /// per-device connect reports (connected/failed + EtherCAT topology).
+    handle: ProgramHandle,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_logging();
+    let log_capture = init_logging();
     let args = parse_args()?;
 
     tracing::info!(
@@ -303,6 +400,8 @@ async fn main() -> Result<()> {
         snapshot_tx,
         latest,
         shutdown: shutdown.clone(),
+        logs: log_capture,
+        handle: handle.clone(),
     };
 
     // ---- HTTP server ----
@@ -314,6 +413,9 @@ async fn main() -> Result<()> {
         .route("/health", get(health))
         .route("/status", get(status))
         .route("/events", get(events))
+        .route("/logs", get(logs))
+        .route("/logs/stream", get(logs_stream))
+        .route("/discover", get(discover))
         .route("/stop", post(stop_handler))
         .layer(CorsLayer::permissive())
         .with_state(state);
@@ -358,14 +460,27 @@ async fn wait_for_shutdown(shutdown: Arc<tokio::sync::Notify>) {
     }
 }
 
-fn init_logging() {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            EnvFilter::new(
-                "ia2_runtime=info,ironplc_bridge=info,iomap_modbus=info,iomap_ethercat=info,info",
-            )
-        }))
+/// Set up tracing with two fmt layers under one env-filter: the usual
+/// stdout/journald sink (kept untouched) plus a capture layer (ANSI
+/// stripped) that tees into the returned `LogCapture` for /logs.
+fn init_logging() -> LogCapture {
+    use tracing_subscriber::prelude::*;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(
+            "ia2_runtime=info,ironplc_bridge=info,iomap_modbus=info,iomap_ethercat=info,info",
+        )
+    });
+    let capture = LogCapture::new(2000);
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(capture.clone()),
+        )
         .init();
+    capture
 }
 
 // ============================================================
@@ -432,6 +547,47 @@ async fn events(
         Err(_) => None,
     });
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+}
+
+#[derive(serde::Deserialize)]
+struct LogQuery {
+    /// How many recent lines to return (default 200).
+    tail: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct LogsResponse {
+    lines: Vec<String>,
+}
+
+/// One-shot: the most recent `tail` (default 200) captured log lines.
+/// This is what `cs edge logs` pulls over the SSH tunnel — surfacing
+/// EtherCAT discovery / bus-health / connect errors that previously
+/// only existed in journald on the edge.
+async fn logs(State(state): State<AppState>, Query(q): Query<LogQuery>) -> Json<LogsResponse> {
+    let n = q.tail.unwrap_or(200);
+    Json(LogsResponse {
+        lines: state.logs.tail(n),
+    })
+}
+
+/// SSE: live log lines as they're emitted. No backlog — pair with
+/// GET /logs for history (same split as /events vs /status).
+async fn logs_stream(
+    State(state): State<AppState>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let rx = state.logs.tx.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|res| match res {
+        Ok(line) => Some(Ok(Event::default().data(line))),
+        Err(_) => None,
+    });
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+}
+
+/// Per-device connect reports + discovered EtherCAT topology. Powers
+/// `cs edge scan` — the IDE authors PDO maps against the real bus.
+async fn discover(State(state): State<AppState>) -> Json<Vec<DeviceReport>> {
+    Json(state.handle.device_reports())
 }
 
 async fn stop_handler(State(state): State<AppState>) -> impl IntoResponse {

@@ -211,6 +211,8 @@ async fn main() -> anyhow::Result<()> {
                 .delete(routes::delete_edge),
         )
         .route("/api/edges/{name}/probe", get(routes::probe_edge_route))
+        .route("/api/edges/{name}/logs", get(routes::logs_edge_route))
+        .route("/api/edges/{name}/discover", get(routes::discover_edge_route))
         .route("/api/edges/{name}/deploy", post(routes::deploy_edge_route))
         .route("/api/edges/{name}/attach", post(routes::attach_edge_route))
         .route("/api/edges/{name}/detach", post(routes::detach_edge_route))

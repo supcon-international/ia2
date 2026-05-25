@@ -855,6 +855,48 @@ pub async fn probe_edge_route(
     Ok(Json(probe_edge(&edge).await))
 }
 
+#[derive(serde::Deserialize)]
+pub struct LogsQuery {
+    pub tail: Option<usize>,
+}
+
+/// Pull the last `tail` (default 200, capped 2000) log lines from the
+/// edge runtime over ssh. Returns the runtime's `{ "lines": [...] }`
+/// body so the IDE/CLI can show edge-side truth (EtherCAT discovery,
+/// bus health, connect failures) that otherwise only hits journald.
+pub async fn logs_edge_route(
+    State(state): State<AppState>,
+    project: ProjectName,
+    AxumPath(name): AxumPath<String>,
+    axum::extract::Query(q): axum::extract::Query<LogsQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let edge = with_project(&state, &project, |store| {
+        store.read_edge(&name).map_err(Into::into)
+    })?;
+    let tail = q.tail.unwrap_or(200).min(2000);
+    crate::edges::fetch_edge_logs(&edge, tail)
+        .await
+        .map(Json)
+        .map_err(ApiError::Internal)
+}
+
+/// Pull per-device connect status + discovered EtherCAT topology from
+/// the edge runtime over ssh. Backs `cs edge scan` / the IDE's discovery
+/// pane so PDO maps can be authored against the real bus.
+pub async fn discover_edge_route(
+    State(state): State<AppState>,
+    project: ProjectName,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let edge = with_project(&state, &project, |store| {
+        store.read_edge(&name).map_err(Into::into)
+    })?;
+    crate::edges::fetch_edge_discover(&edge)
+        .await
+        .map(Json)
+        .map_err(ApiError::Internal)
+}
+
 pub async fn deploy_edge_route(
     State(state): State<AppState>,
     project: ProjectName,

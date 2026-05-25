@@ -18,6 +18,7 @@ pub struct SimEthercat {
     name: String,
     values: HashMap<String, ChannelValue>,
     channels: HashMap<String, EthercatChannel>,
+    discovered: Vec<crate::SlaveDiscovery>,
 }
 
 impl SimEthercat {
@@ -53,6 +54,33 @@ impl SimEthercat {
             .map(|c| (c.name.clone(), zero_for(c.data_type)))
             .collect();
 
+        // Sim "discovery": report the configured slaves with PDI extents
+        // derived from their channels, so /discover works without hardware
+        // (dev / CI / authoring against a sim bus).
+        let discovered: Vec<crate::SlaveDiscovery> = config
+            .slaves
+            .iter()
+            .map(|s| {
+                let extent = |dir: EthercatPdoDirection| -> u16 {
+                    config
+                        .channels
+                        .iter()
+                        .filter(|c| c.slave_index == s.index && c.direction == dir)
+                        .map(|c| c.pdi_byte_offset + byte_size(c.bit_length))
+                        .max()
+                        .unwrap_or(0)
+                };
+                crate::SlaveDiscovery {
+                    index: s.index,
+                    name: s.name.clone(),
+                    input_bytes: extent(EthercatPdoDirection::TxPdo),
+                    output_bytes: extent(EthercatPdoDirection::RxPdo),
+                    vendor_id: s.vendor_id,
+                    product_id: s.product_id,
+                }
+            })
+            .collect();
+
         tracing::info!(
             name = %name,
             slaves = config.slaves.len(),
@@ -63,6 +91,7 @@ impl SimEthercat {
             name,
             values,
             channels,
+            discovered,
         })
     }
 
@@ -70,6 +99,11 @@ impl SimEthercat {
         self.channels
             .get(name)
             .ok_or_else(|| IoError::UnknownChannel(name.into()))
+    }
+
+    /// Configured slaves as a discovery report (sim has no real bus).
+    pub fn discovered(&self) -> Vec<crate::SlaveDiscovery> {
+        self.discovered.clone()
     }
 }
 
@@ -118,6 +152,12 @@ impl IoDevice for SimEthercat {
         tracing::info!(device = %self.name, "ethercat (sim) failsafe applied");
         Ok(())
     }
+}
+
+/// Bytes occupied by a PDO entry of `bit_length` bits (rounded up; a
+/// sub-byte entry still occupies one byte).
+fn byte_size(bit_length: u8) -> u16 {
+    ((bit_length as u16) + 7) / 8
 }
 
 fn zero_for(ty: EthercatDataType) -> ChannelValue {

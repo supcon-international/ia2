@@ -542,6 +542,29 @@ enum EdgeCmd {
         #[arg(long, default_value = "http://127.0.0.1:3001")]
         server: String,
     },
+    /// Tail recent log lines from the edge runtime (over ssh). Surfaces
+    /// EtherCAT discovery, bus health, and device connect errors that
+    /// `probe` (health only) can't show.
+    Logs {
+        /// Edge name (entry in the open project's edge list).
+        name: String,
+        /// How many recent lines to fetch (default 200, capped 2000).
+        #[arg(long, default_value_t = 200)]
+        tail: usize,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+    /// Scan the edge bus: per-device connect status + discovered EtherCAT
+    /// topology (slave index/name/vendor/product + PDI byte sizes). Author
+    /// PDO maps against this real-bus view.
+    Scan {
+        /// Edge name (entry in the open project's edge list).
+        name: String,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
 }
 
 // =================================================================
@@ -1445,6 +1468,62 @@ fn cmd_edge(cmd: EdgeCmd) -> Result<i32> {
             println!("{}", serde_json::to_string_pretty(&resp)?);
             Ok(0)
         }
+        EdgeCmd::Logs { name, tail, server } => {
+            let url = format!("{server}/api/edges/{}/logs?tail={tail}", url_encode(&name));
+            let resp = get_json(&url)?;
+            if let Some(lines) = resp.get("lines").and_then(|v| v.as_array()) {
+                for line in lines {
+                    if let Some(s) = line.as_str() {
+                        println!("{s}");
+                    }
+                }
+            } else {
+                println!("{}", serde_json::to_string_pretty(&resp)?);
+            }
+            Ok(0)
+        }
+        EdgeCmd::Scan { name, json, server } => {
+            let url = format!("{server}/api/edges/{}/discover", url_encode(&name));
+            let resp = get_json(&url)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&resp)?);
+                return Ok(0);
+            }
+            let Some(devs) = resp.as_array() else {
+                println!("{}", serde_json::to_string_pretty(&resp)?);
+                return Ok(0);
+            };
+            if devs.is_empty() {
+                eprintln!("no devices in project");
+            }
+            for d in devs {
+                let dname = d.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                let proto = d.get("protocol").and_then(|v| v.as_str()).unwrap_or("?");
+                let connected = d.get("connected").and_then(|v| v.as_bool()).unwrap_or(false);
+                if !connected {
+                    let err = d.get("error").and_then(|v| v.as_str()).unwrap_or("not connected");
+                    println!("✗ {dname} ({proto}) — {err}");
+                    continue;
+                }
+                let slaves = d.get("slaves").and_then(|v| v.as_array());
+                let n = slaves.map(|a| a.len()).unwrap_or(0);
+                println!("✓ {dname} ({proto}) connected · {n} slave(s)");
+                if let Some(arr) = slaves {
+                    for s in arr {
+                        let idx = s.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let sn = s.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                        let vid = s.get("vendor_id").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let pid = s.get("product_id").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let inb = s.get("input_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let outb = s.get("output_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+                        println!(
+                            "    [{idx}] {sn}  vendor=0x{vid:08x} product=0x{pid:08x}  in={inb}B out={outb}B"
+                        );
+                    }
+                }
+            }
+            Ok(0)
+        }
     }
 }
 
@@ -1915,6 +1994,8 @@ fn announce_target(cmd: &Command) -> Option<(&str, &'static str)> {
         | Command::Device(DeviceCmd::Get { .. })
         | Command::Edge(EdgeCmd::List { .. })
         | Command::Edge(EdgeCmd::Get { .. })
+        | Command::Edge(EdgeCmd::Logs { .. })
+        | Command::Edge(EdgeCmd::Scan { .. })
         | Command::Iomap(IomapCmd::Get { .. })
         | Command::Tasks(TasksCmd::Get { .. })
         | Command::Runtime(RuntimeCmd::Status { .. }) => None,

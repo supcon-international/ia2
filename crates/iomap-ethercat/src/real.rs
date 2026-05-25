@@ -46,6 +46,7 @@ use iocore::{ChannelValue, IoDevice, IoError};
 use project::{EthercatChannel, EthercatConfig, EthercatPdoDirection};
 
 use crate::bits;
+use crate::SlaveDiscovery;
 
 // Storage sizing — picked to comfortably cover a typical edge configuration
 // (an EK1100-class coupler + ~30 EL modules). MAX_PDU_DATA at ~1100 matches
@@ -79,6 +80,8 @@ pub struct RealEthercat {
     channels: HashMap<String, EthercatChannel>,
     pdi: Arc<Mutex<PdiMirror>>,
     shutdown: Arc<AtomicBool>,
+    /// Subdevices found during the bus walk at connect (for `/discover`).
+    discovered: Vec<SlaveDiscovery>,
     // Kept so we don't drop the JoinHandle silently. Not joined on drop —
     // the cyclic loop exits cooperatively when `shutdown` flips.
     _thread: Option<thread::JoinHandle<()>>,
@@ -89,16 +92,6 @@ pub struct RealEthercat {
 enum InitResult {
     Ok { discovered: Vec<SlaveDiscovery> },
     Err(String),
-}
-
-#[derive(Debug, Clone)]
-pub struct SlaveDiscovery {
-    pub index: u16,
-    pub name: String,
-    pub input_bytes: u16,
-    pub output_bytes: u16,
-    pub vendor_id: u32,
-    pub product_id: u32,
 }
 
 impl RealEthercat {
@@ -179,11 +172,17 @@ impl RealEthercat {
                     channels,
                     pdi,
                     shutdown,
+                    discovered,
                     _thread: Some(thread),
                 })
             }
             InitResult::Err(e) => Err(IoError::Connect(format!("ethercat init: {e}"))),
         }
+    }
+
+    /// Subdevices found during the bus walk at connect.
+    pub fn discovered(&self) -> Vec<SlaveDiscovery> {
+        self.discovered.clone()
     }
 }
 

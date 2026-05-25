@@ -41,6 +41,35 @@ pub struct VarSnapshot {
     pub vars: Vec<VarValue>,
 }
 
+/// One subdevice on an EtherCAT bus, as reported by `/discover`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct DiscoveredSlave {
+    pub index: u16,
+    pub name: String,
+    pub vendor_id: u32,
+    pub product_id: u32,
+    pub input_bytes: u16,
+    pub output_bytes: u16,
+}
+
+/// Per-device connect outcome plus (for EtherCAT) the discovered bus
+/// topology. Surfaced by the runtime's `/discover` endpoint so the IDE
+/// can see which devices actually connected, why a connect failed, and
+/// what's on the bus — the truth that otherwise only hits the logs.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct DeviceReport {
+    pub name: String,
+    /// `"modbus"` | `"ethercat"`.
+    pub protocol: String,
+    pub connected: bool,
+    /// Connect error (first line) when `connected` is false.
+    pub error: Option<String>,
+    /// EtherCAT subdevices (empty for Modbus / failed connects).
+    pub slaves: Vec<DiscoveredSlave>,
+}
+
 #[derive(Clone, Debug)]
 pub struct DeviceSpec {
     pub name: String,
@@ -135,6 +164,10 @@ pub struct ProgramHandle {
     /// the active force set without a round-trip through the cmd
     /// queue.
     forces: Arc<std::sync::Mutex<HashMap<String, i32>>>,
+    /// Per-device connect reports (connected/failed + EtherCAT topology),
+    /// set once after the initial connect pass. Shared so the HTTP layer
+    /// can serve /discover without a scan-loop round-trip.
+    device_reports: Arc<std::sync::Mutex<Vec<DeviceReport>>>,
 }
 
 impl ProgramHandle {
@@ -246,6 +279,15 @@ impl ProgramHandle {
             };
         }
     }
+
+    /// Snapshot of per-device connect reports (connected/failed + EtherCAT
+    /// topology). Empty until the initial connect pass completes.
+    pub fn device_reports(&self) -> Vec<DeviceReport> {
+        self.device_reports
+            .lock()
+            .map(|r| r.clone())
+            .unwrap_or_default()
+    }
 }
 
 /// Default scan period when the caller doesn't request one. 100 ms
@@ -343,11 +385,13 @@ pub fn spawn_with_options(
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
     let mode = Arc::new(std::sync::Mutex::new(RuntimeMode::Running));
     let forces = Arc::new(std::sync::Mutex::new(HashMap::<String, i32>::new()));
+    let device_reports = Arc::new(std::sync::Mutex::new(Vec::<DeviceReport>::new()));
 
     let stop_clone = stop.clone();
     let snapshot_tx_clone = snapshot_tx.clone();
     let mode_clone = mode.clone();
     let forces_clone = forces.clone();
+    let device_reports_clone = device_reports.clone();
     let scan_interval = Duration::from_millis(scan_interval_ms.max(1));
 
     std::thread::spawn(move || {
@@ -366,7 +410,10 @@ pub fn spawn_with_options(
             // that, no matter how the loop exits (clean stop, VM trap,
             // or panic), we still own the `devices` vec and can drive
             // every output to its safe state.
-            let mut devices = connect_devices(device_specs).await;
+            let (mut devices, reports) = connect_devices(device_specs).await;
+            if let Ok(mut slot) = device_reports_clone.lock() {
+                *slot = reports;
+            }
 
             // Wrap the scan loop in catch_unwind so a panic in the VM
             // glue / iomap / snapshot fan-out doesn't skip failsafe.
@@ -431,6 +478,7 @@ pub fn spawn_with_options(
         cmd_tx,
         mode,
         forces,
+        device_reports,
     }
 }
 
@@ -440,8 +488,11 @@ pub fn spawn_with_options(
 /// a common operational state and we'd rather run the rest of the
 /// program than refuse to start. The bridge's `enter_failsafe` pass
 /// at shutdown only touches devices that DID connect.
-async fn connect_devices(device_specs: Vec<DeviceSpec>) -> Vec<Box<dyn IoDevice>> {
+async fn connect_devices(
+    device_specs: Vec<DeviceSpec>,
+) -> (Vec<Box<dyn IoDevice>>, Vec<DeviceReport>) {
     let mut devices: Vec<Box<dyn IoDevice>> = Vec::with_capacity(device_specs.len());
+    let mut reports: Vec<DeviceReport> = Vec::with_capacity(device_specs.len());
     for spec in device_specs {
         match &spec.config {
             ProtocolConfig::Modbus(cfg) => {
@@ -466,22 +517,68 @@ async fn connect_devices(device_specs: Vec<DeviceSpec>) -> Vec<Box<dyn IoDevice>
                             }
                         }
                         devices.push(Box::new(d));
+                        reports.push(DeviceReport {
+                            name: spec.name.clone(),
+                            protocol: "modbus".into(),
+                            connected: true,
+                            error: None,
+                            slaves: Vec::new(),
+                        });
                     }
-                    Err(e) => tracing::warn!(name = %spec.name, %e, "modbus connect failed"),
+                    Err(e) => {
+                        tracing::warn!(name = %spec.name, %e, "modbus connect failed");
+                        reports.push(DeviceReport {
+                            name: spec.name.clone(),
+                            protocol: "modbus".into(),
+                            connected: false,
+                            error: Some(e.to_string()),
+                            slaves: Vec::new(),
+                        });
+                    }
                 }
             }
             ProtocolConfig::Ethercat(cfg) => {
                 match iomap_ethercat::EthercatDevice::connect(spec.name.clone(), cfg).await {
                     Ok(d) => {
                         tracing::info!(name = %spec.name, nic = %cfg.nic, "ethercat connected");
+                        // Pull the discovered topology before boxing the
+                        // device into the trait object.
+                        let slaves = d
+                            .discovered()
+                            .into_iter()
+                            .map(|s| DiscoveredSlave {
+                                index: s.index,
+                                name: s.name,
+                                vendor_id: s.vendor_id,
+                                product_id: s.product_id,
+                                input_bytes: s.input_bytes,
+                                output_bytes: s.output_bytes,
+                            })
+                            .collect();
                         devices.push(Box::new(d));
+                        reports.push(DeviceReport {
+                            name: spec.name.clone(),
+                            protocol: "ethercat".into(),
+                            connected: true,
+                            error: None,
+                            slaves,
+                        });
                     }
-                    Err(e) => tracing::warn!(name = %spec.name, %e, "ethercat connect failed"),
+                    Err(e) => {
+                        tracing::warn!(name = %spec.name, %e, "ethercat connect failed");
+                        reports.push(DeviceReport {
+                            name: spec.name.clone(),
+                            protocol: "ethercat".into(),
+                            connected: false,
+                            error: Some(e.to_string()),
+                            slaves: Vec::new(),
+                        });
+                    }
                 }
             }
         }
     }
-    devices
+    (devices, reports)
 }
 
 /// Trip the watchdog after this many consecutive scan deadline overruns.

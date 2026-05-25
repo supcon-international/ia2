@@ -27,6 +27,24 @@ use project::EthercatConfig;
 /// is treated as a real network interface name.
 pub const SIM_NIC: &str = "_sim";
 
+/// One subdevice as seen on the bus (real mode, walked at connect) or as
+/// configured (sim mode). Plain data — the bridge maps this into its own
+/// serializable shape for the `/discover` wire format, so this crate
+/// stays free of serde.
+#[derive(Debug, Clone)]
+pub struct SlaveDiscovery {
+    /// Auto-increment bus position assigned by the master.
+    pub index: u16,
+    /// Subdevice product name (from its EEPROM / ESI identity).
+    pub name: String,
+    /// Bytes of input (TxPDO, slave→master) process data.
+    pub input_bytes: u16,
+    /// Bytes of output (RxPDO, master→slave) process data.
+    pub output_bytes: u16,
+    pub vendor_id: u32,
+    pub product_id: u32,
+}
+
 /// Public façade — internally an enum so the bridge / runtime see one
 /// type regardless of mode.
 pub struct EthercatDevice(Inner);
@@ -48,6 +66,16 @@ impl EthercatDevice {
                 .await
                 .map(Inner::Real)
                 .map(EthercatDevice)
+        }
+    }
+
+    /// Subdevices discovered on the bus (real mode) or configured (sim
+    /// mode). Used by the runtime's `/discover` endpoint so the IDE can
+    /// author PDO maps against the real topology.
+    pub fn discovered(&self) -> Vec<SlaveDiscovery> {
+        match &self.0 {
+            Inner::Sim(s) => s.discovered(),
+            Inner::Real(r) => r.discovered(),
         }
     }
 }
