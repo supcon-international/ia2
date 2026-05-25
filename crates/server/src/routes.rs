@@ -897,6 +897,22 @@ pub async fn discover_edge_route(
         .map_err(ApiError::Internal)
 }
 
+/// Edge interfaces / serial ports / arch (for authoring device configs
+/// against real edge facts). Backs `cs edge system`.
+pub async fn system_edge_route(
+    State(state): State<AppState>,
+    project: ProjectName,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let edge = with_project(&state, &project, |store| {
+        store.read_edge(&name).map_err(Into::into)
+    })?;
+    crate::edges::fetch_edge_system(&edge)
+        .await
+        .map(Json)
+        .map_err(ApiError::Internal)
+}
+
 pub async fn deploy_edge_route(
     State(state): State<AppState>,
     project: ProjectName,

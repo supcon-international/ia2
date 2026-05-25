@@ -565,6 +565,16 @@ enum EdgeCmd {
         #[arg(long, default_value = "http://127.0.0.1:3001")]
         server: String,
     },
+    /// List the edge's interfaces, serial ports, and arch — pick a NIC
+    /// for an EtherCAT device or a /dev/tty* for a Modbus RTU device.
+    System {
+        /// Edge name (entry in the open project's edge list).
+        name: String,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
 }
 
 // =================================================================
@@ -1524,6 +1534,40 @@ fn cmd_edge(cmd: EdgeCmd) -> Result<i32> {
             }
             Ok(0)
         }
+        EdgeCmd::System { name, json, server } => {
+            let url = format!("{server}/api/edges/{}/system", url_encode(&name));
+            let resp = get_json(&url)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&resp)?);
+                return Ok(0);
+            }
+            let arch = resp.get("arch").and_then(|v| v.as_str()).unwrap_or("?");
+            let os = resp.get("os").and_then(|v| v.as_str()).unwrap_or("?");
+            println!("{os}/{arch}");
+            if let Some(nics) = resp.get("nics").and_then(|v| v.as_array()) {
+                println!("NICs:");
+                for n in nics {
+                    let nm = n.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                    let st = n.get("operstate").and_then(|v| v.as_str()).unwrap_or("?");
+                    let carrier = n.get("carrier").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let mac = n.get("mac").and_then(|v| v.as_str()).unwrap_or("");
+                    let link = if carrier { "carrier" } else { "no-carrier" };
+                    println!("  {nm:<16} {st:<8} {link:<11} {mac}");
+                }
+            }
+            match resp.get("serial_ports").and_then(|v| v.as_array()) {
+                Some(ports) if !ports.is_empty() => {
+                    println!("serial ports:");
+                    for p in ports {
+                        if let Some(s) = p.as_str() {
+                            println!("  {s}");
+                        }
+                    }
+                }
+                _ => println!("serial ports: (none)"),
+            }
+            Ok(0)
+        }
     }
 }
 
@@ -1996,6 +2040,7 @@ fn announce_target(cmd: &Command) -> Option<(&str, &'static str)> {
         | Command::Edge(EdgeCmd::Get { .. })
         | Command::Edge(EdgeCmd::Logs { .. })
         | Command::Edge(EdgeCmd::Scan { .. })
+        | Command::Edge(EdgeCmd::System { .. })
         | Command::Iomap(IomapCmd::Get { .. })
         | Command::Tasks(TasksCmd::Get { .. })
         | Command::Runtime(RuntimeCmd::Status { .. }) => None,
