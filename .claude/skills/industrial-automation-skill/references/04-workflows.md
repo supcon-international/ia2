@@ -41,7 +41,7 @@ Then tell the user: "Monitor pane should now show `level` oscillating around 800
 
 ## B. Add a device + wire it to program variables
 
-Modbus channels + iomap are JSON; use get/edit/set. (Full shapes: `06-devices-iomap-tasks.md`.)
+Modbus channels + iomap are JSON; use get/edit/set. The `device set` body is the full `Device` — top-level `name` + `protocol`, matching `cs device get`. (Full shapes: `06-devices-iomap-tasks.md`.)
 
 ```bash
 cs agent run --label "Wire HMI to tank_ctrl" --server "$SRV" -- bash -c '
@@ -51,7 +51,8 @@ SRV="'"$SRV"'"
 # device, then configure its channels via set
 cs --project tank_ctrl device create hmi --protocol modbus --server "$SRV"
 cs --project tank_ctrl device set hmi --server "$SRV" --from - <<"JSON"
-{ "transport": { "kind": "tcp", "host": "127.0.0.1", "port": 5502 },
+{ "name": "hmi", "protocol": "modbus",
+  "transport": { "kind": "tcp", "host": "127.0.0.1", "port": 5502 },
   "slave_id": 1, "poll_interval_ms": 100,
   "channels": [
     { "name": "estop",  "kind": "discrete_input",   "address": 0 },
@@ -112,7 +113,8 @@ Switch a Modbus device to RTU by setting its transport. macOS device paths look 
 
 ```bash
 cs --project tank_ctrl device set hmi --server "$SRV" --from - <<'JSON'
-{ "transport": { "kind": "rtu", "serial_device": "/dev/cu.usbserial-A1B2",
+{ "name": "hmi", "protocol": "modbus",
+  "transport": { "kind": "rtu", "serial_device": "/dev/cu.usbserial-A1B2",
                  "baud_rate": 9600, "data_bits": "eight", "stop_bits": "one", "parity": "none" },
   "slave_id": 1, "poll_interval_ms": 200,
   "channels": [ { "name": "valve", "kind": "coil", "address": 0 } ] }

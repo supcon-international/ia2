@@ -2,6 +2,8 @@
 
 These are the exact JSON shapes the `cs device set` / `cs iomap set` / `cs tasks set` commands accept (and that `... get` returns). Get → edit → set. Field names are snake_case; the server validates and 422s on a wrong shape.
 
+> **`cs device set NAME` takes the full `Device` shape** — not just the config below. The body needs a top-level `"name"` (which must equal `NAME`, else the server 400s) **and** a `"protocol"` discriminator (`"modbus"` | `"ethercat"`), then the protocol's own fields. The CLI passes `--from` through verbatim (it does *not* inject `name`/`protocol` from the positional arg). This is exactly what `cs device get NAME` prints, so get → edit → set round-trips. (`cs iomap set` / `cs tasks set` have no such envelope — their bodies start at `mappings` / `tasks` directly.)
+
 ---
 
 ## Modbus device
@@ -11,6 +13,8 @@ The transport is a **tagged union** on `kind`. This is the post-RTU schema; old 
 ### TCP
 ```json
 {
+  "name": "hmi",
+  "protocol": "modbus",
   "transport": { "kind": "tcp", "host": "192.168.1.50", "port": 502 },
   "slave_id": 1,
   "poll_interval_ms": 100,
@@ -27,6 +31,8 @@ The transport is a **tagged union** on `kind`. This is the post-RTU schema; old 
 ### RTU (serial)
 ```json
 {
+  "name": "flow_meter",
+  "protocol": "modbus",
   "transport": {
     "kind": "rtu",
     "serial_device": "/dev/cu.usbserial-A1B2",
@@ -63,6 +69,8 @@ The transport is a **tagged union** on `kind`. This is the post-RTU schema; old 
 
 ```json
 {
+  "name": "servo_bus",
+  "protocol": "ethercat",
   "nic": "_sim",
   "cycle_us": 1000,
   "slaves": [
