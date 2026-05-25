@@ -26,6 +26,19 @@ pub fn default_projects_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("./projects"))
 }
 
+/// The current user's home directory, resolved robustly.
+///
+/// We deliberately go through `dirs::home_dir()` (which falls back to
+/// `getpwuid` on macOS) rather than reading `$HOME` directly: a macOS
+/// app launched from Finder / `open` / launchd does NOT inherit the
+/// shell's `$HOME`, so `std::env::var("HOME")` returns `None` there.
+/// `dirs` is what `default_projects_dir` already relies on, which is
+/// why project discovery works in the desktop app — path expansion
+/// must use the same source or it'll silently fail in the GUI.
+pub fn home_dir() -> Option<PathBuf> {
+    dirs::home_dir()
+}
+
 /// Path to the persisted "last opened project" state file. Lives under the
 /// platform's per-user config dir.
 pub fn default_state_path() -> PathBuf {

@@ -238,6 +238,84 @@ extension WebViewHost: WKUIDelegate {
         }
         return nil
     }
+
+    // ----- JavaScript dialog panels -------------------------------------
+    //
+    // WKWebView does NOT show alert() / confirm() / prompt() unless the
+    // UI delegate implements these three methods. Without them, `alert`
+    // is a silent no-op and — critically — `confirm` returns `false`,
+    // so any `if (confirm(...)) { delete... }` guard in the React app
+    // never runs its body. That's exactly why "delete POU / device /
+    // edge / task" did nothing in the desktop app while working in a
+    // browser (browsers implement these natively). We bridge them to
+    // native NSAlerts so the web code behaves identically in both.
+
+    func webView(
+        _ webView: WKWebView,
+        runJavaScriptAlertPanelWithMessage message: String,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping () -> Void
+    ) {
+        let alert = NSAlert()
+        alert.messageText = "IA2"
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+        runAlertModalForKey(alert) { _ in completionHandler() }
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        runJavaScriptConfirmPanelWithMessage message: String,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping (Bool) -> Void
+    ) {
+        let alert = NSAlert()
+        alert.messageText = "IA2"
+        alert.informativeText = message
+        // First button is the default (Return). Cancel is second so
+        // Esc / Cancel returns false — matches browser confirm() where
+        // dismissing is "false".
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        runAlertModalForKey(alert) { response in
+            completionHandler(response == .alertFirstButtonReturn)
+        }
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        runJavaScriptTextInputPanelWithPrompt prompt: String,
+        defaultText: String?,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping (String?) -> Void
+    ) {
+        let alert = NSAlert()
+        alert.messageText = "IA2"
+        alert.informativeText = prompt
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 22))
+        field.stringValue = defaultText ?? ""
+        alert.accessoryView = field
+        runAlertModalForKey(alert) { response in
+            // Browser prompt(): OK → the string, Cancel → null.
+            completionHandler(response == .alertFirstButtonReturn ? field.stringValue : nil)
+        }
+    }
+
+    /// Present an NSAlert as a sheet on the active window when there is
+    /// one (so it's modal to the workbench, not the whole app), else as
+    /// a free-standing modal. Routes the response to `handler`.
+    private func runAlertModalForKey(
+        _ alert: NSAlert,
+        handler: @escaping (NSApplication.ModalResponse) -> Void
+    ) {
+        if let window = NSApp.keyWindow ?? webView.window {
+            alert.beginSheetModal(for: window, completionHandler: handler)
+        } else {
+            handler(alert.runModal())
+        }
+    }
 }
 
 /// A.6 — filter WebKit's browser context menu down to the editing

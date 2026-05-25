@@ -29,7 +29,7 @@ pub use ld::{
     LdVarSection, LdVariable,
 };
 pub use paths::{
-    default_projects_dir, default_state_path, load_last_opened, migrate_legacy_dirs,
+    default_projects_dir, default_state_path, home_dir, load_last_opened, migrate_legacy_dirs,
     save_last_opened,
 };
 pub use sfc::{SfcAction, SfcProgram, SfcQualifier, SfcStep, SfcTransition};

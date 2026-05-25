@@ -552,7 +552,21 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   const openProject = useCallback(async (path: string) => {
     setError(null)
     try {
-      await apiOpenProject(path)
+      const info = await apiOpenProject(path)
+      // Point this window at the just-opened project BEFORE the
+      // follow-up fetch. Otherwise, if the window already carried a
+      // `?project=other` (e.g. the user switched via the picker
+      // earlier), `fetchProject()` would send `X-IA2-Project: other`
+      // and we'd open the new project on the server but keep showing
+      // the old one. replaceState updates the URL without a reload so
+      // `currentProject()` (read by apiFetch) returns the new name.
+      try {
+        const url = new URL(window.location.href)
+        url.searchParams.set("project", info.name)
+        window.history.replaceState(null, "", url.toString())
+      } catch {
+        /* non-browser env — ignore */
+      }
       const tree = await fetchProject()
       setProject(tree)
       setCurrentPou(null)

@@ -354,7 +354,7 @@ pub async fn open_project(
     State(state): State<AppState>,
     Json(req): Json<OpenProjectRequest>,
 ) -> Result<Json<ProjectInfo>, ApiError> {
-    let path = PathBuf::from(req.path);
+    let path = resolve_user_path(&req.path);
     let store = ProjectStore::open(path)?;
     let info = ProjectInfo {
         name: store.name().into(),
@@ -2054,6 +2054,46 @@ async fn handle_lsp_ws(socket: WebSocket) {
 /// This is the **only** project-state access shape the route handlers
 /// should use. Direct `state.projects.lock()` is reserved for
 /// lifecycle handlers (create / open / close / list).
+/// Resolve a user-typed project path into an absolute one. Handles the
+/// shapes people actually type in the "Open project" dialog (and that
+/// shells don't pre-expand when the path is quoted):
+///
+/// - leading `~` or `~/...` expands to the user's home directory
+/// - a relative path is joined onto the home dir
+/// - an already-absolute path passes through untouched
+///
+/// Leading/trailing whitespace (from copy-paste) is trimmed. We do not
+/// canonicalize: the path may not exist yet, and `ProjectStore::open`
+/// gives a clearer "no project.toml here" error than a canonicalize
+/// failure would.
+fn resolve_user_path(raw: &str) -> PathBuf {
+    // NOTE: home comes from `project::home_dir()` (→ dirs::home_dir,
+    // getpwuid-backed), NOT `$HOME`. A Finder/launchd-launched IA2.app
+    // has no `$HOME` in its environment, so reading the env var here
+    // returns None and tilde/relative paths silently fail to resolve
+    // in the desktop app — which is exactly the bug this fixes.
+    let trimmed = raw.trim();
+    if let Some(rest) = trimmed.strip_prefix('~') {
+        // `~`, `~/x`, or `~x` (treat `~x` as `~/x` — nobody means a
+        // different user's home in this dialog).
+        let rest = rest.strip_prefix('/').unwrap_or(rest);
+        if let Some(home) = project::home_dir() {
+            return home.join(rest);
+        }
+    }
+    let p = PathBuf::from(trimmed);
+    if p.is_absolute() {
+        p
+    } else if let Some(home) = project::home_dir() {
+        // Relative path → anchor to home, where projects live by
+        // default (~/Documents/IA2/...). Better than CWD, which for a
+        // GUI-launched server is `/`.
+        home.join(p)
+    } else {
+        p
+    }
+}
+
 fn with_project<T>(
     state: &AppState,
     project: &ProjectName,
@@ -2255,5 +2295,55 @@ fn single_program_tasks(program_name: &str) -> Tasks {
             program: program_name.into(),
             task: "plc_task".into(),
         }],
+    }
+}
+
+#[cfg(test)]
+mod path_resolution_tests {
+    use super::resolve_user_path;
+    use std::path::PathBuf;
+
+    fn home() -> PathBuf {
+        // Match production: resolve via project::home_dir (dirs-backed),
+        // not $HOME — otherwise a CI runner where the two disagree would
+        // fail the assertions for the wrong reason.
+        project::home_dir().expect("home dir resolvable in test env")
+    }
+
+    #[test]
+    fn absolute_path_passes_through() {
+        assert_eq!(
+            resolve_user_path("/Users/x/Documents/IA2/demo"),
+            PathBuf::from("/Users/x/Documents/IA2/demo")
+        );
+    }
+
+    #[test]
+    fn tilde_slash_expands_to_home() {
+        assert_eq!(
+            resolve_user_path("~/Documents/IA2/demo"),
+            home().join("Documents/IA2/demo")
+        );
+    }
+
+    #[test]
+    fn bare_tilde_is_home() {
+        assert_eq!(resolve_user_path("~"), home().join(""));
+    }
+
+    #[test]
+    fn relative_path_anchors_to_home() {
+        assert_eq!(
+            resolve_user_path("Documents/IA2/demo"),
+            home().join("Documents/IA2/demo")
+        );
+    }
+
+    #[test]
+    fn whitespace_is_trimmed() {
+        assert_eq!(
+            resolve_user_path("  /abs/path  "),
+            PathBuf::from("/abs/path")
+        );
     }
 }
