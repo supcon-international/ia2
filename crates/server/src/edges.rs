@@ -248,6 +248,41 @@ pub async fn fetch_edge_system(edge: &Edge) -> Result<serde_json::Value, String>
 }
 
 // ============================================================
+//  Online debug control — proxy pause/step/write/force to the edge
+// ============================================================
+
+/// POST a JSON body to an edge runtime control endpoint over ssh+curl
+/// (`pause` / `resume` / `step` / `write` / `force` / `unforce`). The
+/// caller must whitelist `path` — it's interpolated into the remote
+/// command. Single quotes in the body are escaped for the shell.
+pub async fn post_edge_runtime(
+    edge: &Edge,
+    path: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let body_str = body.to_string().replace('\'', r"'\''");
+    let cmd = format!(
+        "curl --silent --max-time 4 -X POST -H 'Content-Type: application/json' \
+         -d '{}' http://127.0.0.1:{}/{}",
+        body_str, edge.runtime_port, path
+    );
+    let output = ssh_cmd(edge)
+        .arg(cmd)
+        .output()
+        .await
+        .map_err(|e| format!("spawn ssh failed: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("edge unreachable: {}", first_line(&stderr)));
+    }
+    let resp = String::from_utf8_lossy(&output.stdout);
+    // The edge returns JSON on success; on a 4xx/5xx curl still exits 0
+    // and the body is the plain-text error — surface that.
+    serde_json::from_str::<serde_json::Value>(&resp)
+        .map_err(|_| format!("edge runtime: {}", first_line(&resp)))
+}
+
+// ============================================================
 //  Deploy — atomic versioned dir + symlink swap + systemctl restart
 // ============================================================
 

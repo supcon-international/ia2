@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context, Result};
 use axum::{
     extract::{Query, State},
+    http::StatusCode,
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse,
@@ -27,7 +28,9 @@ use axum::{
     Json, Router,
 };
 use futures_util::stream::Stream;
-use ironplc_bridge::{DeviceReport, DeviceSpec, ProgramHandle, VarSnapshot};
+use ironplc_bridge::{
+    DeviceReport, DeviceSpec, ProgramHandle, RuntimeMode, RuntimeWriteError, VarSnapshot,
+};
 use project::{ProjectStore, ProtocolConfig};
 use serde::Serialize;
 use tokio::signal;
@@ -417,6 +420,12 @@ async fn main() -> Result<()> {
         .route("/logs/stream", get(logs_stream))
         .route("/discover", get(discover))
         .route("/system", get(system))
+        .route("/pause", post(rt_pause))
+        .route("/resume", post(rt_resume))
+        .route("/step", post(rt_step))
+        .route("/write", post(rt_write))
+        .route("/force", post(rt_force))
+        .route("/unforce", post(rt_unforce))
         .route("/stop", post(stop_handler))
         .layer(CorsLayer::permissive())
         .with_state(state);
@@ -510,6 +519,13 @@ async fn health(State(state): State<AppState>) -> Json<Health> {
     })
 }
 
+/// One pinned (forced) variable in the runtime's debug state.
+#[derive(Serialize)]
+struct ForceEntry {
+    name: String,
+    value: i32,
+}
+
 #[derive(Serialize)]
 struct Status {
     version: &'static str,
@@ -520,6 +536,11 @@ struct Status {
     uptime_secs: u64,
     scan_count: u64,
     last_snapshot: Option<VarSnapshot>,
+    /// Scan-loop execution mode (running / paused / step) — debug state
+    /// so an attached IDE can show "paused" / step progress.
+    mode: RuntimeMode,
+    /// Currently-forced variables (name → pinned value).
+    forces: Vec<ForceEntry>,
 }
 
 async fn status(State(state): State<AppState>) -> Json<Status> {
@@ -533,6 +554,13 @@ async fn status(State(state): State<AppState>) -> Json<Status> {
         uptime_secs: state.start_time.elapsed().as_secs(),
         scan_count,
         last_snapshot,
+        mode: state.handle.mode(),
+        forces: state
+            .handle
+            .forces()
+            .into_iter()
+            .map(|(name, value)| ForceEntry { name, value })
+            .collect(),
     })
 }
 
@@ -657,6 +685,111 @@ fn collect_system_info() -> SystemInfo {
 /// Edge interfaces / serial ports / arch — powers `cs edge system`.
 async fn system() -> Json<SystemInfo> {
     Json(collect_system_info())
+}
+
+// ============================================================
+//  Online debug control — pause / resume / step / write / force.
+//  Mirrors the IDE-side /api/runtime/* surface so an attached edge is a
+//  full debug target, not just observable. NOTE: write/force can drive
+//  real outputs on a connected bus — same power (and responsibility) as
+//  forcing a variable on the local runtime; the scan loop's failsafe
+//  still zeroes outputs on stop.
+// ============================================================
+
+#[derive(Serialize)]
+struct ModeResp {
+    mode: RuntimeMode,
+}
+
+async fn rt_pause(State(state): State<AppState>) -> Json<ModeResp> {
+    state.handle.pause();
+    Json(ModeResp {
+        mode: state.handle.mode(),
+    })
+}
+
+async fn rt_resume(State(state): State<AppState>) -> Json<ModeResp> {
+    state.handle.resume();
+    Json(ModeResp {
+        mode: state.handle.mode(),
+    })
+}
+
+#[derive(serde::Deserialize)]
+struct StepReq {
+    cycles: u32,
+}
+
+async fn rt_step(State(state): State<AppState>, Json(req): Json<StepReq>) -> Json<ModeResp> {
+    state.handle.step(req.cycles);
+    Json(ModeResp {
+        mode: state.handle.mode(),
+    })
+}
+
+#[derive(serde::Deserialize)]
+struct VarWriteReq {
+    name: String,
+    /// Bit-packed value — the caller resolves the variable's type, same
+    /// as the IDE-side runtime write/force surface.
+    value: i32,
+}
+
+#[derive(serde::Deserialize)]
+struct VarNameReq {
+    name: String,
+}
+
+fn write_err(e: RuntimeWriteError) -> (StatusCode, String) {
+    match e {
+        RuntimeWriteError::UnknownVariable(n) => {
+            (StatusCode::NOT_FOUND, format!("unknown variable '{n}'"))
+        }
+        RuntimeWriteError::Disconnected => {
+            (StatusCode::CONFLICT, "scan loop has stopped".to_string())
+        }
+        RuntimeWriteError::Vm(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+async fn rt_write(
+    State(state): State<AppState>,
+    Json(req): Json<VarWriteReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let v = state
+        .handle
+        .write_variable(&req.name, req.value)
+        .await
+        .map_err(write_err)?;
+    Ok(Json(
+        serde_json::json!({ "ok": true, "name": req.name, "value": v }),
+    ))
+}
+
+async fn rt_force(
+    State(state): State<AppState>,
+    Json(req): Json<VarWriteReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let v = state
+        .handle
+        .force_variable(&req.name, req.value)
+        .await
+        .map_err(write_err)?;
+    Ok(Json(
+        serde_json::json!({ "ok": true, "name": req.name, "value": v }),
+    ))
+}
+
+async fn rt_unforce(
+    State(state): State<AppState>,
+    Json(req): Json<VarNameReq>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    state
+        .handle
+        .unforce_variable(&req.name)
+        .await
+        .map_err(write_err)?;
+    Ok(Json(serde_json::json!({ "ok": true, "name": req.name })))
 }
 
 async fn stop_handler(State(state): State<AppState>) -> impl IntoResponse {

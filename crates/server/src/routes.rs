@@ -913,6 +913,32 @@ pub async fn system_edge_route(
         .map_err(ApiError::Internal)
 }
 
+/// Proxy an online-debug control op to the edge runtime over ssh. `op`
+/// is whitelisted (it's interpolated into the remote curl command). The
+/// request body (if any) is forwarded as the JSON payload — e.g.
+/// `{cycles}` for step, `{name,value}` for write/force.
+pub async fn edge_runtime_route(
+    State(state): State<AppState>,
+    project: ProjectName,
+    AxumPath((name, op)): AxumPath<(String, String)>,
+    body: Option<Json<serde_json::Value>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    const ALLOWED: [&str; 6] = ["pause", "resume", "step", "write", "force", "unforce"];
+    if !ALLOWED.contains(&op.as_str()) {
+        return Err(ApiError::Internal(format!("unknown runtime op '{op}'")));
+    }
+    let edge = with_project(&state, &project, |store| {
+        store.read_edge(&name).map_err(Into::into)
+    })?;
+    let payload = body
+        .map(|Json(v)| v)
+        .unwrap_or_else(|| serde_json::json!({}));
+    crate::edges::post_edge_runtime(&edge, &op, &payload)
+        .await
+        .map(Json)
+        .map_err(ApiError::Internal)
+}
+
 pub async fn deploy_edge_route(
     State(state): State<AppState>,
     project: ProjectName,
