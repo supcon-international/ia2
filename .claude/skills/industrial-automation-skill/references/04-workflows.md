@@ -134,11 +134,34 @@ cs deploy field_pi --server "$SRV"                            # tar → ssh → 
 cs probe  field_pi --server "$SRV"                            # confirm the edge runtime came up
 ```
 
-Deploy needs `ia2-runtime` cross-compiled for the edge's arch (release.yml builds linux x86_64 + aarch64 artifacts). The edge runs headless; RETAIN state lives in `<install_dir>/state/retain.json` on the box.
+Deploy ships the project **and** the `ia2-runtime` binary — but only if a **Linux ELF** for the edge's arch is present in `target/` (the deploy guards against shipping a wrong-arch/host binary, e.g. a macOS build); otherwise it carries forward the runtime already on the box. So cross-compile `ia2-runtime` for the edge's arch yourself before a binary-bearing deploy — there's no CI building artifacts. The edge runs headless; RETAIN state lives in `<install_dir>/state/retain.json` on the box.
 
 ---
 
-## G. Multi-project work
+## G. Drive / debug a deployed edge runtime (`--edge`)
+
+`cs runtime …` and the introspection commands take `--edge <name>` to hit a *deployed* edge instead of the local server — same surface as the web **Edge → Debug** tab, so the pokes render in the IDE's agent-takeover overlay.
+
+```bash
+cs --project tank_ctrl edge scan   field_pi --server "$SRV"            # connect status + discovered EtherCAT topology
+cs --project tank_ctrl edge logs   field_pi --tail 80 --server "$SRV"  # OP transitions, bus errors
+cs --project tank_ctrl runtime status  --edge field_pi --json --server "$SRV"       # live snapshot from the box
+cs --project tank_ctrl runtime force   --edge field_pi --server "$SRV" -- speed 500  # NB the `--` (negatives need it: -- speed -500)
+cs --project tank_ctrl runtime unforce --edge field_pi speed --server "$SRV"         # release — IMPORTANT
+```
+
+**Transport:** each `--edge` call is one-shot `ssh host curl 127.0.0.1:<runtime_port>/<verb>` — a fresh SSH handshake per call (see `02-cli-reference.md`). Fine for occasional pokes; a poor fit for anything resembling a control loop.
+
+**`force --edge` is a debug override, not a setpoint channel — know when *not* to use it:**
+- Driving hardware for more than a quick *supervised* poke via `force` is a smell. For a real, repeatable setpoint make the variable an **iomap-bound input** (HMI register / recipe) or compute it in **POU logic** (e.g. a motion profile), and change it through the normal data path. Keep `force` for "pin this for a moment to see what happens."
+- For **unattended / throughput / tight-loop** work, run the loop *on the box* (one persistent ssh, local `curl`s) rather than per-call `cs --edge`. The `cs --edge` path earns its hops only when a human is watching the IDE overlay and you want the action on the same audited path the GUI uses.
+- It drives **real outputs** on a live bus. Treat a motion variable as you would at the panel, and pair every `force` with `unforce` (`checklists/handoff.md`).
+
+> Worked example — spinning a real Inovance SV660N in CSP: a CiA-402 state machine in the POU did the enable sequence + `target_position := target_position + speed` ramp; the agent only `force --edge`-ed the internal `speed` knob (then `unforce` to stop). The POU did the control; force just injected the setpoint. Fine for a supervised demo — but for a product feature you'd bind `speed` to a real input rather than debug-force it.
+
+---
+
+## H. Multi-project work
 
 When more than one project is open, **every** command needs `--project`. Check first:
 

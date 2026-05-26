@@ -40,6 +40,7 @@ When you see yourself or the user about to do any of these, **stop**:
 - **Writing IEC code without `cs project check`** → cheap (just compile, no run). Catches 90% of mistakes before the user sees a red Monitor pane.
 - **Forgetting `application` on iomap entries** → `Mapping` has 5 fields: `application` (POU name) + `variable` + `device` + `channel` + `direction`. The server rejects with 422 if you skip `application`.
 - **Using `cs runtime force` and forgetting to `unforce`** → forces survive the agent's lifetime. Always pair them, or call out the leftover at handoff.
+- **Using `force` (esp. `force --edge`) as a *setpoint* source** → `force` is a debug override, and `--edge` is one fresh `ssh host curl` per call. Fine for a supervised poke; for a real/repeatable setpoint bind the variable via iomap or drive it from POU logic, and for unattended/tight loops run the loop on the box. See `04-workflows.md` § G.
 - **Trusting `cs --server http://127.0.0.1:3001`** with IA2.app open → IA2.app binds a random port. Discover it; don't assume.
 - **Reading `ModbusConfig.host`** without checking transport → the new schema wraps it in `transport.kind = "tcp" | "rtu"`. Reading the top-level `host` is undefined on RTU configs.
 - **Treating `cs runtime status` as "is the agent still in control"** → that's a runtime liveness check. Agent presence is separate (`/api/agent/heartbeat` + the session/start/end pair).

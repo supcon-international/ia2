@@ -85,7 +85,16 @@ cs edge set  field_pi --from edge.json             # replace; --from - for stdin
 cs edge delete field_pi
 cs deploy field_pi          # tar project → ssh → versioned dir + symlink swap + systemd restart
 cs probe  field_pi          # quick ssh+curl reachability (scan count, uptime, version)
+
+# Introspect a live edge (all over ssh+curl — see transport note):
+cs edge logs   field_pi [--tail N]  # tail the runtime log (EtherCAT discovery, bus health, connect errors); N default 200, cap 2000
+cs edge scan   field_pi             # per-device connect status + discovered EtherCAT topology (index/name/vendor/product/PDI sizes)
+cs edge system field_pi             # the edge's NICs / serial ports / arch — pick a nic or tty for a device
 ```
+
+**Transport.** `cs` never reaches the edge runtime directly — the *local* server shells out to your machine's `ssh` (`~/.ssh/config`, keys, agent; `BatchMode=yes`, `StrictHostKeyChecking=accept-new`). Two shapes:
+- **one-shot `ssh host curl 127.0.0.1:<runtime_port>/…`** — used by `probe`, `edge logs/scan/system`, and `runtime … --edge` (below). A fresh ssh per call; fine for pokes, *not* for tight loops.
+- **persistent `ssh -N -L <localport>:127.0.0.1:<runtime_port>`** — a server-managed "attach" tunnel for live streaming (log stream, the web **Edge → Debug** tab's polling). Torn down on `cs edge delete` / project close. Not exposed as a `cs` subcommand.
 
 ## IoMap + Tasks (whole-document get/set)
 
@@ -115,7 +124,9 @@ cs runtime unforce setpoint
 cs runtime write  setpoint 200      # one-shot write (program can overwrite next cycle)
 ```
 
-Value encoding for `force`/`write`: the CLI fetches the variable's type from the live snapshot and bit-packs. `TRUE`/`FALSE`/`1`/`0` for BOOL, decimal for INT, decimal float for REAL (IEEE-754 bit pattern sent).
+Value encoding for `force`/`write`: the CLI fetches the variable's type from the live snapshot and bit-packs. `TRUE`/`FALSE`/`1`/`0` for BOOL, decimal for INT, decimal float for REAL (IEEE-754 bit pattern sent). **Negative / leading-dash values need a `--` separator** — `cs runtime force -- speed -500` — otherwise clap parses `-500` as a flag and the force silently fails (positives work without it).
+
+**Target an edge runtime with `--edge <name>`.** Every `cs runtime …` verb (`status/pause/resume/step/force/unforce/write`) accepts `--edge field_pi` to drive a *deployed* edge instead of the local server (routed as one-shot `ssh host curl …` — see Edges transport). It's the same surface the web **Edge → Debug** tab uses, so the pokes render in the IDE's agent-takeover overlay. But `force --edge` is a *debug override, not a setpoint channel* — see workflow G in `04-workflows.md` for when **not** to reach for it.
 
 ## Agent session (the wrapper you almost always want)
 
