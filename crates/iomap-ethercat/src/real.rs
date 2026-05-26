@@ -304,7 +304,16 @@ fn smol_main(
             mailbox_response: Duration::from_millis(1000),
             ..Default::default()
         },
-        MainDeviceConfig::default(),
+        // dc_static_sync_iterations defaults to 10_000 in ethercrab 0.7.1,
+        // which fires that many FRMW(0x0910) frames during init for static
+        // drift compensation. On a single-SubDevice / short-bus / non-RT
+        // setup any one of those frames timing out aborts init with
+        // Timeout(Pdu). We don't drive DC-synchronous motion yet, so skip
+        // this phase. Matches ethercrab's own examples/discover.rs.
+        MainDeviceConfig {
+            dc_static_sync_iterations: 0,
+            ..MainDeviceConfig::default()
+        },
     ));
 
     let nic_owned = nic.to_string();
