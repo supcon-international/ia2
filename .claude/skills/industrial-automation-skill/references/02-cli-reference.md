@@ -3,7 +3,7 @@
 The binary is `cs`. In a dev checkout it's `target/release/cs` (build with `cargo build -p ia2-cli --release`); installed, it's on `$PATH`. Set a variable once per session:
 
 ```bash
-CS="${CS:-/Users/mercy/codebase/controller/target/release/cs}"   # or just `cs`
+CS="${CS:-cs}"   # on PATH after install; in a checkout: ./target/release/cs
 SRV="http://127.0.0.1:60349"   # discover the real port — see checklists/first-contact.md
 ```
 

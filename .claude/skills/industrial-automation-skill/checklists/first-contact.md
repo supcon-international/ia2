@@ -19,13 +19,22 @@ ls ./target/release/cs            # ...or it's the build output, if you're in a 
 `cs` defaults to `http://127.0.0.1:3001`. That's right for a manually-started dev server (`cargo run -p server`) but **wrong for `IA2.app`**, which binds an ephemeral port. Resolve it:
 
 ```bash
-# Is a plain dev server on the default port?
+# 1. Plain dev server on the default port?
 curl -sf -m 1 http://127.0.0.1:3001/api/health >/dev/null && SRV=http://127.0.0.1:3001
 
-# Otherwise scan for the IA2.app server (ephemeral, high port). This is
-# slow but reliable; stop at the first /api/health that says ok.
+# 2. IA2.app binds an OS-assigned ephemeral port (macOS: 49152-65535).
+#    Find it with lsof (`+c0` so the command name isn't truncated to
+#    "ia2-serve"), then confirm /api/health — that also skips the
+#    demo-modbus listener the same process may hold:
 if [ -z "$SRV" ]; then
-  for p in $(seq 50000 65535); do
+  for p in $(lsof -nP -iTCP -sTCP:LISTEN +c0 2>/dev/null | grep ia2-server | grep -oE '127\.0\.0\.1:[0-9]+' | cut -d: -f2); do
+    curl -sf -m 1 "http://127.0.0.1:$p/api/health" 2>/dev/null | grep -q '"status":"ok"' && { SRV="http://127.0.0.1:$p"; break; }
+  done
+fi
+
+# 3. Fallback: scan the ephemeral range (slow; macOS starts at 49152, not 50000).
+if [ -z "$SRV" ]; then
+  for p in $(seq 49152 65535); do
     if curl -sf -m 0.1 "http://127.0.0.1:$p/api/health" 2>/dev/null | grep -q '"status":"ok"'; then
       SRV="http://127.0.0.1:$p"; break
     fi
