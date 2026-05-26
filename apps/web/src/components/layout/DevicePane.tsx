@@ -717,40 +717,6 @@ function EthercatDeviceEditor({
       </div>
 
       <div className="flex-1 space-y-6 overflow-auto p-5">
-        {draft.nic === "_sim" || draft.nic.trim() === "" ? (
-          <div className="flex items-start gap-2 rounded-md border border-sky-500/30 bg-sky-500/5 px-3 py-2 text-[12px] text-sky-900 dark:text-sky-200">
-            <Info className="mt-0.5 size-3.5 shrink-0" />
-            <div>
-              <div className="font-medium">Simulation mode</div>
-              <div className="text-[11px] text-sky-900/80 dark:text-sky-200/80">
-                <span className="font-mono">nic = "_sim"</span> selects an
-                in-memory PDO buffer. Output channels echo what the program
-                writes; inputs start at zero. Set <span className="font-mono">nic</span>{" "}
-                to a real interface name (e.g. <span className="font-mono">eth0</span>)
-                to drive an actual EtherCAT bus via{" "}
-                <span className="font-mono">ethercrab</span>. Real mode requires
-                Linux + <span className="font-mono">CAP_NET_RAW</span>.
-              </div>
-            </div>
-          </div>
-        ) : (
-          <div className="flex items-start gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-[12px] text-emerald-900 dark:text-emerald-200">
-            <Info className="mt-0.5 size-3.5 shrink-0" />
-            <div>
-              <div className="font-medium">Real-bus mode</div>
-              <div className="text-[11px] text-emerald-900/80 dark:text-emerald-200/80">
-                The runtime will open a raw socket on{" "}
-                <span className="font-mono">{draft.nic}</span> and walk the
-                EtherCAT bus on startup. Each channel needs an accurate{" "}
-                <span className="font-mono">Byte off</span> /{" "}
-                <span className="font-mono">Bit off</span> within the
-                SubDevice's PDI region — pull these from the slave's ESI / vendor
-                docs. To go back to simulation, set <span className="font-mono">nic = "_sim"</span>.
-              </div>
-            </div>
-          </div>
-        )}
-
         <section>
           <div className="mb-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
             MainDevice

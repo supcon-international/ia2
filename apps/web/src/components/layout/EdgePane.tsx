@@ -767,11 +767,6 @@ function DebugPanel({ name }: { name: string }) {
         </pre>
       )}
 
-      <p className="rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1.5 text-[11px] text-amber-700 dark:text-amber-400">
-        Force / write drive real outputs on a connected bus — make sure the area is clear before
-        forcing a motion variable.
-      </p>
-
       <div className="overflow-hidden rounded-md border border-border">
         <table className="w-full text-xs">
           <thead>
