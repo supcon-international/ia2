@@ -2130,50 +2130,56 @@ fn snapshot_var_type(server: &str, name: &str) -> Result<Option<String>> {
 /// what shows up in the IDE banner ("Agent in control · pou create").
 fn announce_target(cmd: &Command) -> Option<(&str, &'static str)> {
     match cmd {
+        // Static analysis / self-managed — no IDE server to announce to.
+        // (`project check`/`info` operate on a directory on disk.)
         Command::Check { .. }
         | Command::Transpile { .. }
         | Command::Explain { .. }
         | Command::Symbols { .. }
-        | Command::Probe { .. } // read-only — just a status check
         | Command::Project(ProjectCmd::Check { .. })
         | Command::Project(ProjectCmd::Info { .. })
-        | Command::Project(ProjectCmd::List { .. })
-        | Command::Device(DeviceCmd::List { .. })
-        | Command::Device(DeviceCmd::Get { .. })
-        | Command::Edge(EdgeCmd::List { .. })
-        | Command::Edge(EdgeCmd::Get { .. })
-        | Command::Edge(EdgeCmd::Logs { .. })
-        | Command::Edge(EdgeCmd::Scan { .. })
-        | Command::Edge(EdgeCmd::System { .. })
-        | Command::Iomap(IomapCmd::Get { .. })
-        | Command::Tasks(TasksCmd::Get { .. })
-        | Command::Runtime(RuntimeCmd::Status { .. }) => None,
+        | Command::Agent(_) => None,
 
-        // Agent subcommands manage the session directly — they
-        // don't piggyback on the transient heartbeat path.
-        Command::Agent(_) => None,
-
+        // Everything that talks to the IDE server announces — reads
+        // INCLUDED — so the takeover overlay renders whenever an agent
+        // drives IA2 over the HTTP API, not only on mutations. (Inside a
+        // `cs agent run`/`enter` session the forwarded IA2_AGENT_SESSION
+        // keeps these on the steady session banner instead of flashing.)
+        Command::Project(ProjectCmd::List { server, .. }) => Some((server, "project list")),
         Command::Project(ProjectCmd::Create { server, .. }) => Some((server, "project create")),
         Command::Project(ProjectCmd::Open { server, .. }) => Some((server, "project open")),
-        Command::Project(ProjectCmd::Close { server }) => Some((server, "project close")),
+        Command::Project(ProjectCmd::Close { server, .. }) => Some((server, "project close")),
 
         Command::Pou(PouCmd::Create { server, .. }) => Some((server, "pou create")),
         Command::Pou(PouCmd::Save { server, .. }) => Some((server, "pou save")),
         Command::Pou(PouCmd::Delete { server, .. }) => Some((server, "pou delete")),
 
+        Command::Device(DeviceCmd::List { server, .. }) => Some((server, "device list")),
+        Command::Device(DeviceCmd::Get { server, .. }) => Some((server, "device get")),
         Command::Device(DeviceCmd::Create { server, .. }) => Some((server, "device create")),
         Command::Device(DeviceCmd::Set { server, .. }) => Some((server, "device set")),
         Command::Device(DeviceCmd::Delete { server, .. }) => Some((server, "device delete")),
+
+        Command::Edge(EdgeCmd::List { server, .. }) => Some((server, "edge list")),
+        Command::Edge(EdgeCmd::Get { server, .. }) => Some((server, "edge get")),
+        Command::Edge(EdgeCmd::Logs { server, .. }) => Some((server, "edge logs")),
+        Command::Edge(EdgeCmd::Scan { server, .. }) => Some((server, "edge scan")),
+        Command::Edge(EdgeCmd::System { server, .. }) => Some((server, "edge system")),
         Command::Edge(EdgeCmd::Create { server, .. }) => Some((server, "edge create")),
         Command::Edge(EdgeCmd::Set { server, .. }) => Some((server, "edge set")),
         Command::Edge(EdgeCmd::Delete { server, .. }) => Some((server, "edge delete")),
+
+        Command::Iomap(IomapCmd::Get { server, .. }) => Some((server, "iomap get")),
         Command::Iomap(IomapCmd::Set { server, .. }) => Some((server, "iomap set")),
+        Command::Tasks(TasksCmd::Get { server, .. }) => Some((server, "tasks get")),
         Command::Tasks(TasksCmd::Set { server, .. }) => Some((server, "tasks set")),
 
+        Command::Probe { server, .. } => Some((server, "probe")),
         Command::Run { server, .. } => Some((server, "run")),
-        Command::Stop { server } => Some((server, "stop")),
+        Command::Stop { server, .. } => Some((server, "stop")),
         Command::Deploy { server, .. } => Some((server, "deploy")),
 
+        Command::Runtime(RuntimeCmd::Status { server, .. }) => Some((server, "runtime status")),
         Command::Runtime(RuntimeCmd::Pause { server, .. }) => Some((server, "runtime pause")),
         Command::Runtime(RuntimeCmd::Resume { server, .. }) => Some((server, "runtime resume")),
         Command::Runtime(RuntimeCmd::Step { server, .. }) => Some((server, "runtime step")),
