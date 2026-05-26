@@ -9,30 +9,30 @@ A simple, agent-first IDE + runtime for IEC 61131-3 PLC programming.
 
 ## Install it for your coding agent
 
-IA2 is built so a coding agent drives it (Claude Code, Cursor, Codex…). Just tell yours:
+IA2 is built so a coding agent drives it (Claude Code, Cursor, Codex…). **Two ways to install the skill:**
+
+**A · Just tell your agent** — it runs everything below for you (installs the skill, builds the binaries, starts the server):
 
 > **"Install the industrial-automation-skill from https://github.com/supcon-international/ia2"**
 
-and it will do the two steps below — the **skill** (teaches it to drive IA2) and the **binaries** (`cs` + `ia2-server`, which the skill drives).
-
-### 1. The skill — `npx skills` (recommended)
+**B · Run `npx skills` yourself:**
 
 ```bash
 npx skills add https://github.com/supcon-international/ia2/tree/main/.claude/skills/industrial-automation-skill
 ```
 
-That's the [vercel-labs/skills](https://github.com/vercel-labs/skills) installer — it drops the skill **and its `references/` + `checklists/`** into `.claude/skills/`. Add `-g` to install for every project, `-a claude-code` to pin the agent.
+That's the [vercel-labs/skills](https://github.com/vercel-labs/skills) installer — it drops the skill **and its `references/` + `checklists/`** into `.claude/skills/` (add `-g` for every project, `-a claude-code` to pin the agent).
 
-### 2. The binaries — `cs` + `ia2-server`
+### The binaries — `cs` + `ia2-server`
 
-The skill drives a small Rust CLI and a local server. Build them once (needs the Rust toolchain — [rustup.rs](https://rustup.rs)):
+The skill drives a small Rust CLI and a local server. Route **A** builds them for you; on route **B** (or to do it by hand) build once — needs the Rust toolchain ([rustup.rs](https://rustup.rs)):
 
 ```bash
 git clone --recursive https://github.com/supcon-international/ia2
 cd ia2 && ./scripts/install-skill.sh
 ```
 
-`scripts/install-skill.sh` builds `cs` + `ia2-server` into `~/.local/bin` (it also installs the skill, so it's a one-shot alternative to step 1). Then:
+`scripts/install-skill.sh` builds `cs` + `ia2-server` into `~/.local/bin` (it also installs the skill, so it doubles as a no-`npx`, do-everything one-shot). Then:
 
 1. **Start the server:** `ia2-server --bind 127.0.0.1:3001 &`
 2. **Restart your agent session** so it discovers the skill.
