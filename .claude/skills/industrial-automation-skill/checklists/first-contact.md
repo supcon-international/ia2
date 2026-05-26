@@ -5,10 +5,11 @@ Run this the first time you touch IA2 in a session, before any real work. Three 
 ## 1. Locate the `cs` binary
 
 ```bash
-command -v cs || ls /Users/mercy/codebase/controller/target/release/cs
+command -v cs && cs --version     # the installer puts cs in ~/.local/bin (on PATH)
+ls ./target/release/cs            # ...or it's the build output, if you're in a checkout
 ```
 - On `$PATH` → use `cs`.
-- Only in the checkout → use the full path, or `cargo build -p ia2-cli --release` first if it's missing/stale.
+- Only in a checkout → use `./target/release/cs`, or `cargo build -p ia2-cli --release` first if it's missing/stale.
 - Set `CS=` to whichever you found so every later command is unambiguous.
 
 ## 2. Discover the server URL
@@ -31,7 +32,7 @@ fi
 echo "SRV=$SRV"
 ```
 
-If the scan finds nothing, the app/server isn't running. Either the user needs to launch `IA2.app` (`open /Applications/IA2.app`) or you start a dev server. Don't proceed without a reachable `/api/health`.
+If the scan finds nothing, no server is running. Start one — headless: `ia2-server --bind 127.0.0.1:3001 &` then `SRV=http://127.0.0.1:3001`; or from a checkout `cargo run -p server`; or have the user launch `IA2.app` (`open /Applications/IA2.app`). Don't proceed without a reachable `/api/health`.
 
 > Tip: some sessions persist the URL in `/tmp/ia2_srv`. Check there first: `SRV=$(cat /tmp/ia2_srv 2>/dev/null)` then validate it with a health probe before trusting it.
 

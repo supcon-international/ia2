@@ -22,8 +22,8 @@ Exit codes: `0` success · `1` clean run but source has errors · `2` usage erro
 ```bash
 cs check pous/main.st                  # validate one POU; --explain for RST docs; --json
 cs check a.st b.ld.json                # multiple files, aggregated
-cs transpile pous/conveyor.ld.json     # show the ST a graphical POU lowers to; --with-map
-cs symbols pous/main.st                # list declared symbols (name/type/direction); --json
+cs transpile pous/conveyor.ld.json     # ST that a graphical POU (.ld / .fbd / .sfc.json) lowers to; --with-map (no-op on ST)
+cs symbols pous/main.st                # declared symbols (name/type/direction); also reads .ld / .fbd / .sfc.json; --json
 cs explain P0073                        # full RST doc for an ironplc problem code
 cs project check ~/Documents/IA2/foo   # compile the WHOLE project (every POU + synth CONFIG)
 cs project info  ~/Documents/IA2/foo   # list POUs/devices/edges; --json

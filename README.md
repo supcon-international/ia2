@@ -7,6 +7,27 @@ A simple, agent-first IDE + runtime for IEC 61131-3 PLC programming.
 > first-class users alongside humans.** Every feature reachable via
 > GUI is also reachable via the `cs` CLI and the HTTP API.
 
+## Install it for your coding agent
+
+IA2 is built so a coding agent drives it. Point your agent (Claude Code, Codex, Cursor…) at this repo and say:
+
+> **"Install the industrial-automation-skill from https://github.com/supcon-international/ia2"**
+
+It will run the steps below — or do them yourself:
+
+```bash
+git clone --recursive https://github.com/supcon-international/ia2
+cd ia2
+./scripts/install-skill.sh
+```
+
+`scripts/install-skill.sh` builds the `cs` CLI + `ia2-server` (needs the Rust toolchain — [rustup.rs](https://rustup.rs)), installs them to `~/.local/bin`, and drops the **`industrial-automation-skill`** into `~/.claude/skills/`. Then:
+
+1. **Start the server:** `ia2-server --bind 127.0.0.1:3001 &`
+2. **Restart your agent session** so it discovers the skill.
+
+Now just ask your agent to build a PLC program — it will author ST / LD / FBD / SFC, compile, wire Modbus / EtherCAT I/O, run and debug the scan loop, and deploy to edge boxes, all through `cs`. Start with `cs --help` and the skill under `~/.claude/skills/industrial-automation-skill/`.
+
 ## What's in the box
 
 | Component | Tech | Purpose |

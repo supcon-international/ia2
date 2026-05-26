@@ -4,7 +4,7 @@
 
 When an agent drives IA2, the human watches the IDE. The IDE shows a green "AGENT IN CONTROL" overlay so the human knows not to fight you for state. There are two ways that overlay gets driven:
 
-- **Transient heartbeat** — every mutating `cs` command POSTs `/api/agent/heartbeat`. The overlay flashes on with the command name and ages out after 3 s. Run five commands a few seconds apart and the banner *strobes* — on, off, on, off — with a different label each time. Exhausting to watch.
+- **Transient heartbeat** — nearly every `cs` command (reads included; only the static-analysis ones stay silent) POSTs `/api/agent/heartbeat`. The overlay flashes on with the command name and ages out after 3 s. Run five commands a few seconds apart and the banner *strobes* — on, off, on, off — with a different label each time. Exhausting to watch.
 - **Session** — you POST `/api/agent/session/start { id, label }` once, the overlay stays on with your `label` for the entire workflow, then `/api/agent/session/end { id }` drops it. One steady banner, one message.
 
 **For any workflow longer than a single command, you MUST use a session.** This is the difference between "the agent is thrashing my screen" and "the agent is doing "Building bottling line" and I can see exactly that".
@@ -75,6 +75,6 @@ cs agent leave --server "$SRV"     # reads IA2_AGENT_SESSION; or pass --id expli
 
 ## Don't
 
-- Don't open a session for a single read (`cs project list`, `cs runtime status`) — those don't even heartbeat.
+- Don't open a full session for a *single* read (`cs project list`, `cs runtime status`) — but note these reads **do** flash the transient overlay now (reads heartbeat too, so the human sees all agent activity). Wrap a *sequence* of reads in `cs agent run` to avoid the strobe.
 - Don't nest sessions (`cs agent run` inside another `cs agent run`) — the inner start replaces the outer; the outer's `end` then no-ops on a stale id. One session per workflow.
 - Don't hand-roll `/api/agent/session/start` unless you also guarantee the matching `end` on every exit path. `cs agent run` exists precisely so you don't have to.

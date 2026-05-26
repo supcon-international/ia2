@@ -7,7 +7,7 @@ description: Use when the user is doing PLC programming or industrial-automation
 
 You are the agent layer of an IEC 61131-3 PLC engineering toolchain called **IA2**. Your job: drive the system through its CLI (`cs`) and HTTP API to author PLC programs, configure devices, validate, run, and debug — while the human watches the IDE window and the takeover banner shows what you're doing.
 
-The CLI is **designed for you**, not for human shells. Most flags exist so you don't have to guess shapes; every mutating command sends a heartbeat so the IDE knows an agent is in control.
+The CLI is **designed for you**, not for human shells. Most flags exist so you don't have to guess shapes; **nearly every command — reads included — announces a heartbeat** so the IDE shows an agent is in control (only the static-analysis commands `check`/`transpile`/`explain`/`symbols` and `project check`/`info` stay silent).
 
 ## How to use this skill
 
@@ -28,7 +28,7 @@ The CLI is **designed for you**, not for human shells. Most flags exist so you d
 
 ## The one-paragraph version
 
-IA2 is a single Rust server (axum) that hosts N IEC 61131-3 projects (TOML on disk), compiles each via the vendored `ironplc` compiler, runs the bytecode in an in-process scan loop, and drives real Modbus TCP / Modbus RTU / EtherCAT hardware through the `iomap-*` adapters. One process, many projects (`X-IA2-Project` header), one running program at a time (hardware constraint). The web UI runs in either a browser tab or a `WKWebView` inside the macOS shell — both are URL-scoped via `?project=name`. The `cs` CLI is a thin axum client: every command is one HTTP call, project name auto-attached via `--project` flag or `IA2_AGENT_SESSION` env var.
+IA2 is a single Rust server (axum) that hosts N IEC 61131-3 projects (TOML on disk), compiles each via the vendored `ironplc` compiler, runs the bytecode in an in-process scan loop, and drives real Modbus TCP / Modbus RTU / EtherCAT hardware through the `iomap-*` adapters. One process, many projects (`X-IA2-Project` header), one running program at a time (hardware constraint). The web UI runs in either a browser tab or a `WKWebView` inside the macOS shell — both are URL-scoped via `?project=name`. The `cs` CLI is a thin axum client: every command is one HTTP call. The target project is selected by the `--project` flag (sent as the `X-IA2-Project` header); the separate `IA2_AGENT_SESSION` env var carries the agent *session id* for heartbeat attribution — **not** the project.
 
 ## Core anti-patterns to call out immediately
 

@@ -123,8 +123,12 @@ Every `MutationEvent` carries a `project: String` field. Web clients filter SSE 
 | Validate full project | `POST /api/project/validate` | `cs project check PATH` |
 | Start running | `POST /api/run` | `cs run [--program X]` |
 | Pause / step / resume | `POST /api/runtime/{action}` | `cs runtime pause/step/resume` |
-| Force a variable | `POST /api/runtime/forces/{name}` | `cs runtime force NAME VALUE` |
-| Live snapshot | `GET /api/runtime/snapshot` | (parse JSON yourself) |
+| Force a variable | `POST /api/runtime/forces/{name}` | `cs runtime force NAME VALUE` (negatives need `-- NAME -N`) |
+| One-shot write / unforce | `POST /api/runtime/variables/{name}` · `DELETE /api/runtime/forces/{name}` | `cs runtime write NAME VALUE` · `cs runtime unforce NAME` |
+| IoMap / Tasks docs | `GET·PUT /api/iomap` · `GET·PUT /api/tasks` | `cs iomap get/set` · `cs tasks get/set` |
+| Live snapshot / status | `GET /api/runtime/snapshot` | `cs runtime status --json` (mode + forces + vars) |
+| Edge introspection | `GET /api/edges/{name}/{logs,discover,system,status}` | `cs edge logs/scan/system` · `cs probe` |
+| Drive an edge runtime | `POST /api/edges/{name}/runtime/{op}` | `cs runtime <op> --edge NAME` |
 | SSE event stream | `GET /api/events` | (SSE — see `02-cli-reference.md`) |
 | Start agent session | `POST /api/agent/session/start` | `cs agent enter` / `cs agent run -- ...` |
 | End agent session | `POST /api/agent/session/end` | `cs agent leave` / auto on `cs agent run` exit |
