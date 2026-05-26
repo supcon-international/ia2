@@ -6,6 +6,11 @@
 # the `industrial-automation-skill` into ~/.claude/skills/ so your agent can
 # author / compile / run / debug / deploy IEC 61131-3 PLC programs through IA2.
 #
+# Just the SKILL (not the binaries)? The recommended route is the
+# vercel-labs/skills installer — it copies the skill + its references:
+#     npx skills add https://github.com/supcon-international/ia2/tree/main/.claude/skills/industrial-automation-skill
+# This script is the one-shot "skill + cs + ia2-server, from a clone" path.
+#
 # This is the DEV-MACHINE installer. (For provisioning a Linux edge box, see
 # infra/install.sh — different thing.)
 #

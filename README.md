@@ -9,24 +9,35 @@ A simple, agent-first IDE + runtime for IEC 61131-3 PLC programming.
 
 ## Install it for your coding agent
 
-IA2 is built so a coding agent drives it. Point your agent (Claude Code, Codex, Cursor…) at this repo and say:
+IA2 is built so a coding agent drives it (Claude Code, Cursor, Codex…). Just tell yours:
 
 > **"Install the industrial-automation-skill from https://github.com/supcon-international/ia2"**
 
-It will run the steps below — or do them yourself:
+and it will do the two steps below — the **skill** (teaches it to drive IA2) and the **binaries** (`cs` + `ia2-server`, which the skill drives).
+
+### 1. The skill — `npx skills` (recommended)
+
+```bash
+npx skills add https://github.com/supcon-international/ia2/tree/main/.claude/skills/industrial-automation-skill
+```
+
+That's the [vercel-labs/skills](https://github.com/vercel-labs/skills) installer — it drops the skill **and its `references/` + `checklists/`** into `.claude/skills/`. Add `-g` to install for every project, `-a claude-code` to pin the agent.
+
+### 2. The binaries — `cs` + `ia2-server`
+
+The skill drives a small Rust CLI and a local server. Build them once (needs the Rust toolchain — [rustup.rs](https://rustup.rs)):
 
 ```bash
 git clone --recursive https://github.com/supcon-international/ia2
-cd ia2
-./scripts/install-skill.sh
+cd ia2 && ./scripts/install-skill.sh
 ```
 
-`scripts/install-skill.sh` builds the `cs` CLI + `ia2-server` (needs the Rust toolchain — [rustup.rs](https://rustup.rs)), installs them to `~/.local/bin`, and drops the **`industrial-automation-skill`** into `~/.claude/skills/`. Then:
+`scripts/install-skill.sh` builds `cs` + `ia2-server` into `~/.local/bin` (it also installs the skill, so it's a one-shot alternative to step 1). Then:
 
 1. **Start the server:** `ia2-server --bind 127.0.0.1:3001 &`
 2. **Restart your agent session** so it discovers the skill.
 
-Now just ask your agent to build a PLC program — it will author ST / LD / FBD / SFC, compile, wire Modbus / EtherCAT I/O, run and debug the scan loop, and deploy to edge boxes, all through `cs`. Start with `cs --help` and the skill under `~/.claude/skills/industrial-automation-skill/`.
+Now just ask your agent to build a PLC program — it will author ST / LD / FBD / SFC, compile, wire Modbus / EtherCAT I/O, run and debug the scan loop, and deploy to edge boxes, all through `cs`. Start with `cs --help` and the skill under `.claude/skills/industrial-automation-skill/`.
 
 ## What's in the box
 

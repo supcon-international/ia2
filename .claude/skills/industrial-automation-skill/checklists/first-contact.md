@@ -9,7 +9,9 @@ command -v cs && cs --version     # the installer puts cs in ~/.local/bin (on PA
 ls ./target/release/cs            # ...or it's the build output, if you're in a checkout
 ```
 - On `$PATH` → use `cs`.
-- Only in a checkout → use `./target/release/cs`, or `cargo build -p ia2-cli --release` first if it's missing/stale.
+- In a checkout but no binary → `cargo build -p ia2-cli --release`, then `./target/release/cs`.
+- Skill installed standalone (via `npx skills`), no checkout → clone + build the binaries once:
+  `git clone --recursive https://github.com/supcon-international/ia2 && cd ia2 && ./scripts/install-skill.sh` (puts `cs` + `ia2-server` in `~/.local/bin`).
 - Set `CS=` to whichever you found so every later command is unambiguous.
 
 ## 2. Discover the server URL
