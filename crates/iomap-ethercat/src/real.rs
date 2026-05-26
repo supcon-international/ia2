@@ -414,6 +414,43 @@ fn smol_main(
             }
         };
 
+        // One-time: read + log the CoE PDO mapping (0x1C12 RxPDO-assign /
+        // 0x1C13 TxPDO-assign -> 0x16xx / 0x1Axx entries). Surfaces the exact
+        // byte offset of controlword / target_velocity / statusword / etc. in
+        // the logs, so iomap channels are configured off the real layout
+        // rather than guessed. Reads happen in PRE-OP where CoE is available.
+        for sd in group.iter(&maindevice) {
+            for (assign, dir) in [(0x1C12u16, "out/rxpdo"), (0x1C13u16, "in/txpdo")] {
+                let count: u8 = sd.sdo_read(assign, 0u8).await.unwrap_or(0);
+                let mut bit_off: u32 = 0;
+                for i in 1..=count {
+                    let pdo: u16 = match sd.sdo_read(assign, i).await {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    let entries: u8 = sd.sdo_read(pdo, 0u8).await.unwrap_or(0);
+                    for j in 1..=entries {
+                        let entry: u32 = match sd.sdo_read(pdo, j).await {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+                        let obj = (entry >> 16) as u16;
+                        let sub = ((entry >> 8) & 0xff) as u8;
+                        let bits = (entry & 0xff) as u8;
+                        tracing::info!(
+                            dir,
+                            pdo = format!("{pdo:#06x}"),
+                            obj = format!("{obj:#06x}:{sub:02x}"),
+                            bits,
+                            byte = bit_off / 8,
+                            "pdo entry"
+                        );
+                        bit_off += bits as u32;
+                    }
+                }
+            }
+        }
+
         let sync0 = Duration::from_micros(cycle_us as u64);
 
         match dc_sync {
