@@ -35,7 +35,7 @@ pub use paths::{
 pub use sfc::{SfcAction, SfcProgram, SfcQualifier, SfcStep, SfcTransition};
 pub use store::{MigrationReport, ProjectStore};
 pub use types::{
-    Device, Direction, Edge, EthercatChannel, EthercatConfig, EthercatDataType,
+    Device, Direction, Edge, EthercatChannel, EthercatConfig, EthercatDataType, EthercatDcSync,
     EthercatPdoDirection, EthercatSlave, IoMap, Mapping, ModbusChannel, ModbusChannelKind,
     ModbusConfig, ModbusDataBits, ModbusParity, ModbusRtuParams, ModbusStopBits, ModbusTcpParams,
     ModbusTransport, Pou, PouDecl, PouFile, PouFileSource, PouLanguage, PouType, ProgramInstance,

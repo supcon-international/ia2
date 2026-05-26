@@ -41,9 +41,11 @@ use std::thread;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ethercrab::{std::ethercat_now, MainDevice, MainDeviceConfig, PduStorage, Timeouts};
+use ethercrab::std::ethercat_now;
+use ethercrab::subdevice_group::DcConfiguration;
+use ethercrab::{DcSync, MainDevice, MainDeviceConfig, PduStorage, Timeouts};
 use iocore::{ChannelValue, IoDevice, IoError};
-use project::{EthercatChannel, EthercatConfig, EthercatPdoDirection};
+use project::{EthercatChannel, EthercatConfig, EthercatDcSync, EthercatPdoDirection};
 
 use crate::bits;
 use crate::SlaveDiscovery;
@@ -58,6 +60,80 @@ const MAX_FRAMES: usize = 16;
 const PDI_LEN: usize = 256;
 
 type Storage = PduStorage<MAX_FRAMES, MAX_PDU_DATA>;
+
+// These three macros share the per-cycle / discovery logic between the DC
+// (`Sync0`) and free-run (`Off`) paths in `smol_main`. They're macros, not
+// generic fns, to sidestep the `SubDeviceGroup` typestate generics (HasDc
+// vs NoDc are distinct types) without duplicating ~40 lines twice.
+
+/// Walk the OP group, size the PDI mirror, log + return the discovered
+/// SubDevices.
+macro_rules! capture_discovery {
+    ($group:expr, $maindevice:expr, $pdi:expr) => {{
+        let mut discovered: Vec<SlaveDiscovery> = Vec::new();
+        {
+            let mut mirror = $pdi.lock().expect("pdi mirror poisoned");
+            for (offset_idx, sd) in $group.iter(&$maindevice).enumerate() {
+                let io = sd.io_raw();
+                let in_len = io.inputs().len();
+                let out_len = io.outputs().len();
+                let idx = offset_idx as u16;
+                mirror.inputs.insert(idx, vec![0u8; in_len]);
+                mirror.outputs.insert(idx, vec![0u8; out_len]);
+                discovered.push(SlaveDiscovery {
+                    index: idx,
+                    name: sd.name().to_string(),
+                    input_bytes: in_len as u16,
+                    output_bytes: out_len as u16,
+                    vendor_id: sd.identity().vendor_id,
+                    product_id: sd.identity().product_id,
+                });
+            }
+        }
+        for sd in &discovered {
+            tracing::info!(
+                slave = sd.index,
+                sd_name = %sd.name,
+                vendor = format!("{:#010x}", sd.vendor_id),
+                product = format!("{:#010x}", sd.product_id),
+                in_bytes = sd.input_bytes,
+                out_bytes = sd.output_bytes,
+                "discovered subdevice"
+            );
+        }
+        discovered
+    }};
+}
+
+/// Pre-cycle: copy our owned output bytes onto the bus surface.
+macro_rules! copy_outputs_to_bus {
+    ($group:expr, $maindevice:expr, $pdi:expr) => {{
+        let mirror = $pdi.lock().expect("pdi mirror poisoned");
+        for (offset_idx, sd) in $group.iter(&$maindevice).enumerate() {
+            let idx = offset_idx as u16;
+            if let Some(src) = mirror.outputs.get(&idx) {
+                let mut out = sd.outputs_raw_mut();
+                let n = out.len().min(src.len());
+                out[..n].copy_from_slice(&src[..n]);
+            }
+        }
+    }};
+}
+
+/// Post-cycle: snapshot inputs back into our mirror.
+macro_rules! copy_inputs_from_bus {
+    ($group:expr, $maindevice:expr, $pdi:expr) => {{
+        let mut mirror = $pdi.lock().expect("pdi mirror poisoned");
+        for (offset_idx, sd) in $group.iter(&$maindevice).enumerate() {
+            let idx = offset_idx as u16;
+            let inputs = sd.inputs_raw();
+            if let Some(dst) = mirror.inputs.get_mut(&idx) {
+                let n = inputs.len().min(dst.len());
+                dst[..n].copy_from_slice(&inputs[..n]);
+            }
+        }
+    }};
+}
 
 /// Per-slave byte mirrors of the PDI. Indexed by `EthercatSlave.index`
 /// (which matches the auto-incremented bus position ethercrab assigns).
@@ -126,13 +202,14 @@ impl RealEthercat {
 
         let nic = config.nic.clone();
         let cycle_us = config.cycle_us.max(100); // hard floor: don't melt the CPU
+        let dc_sync = config.dc_sync;
         let pdi_clone = pdi.clone();
         let shutdown_clone = shutdown.clone();
         let thread_name = format!("ec-{name}");
 
         let thread = thread::Builder::new()
             .name(thread_name)
-            .spawn(move || smol_main(&nic, cycle_us, pdi_clone, shutdown_clone, init_tx))
+            .spawn(move || smol_main(&nic, cycle_us, dc_sync, pdi_clone, shutdown_clone, init_tx))
             .map_err(|e| IoError::Connect(format!("spawn ethercat thread: {e}")))?;
 
         // Wait for the worker to report success or failure. The init walk
@@ -156,17 +233,6 @@ impl RealEthercat {
                     discovered = discovered.len(),
                     "ethercat device live"
                 );
-                for sd in &discovered {
-                    tracing::info!(
-                        slave = sd.index,
-                        sd_name = %sd.name,
-                        vendor = format!("{:#010x}", sd.vendor_id),
-                        product = format!("{:#010x}", sd.product_id),
-                        in_bytes = sd.input_bytes,
-                        out_bytes = sd.output_bytes,
-                        "discovered subdevice"
-                    );
-                }
                 Ok(Self {
                     name,
                     channels,
@@ -278,6 +344,7 @@ impl IoDevice for RealEthercat {
 fn smol_main(
     nic: &str,
     cycle_us: u32,
+    dc_sync: EthercatDcSync,
     pdi: Arc<Mutex<PdiMirror>>,
     shutdown: Arc<AtomicBool>,
     init_tx: mpsc::SyncSender<InitResult>,
@@ -336,7 +403,7 @@ fn smol_main(
         });
 
         // Walk the bus and assign each SubDevice an auto-increment address.
-        let group = match maindevice
+        let mut group = match maindevice
             .init_single_group::<MAX_SUBDEVICES, PDI_LEN>(ethercat_now)
             .await
         {
@@ -347,83 +414,138 @@ fn smol_main(
             }
         };
 
-        // PRE-OP → OP transition. ethercrab handles SafeOp internally.
-        let group = match group.into_op(&maindevice).await {
-            Ok(g) => g,
-            Err(e) => {
-                let _ = init_tx.send(InitResult::Err(format!("into_op (PRE-OP -> OP): {e:?}")));
-                return;
-            }
-        };
+        let sync0 = Duration::from_micros(cycle_us as u64);
 
-        // Discovery report + size the PDI mirror.
-        let mut discovered: Vec<SlaveDiscovery> = Vec::new();
-        {
-            let mut mirror = pdi.lock().expect("pdi mirror poisoned");
-            for (offset_idx, sd) in group.iter(&maindevice).enumerate() {
-                let io = sd.io_raw();
-                let in_len = io.inputs().len();
-                let out_len = io.outputs().len();
-                let idx = offset_idx as u16;
-                mirror.inputs.insert(idx, vec![0u8; in_len]);
-                mirror.outputs.insert(idx, vec![0u8; out_len]);
-                discovered.push(SlaveDiscovery {
-                    index: idx,
-                    name: sd.name().to_string(),
-                    input_bytes: in_len as u16,
-                    output_bytes: out_len as u16,
-                    vendor_id: sd.identity().vendor_id,
-                    product_id: sd.identity().product_id,
-                });
+        match dc_sync {
+            EthercatDcSync::Sync0 => {
+                // Servo drives (e.g. Inovance SV660N) need DC SYNC0 to reach
+                // OP. Enable SYNC0 on every SubDevice, configure the group
+                // DC, then *request* OP and cycle tx_rx_dc until all OP — a
+                // blocking into_op() doesn't pump PDI, so the drive's
+                // SyncManager watchdog would trip during SAFE-OP -> OP.
+                for mut subdevice in group.iter_mut(&maindevice) {
+                    subdevice.set_dc_sync(DcSync::Sync0);
+                }
+                let group = match group.into_pre_op_pdi(&maindevice).await {
+                    Ok(g) => g,
+                    Err(e) => {
+                        let _ = init_tx.send(InitResult::Err(format!(
+                            "into_pre_op_pdi (PRE-OP+PDI): {e:?}"
+                        )));
+                        return;
+                    }
+                };
+                let group = match group
+                    .configure_dc_sync(
+                        &maindevice,
+                        DcConfiguration {
+                            // Start SYNC0 100ms out; period = the cycle; send
+                            // data half-way through the cycle.
+                            start_delay: Duration::from_millis(100),
+                            sync0_period: sync0,
+                            sync0_shift: sync0 / 2,
+                        },
+                    )
+                    .await
+                {
+                    Ok(g) => g,
+                    Err(e) => {
+                        let _ = init_tx.send(InitResult::Err(format!("configure_dc_sync: {e:?}")));
+                        return;
+                    }
+                };
+                let group = match group.request_into_op(&maindevice).await {
+                    Ok(g) => g,
+                    Err(e) => {
+                        let _ = init_tx.send(InitResult::Err(format!(
+                            "request_into_op (-> request OP): {e:?}"
+                        )));
+                        return;
+                    }
+                };
+
+                // Capture discovery before confirming OP so the topology is
+                // visible even if OP never settles.
+                let discovered = capture_discovery!(group, maindevice, pdi);
+
+                // Pump tx_rx_dc until every SubDevice reaches OP (zero
+                // outputs / controlword 0 — nothing moves). Bounded.
+                {
+                    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                    let mut reached_op = false;
+                    while std::time::Instant::now() < deadline {
+                        match group.tx_rx_dc(&maindevice).await {
+                            Ok(resp) => {
+                                if resp.all_op() {
+                                    reached_op = true;
+                                    break;
+                                }
+                            }
+                            Err(e) => tracing::warn!(?e, "tx_rx_dc while waiting for OP"),
+                        }
+                        smol::Timer::after(sync0).await;
+                    }
+                    if !reached_op {
+                        let _ = init_tx.send(InitResult::Err(
+                            "SubDevices did not reach OP within 10s (SyncManager watchdog / DC?)"
+                                .into(),
+                        ));
+                        return;
+                    }
+                    tracing::info!("all subdevices reached OP (dc=sync0)");
+                }
+
+                let _ = init_tx.send(InitResult::Ok { discovered });
+
+                // DC cyclic loop: tx_rx_dc keeps the reference clock synced
+                // and its CycleInfo tells us when to send the next frame
+                // (stays aligned to SYNC0).
+                while !shutdown.load(Ordering::Relaxed) {
+                    let cycle_start = std::time::Instant::now();
+                    copy_outputs_to_bus!(group, maindevice, pdi);
+                    let next_wait = match group.tx_rx_dc(&maindevice).await {
+                        Ok(resp) => {
+                            copy_inputs_from_bus!(group, maindevice, pdi);
+                            resp.extra.next_cycle_wait
+                        }
+                        Err(e) => {
+                            tracing::warn!(?e, "ethercat tx_rx_dc failed");
+                            sync0
+                        }
+                    };
+                    smol::Timer::at(cycle_start + next_wait).await;
+                }
+                tracing::info!("ethercat cyclic loop exiting (shutdown signalled)");
+            }
+
+            EthercatDcSync::Off => {
+                // Free-run (no DC): a blocking into_op works for IO couplers
+                // / SubDevices that don't need (or can't do) DC. Then a
+                // fixed-interval tx_rx loop.
+                let group = match group.into_op(&maindevice).await {
+                    Ok(g) => g,
+                    Err(e) => {
+                        let _ =
+                            init_tx.send(InitResult::Err(format!("into_op (PRE-OP -> OP): {e:?}")));
+                        return;
+                    }
+                };
+
+                let discovered = capture_discovery!(group, maindevice, pdi);
+                let _ = init_tx.send(InitResult::Ok { discovered });
+
+                let mut tick = smol::Timer::interval(sync0);
+                use smol::stream::StreamExt;
+                while !shutdown.load(Ordering::Relaxed) {
+                    copy_outputs_to_bus!(group, maindevice, pdi);
+                    if let Err(e) = group.tx_rx(&maindevice).await {
+                        tracing::warn!(?e, "ethercat tx_rx failed");
+                    }
+                    copy_inputs_from_bus!(group, maindevice, pdi);
+                    tick.next().await;
+                }
+                tracing::info!("ethercat cyclic loop exiting (shutdown signalled)");
             }
         }
-        let _ = init_tx.send(InitResult::Ok {
-            discovered: discovered.clone(),
-        });
-
-        // Cyclic loop. We use smol::Timer rather than tokio so we stay
-        // on this thread's reactor. Cycle time is a soft target — under
-        // overload we let the bus pace us via tx_rx().
-        let mut tick = smol::Timer::interval(Duration::from_micros(cycle_us as u64));
-        use smol::stream::StreamExt;
-        while !shutdown.load(Ordering::Relaxed) {
-            // Pre-cycle: copy our owned output bytes onto the bus surface.
-            {
-                let mirror = pdi.lock().expect("pdi mirror poisoned");
-                for (offset_idx, sd) in group.iter(&maindevice).enumerate() {
-                    let idx = offset_idx as u16;
-                    if let Some(src) = mirror.outputs.get(&idx) {
-                        let mut out = sd.outputs_raw_mut();
-                        let n = out.len().min(src.len());
-                        out[..n].copy_from_slice(&src[..n]);
-                    }
-                }
-            }
-
-            // The actual bus exchange.
-            if let Err(e) = group.tx_rx(&maindevice).await {
-                // Don't kill the device on a transient error — log and
-                // re-tick. Persistent failures will show up as stale
-                // mirror values and warning spam, which is the right
-                // signal for the user.
-                tracing::warn!(?e, "ethercat tx_rx failed");
-            }
-
-            // Post-cycle: snapshot inputs back into our mirror.
-            {
-                let mut mirror = pdi.lock().expect("pdi mirror poisoned");
-                for (offset_idx, sd) in group.iter(&maindevice).enumerate() {
-                    let idx = offset_idx as u16;
-                    let inputs = sd.inputs_raw();
-                    if let Some(dst) = mirror.inputs.get_mut(&idx) {
-                        let n = inputs.len().min(dst.len());
-                        dst[..n].copy_from_slice(&inputs[..n]);
-                    }
-                }
-            }
-
-            tick.next().await;
-        }
-        tracing::info!("ethercat cyclic loop exiting (shutdown signalled)");
     });
 }

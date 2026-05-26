@@ -133,6 +133,7 @@ mod tests {
         EthercatConfig {
             nic: SIM_NIC.into(),
             cycle_us: 1_000,
+            dc_sync: project::EthercatDcSync::Off,
             slaves: vec![EthercatSlave {
                 index: 0,
                 name: "EL2008".into(),

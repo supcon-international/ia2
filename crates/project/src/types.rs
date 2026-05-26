@@ -402,6 +402,24 @@ mod modbus_config_compat_tests {
     }
 }
 
+/// Distributed-clock (DC) mode for an EtherCAT bus.
+///
+/// Most servo drives (e.g. Inovance SV660N) **require** DC SYNC0 to reach
+/// the OP state — without it the SAFE-OP→OP transition times out. Simple
+/// IO couplers, by contrast, run fine free-running and some can't be DC-
+/// configured at all. So DC is opt-in per device: `Off` by default (safe
+/// for IO), `Sync0` for drives that need it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum EthercatDcSync {
+    /// Free-running — no distributed clocks. Default.
+    #[default]
+    Off,
+    /// Enable the SYNC0 pulse on every SubDevice (period = `cycle_us`).
+    Sync0,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct EthercatConfig {
@@ -409,9 +427,14 @@ pub struct EthercatConfig {
     /// Persisted so the IDE can preserve the user's intent even on hosts
     /// where the NIC isn't currently up.
     pub nic: String,
-    /// DC SYNC0 cycle time in microseconds. Defaults to 1 ms (1 kHz).
+    /// SYNC0 cycle time in microseconds (also the free-run scan period when
+    /// `dc_sync` is `Off`). Defaults to 1 ms (1 kHz).
     #[serde(default = "default_cycle_us")]
     pub cycle_us: u32,
+    /// Distributed-clock mode. `Off` (free-run) by default; set to `sync0`
+    /// for servo drives that need DC to reach OP.
+    #[serde(default)]
+    pub dc_sync: EthercatDcSync,
     /// Bus topology — describes the SubDevices the MainDevice expects to
     /// find on the ring. Order matters: the `index` here is the auto-
     /// incremented 0-based position on the bus, matching how ethercrab

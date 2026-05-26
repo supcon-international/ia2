@@ -73,6 +73,7 @@ The transport is a **tagged union** on `kind`. This is the post-RTU schema; old 
   "protocol": "ethercat",
   "nic": "_sim",
   "cycle_us": 1000,
+  "dc_sync": "off",
   "slaves": [
     { "index": 0, "name": "EK1100", "vendor_id": 2, "product_id": 72100946 },
     { "index": 1, "name": "EL2008", "vendor_id": 2, "product_id": 131608658 }
@@ -88,6 +89,7 @@ The transport is a **tagged union** on `kind`. This is the post-RTU schema; old 
 ```
 
 - `nic`: `"_sim"` (or `""`) → in-memory simulator, runs anywhere (macOS dev, CI). Any real interface name (`"eth0"`, `"en7"`) → real `ethercrab` master. **Real mode is Linux + `CAP_NET_RAW` only.**
+- `dc_sync` (default `"off"`): Distributed-clock mode. `"off"` = free-run (right for IO couplers / simple slaves). `"sync0"` = enable the SYNC0 pulse (period = `cycle_us`) — **servo drives like the Inovance SV660N need this to reach OP**; without it the SAFE-OP→OP transition times out. Don't set `sync0` on slaves that don't support DC (it'll fail to configure).
 - `direction`: `tx_pdo` (slave→master, i.e. an **input** to your program) | `rx_pdo` (master→slave, an **output**).
 - `data_type`: `bool` `u8` `i8` `u16` `i16` `u32` `i32` `real`.
 - `pdi_byte_offset` / `pdi_bit_offset`: where this entry sits in the slave's process-data image. **Required for real hardware**; you read these off the slave's ESI/datasheet. Sim mode ignores them. `bit_length < 8` channels (digital I/O packed into a byte) use the bit offset.
