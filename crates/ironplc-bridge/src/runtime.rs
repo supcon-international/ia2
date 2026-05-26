@@ -168,13 +168,48 @@ pub struct ProgramHandle {
     /// set once after the initial connect pass. Shared so the HTTP layer
     /// can serve /discover without a scan-loop round-trip.
     device_reports: Arc<std::sync::Mutex<Vec<DeviceReport>>>,
+    /// The scan thread's join handle, shared so `shutdown` can join it
+    /// from any clone. `Some` until the first `shutdown` takes it. Joining
+    /// is how a caller waits for the always-run failsafe pass + per-device
+    /// teardown (EtherCAT thread join) to actually finish.
+    thread: Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>>,
 }
 
 impl ProgramHandle {
     /// Cooperative stop. The scan loop checks the flag at the top of each
     /// round; expect a few extra rounds before it actually exits.
+    ///
+    /// Fire-and-forget: returns immediately, doesn't wait for the failsafe
+    /// pass. Use `shutdown` when you need the plant guaranteed safe before
+    /// proceeding (clean process exit).
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
+    }
+
+    /// Graceful, awaitable stop for a clean process exit. Requests stop,
+    /// then JOINS the scan thread — which runs its always-on failsafe pass
+    /// (zero every device's outputs) and each device's `shutdown` (joining
+    /// the EtherCAT cyclic worker so the zeroed controlword is on the wire)
+    /// before it returns. When this completes, outputs are in failsafe.
+    ///
+    /// Unlike `stop`, this waits for completion, so the runtime can drive
+    /// the plant safe before exiting rather than racing the service
+    /// supervisor's kill timeout. The join runs on a blocking thread so
+    /// this is safe to call from any async runtime. Idempotent: the first
+    /// caller joins; later calls are no-ops.
+    pub async fn shutdown(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+        let handle = self.thread.lock().ok().and_then(|mut g| g.take());
+        let Some(handle) = handle else { return };
+        match tokio::task::spawn_blocking(move || handle.join()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                tracing::error!(
+                    "scan thread panicked during shutdown (outputs were failsafed first)"
+                )
+            }
+            Err(e) => tracing::error!(%e, "failed to join scan thread on shutdown"),
+        }
     }
 
     /// Subscribe to the per-cycle VarSnapshot stream.
@@ -370,6 +405,49 @@ pub fn spawn_with_options(
     mappings: Vec<Mapping>,
     options: SpawnOptions,
 ) -> ProgramHandle {
+    spawn_inner(
+        container,
+        DeviceSource::Specs(device_specs),
+        mappings,
+        options,
+    )
+}
+
+/// Where the scan thread gets its `IoDevice`s. Production always connects
+/// from `DeviceSpec`s; tests inject pre-built devices so the failsafe /
+/// shutdown sequencing can be asserted without real hardware.
+enum DeviceSource {
+    Specs(Vec<DeviceSpec>),
+    #[cfg(test)]
+    Prebuilt(Vec<Box<dyn IoDevice>>),
+}
+
+async fn acquire_devices(source: DeviceSource) -> (Vec<Box<dyn IoDevice>>, Vec<DeviceReport>) {
+    match source {
+        DeviceSource::Specs(specs) => connect_devices(specs).await,
+        #[cfg(test)]
+        DeviceSource::Prebuilt(devices) => {
+            let reports = devices
+                .iter()
+                .map(|d| DeviceReport {
+                    name: d.name().to_string(),
+                    protocol: "mock".into(),
+                    connected: true,
+                    error: None,
+                    slaves: Vec::new(),
+                })
+                .collect();
+            (devices, reports)
+        }
+    }
+}
+
+fn spawn_inner(
+    container: Container,
+    device_source: DeviceSource,
+    mappings: Vec<Mapping>,
+    options: SpawnOptions,
+) -> ProgramHandle {
     let SpawnOptions {
         scan_interval_ms,
         retain_vars,
@@ -394,7 +472,7 @@ pub fn spawn_with_options(
     let device_reports_clone = device_reports.clone();
     let scan_interval = Duration::from_millis(scan_interval_ms.max(1));
 
-    std::thread::spawn(move || {
+    let join_handle = std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -410,7 +488,7 @@ pub fn spawn_with_options(
             // that, no matter how the loop exits (clean stop, VM trap,
             // or panic), we still own the `devices` vec and can drive
             // every output to its safe state.
-            let (mut devices, reports) = connect_devices(device_specs).await;
+            let (mut devices, reports) = acquire_devices(device_source).await;
             if let Ok(mut slot) = device_reports_clone.lock() {
                 *slot = reports;
             }
@@ -448,12 +526,20 @@ pub fn spawn_with_options(
                     tracing::warn!(device = %dev.name(), %e, "failsafe call failed");
                 }
             }
-            // Give real EtherCAT one extra cycle to actually push the
-            // zeros onto the bus before its worker thread exits via
-            // Drop. Conservative 50 ms covers cycle_us up to 25 ms; we
-            // never run faster than that in practice and the latency
-            // is only paid once on shutdown.
+            // Give an async-flush device (real EtherCAT) a cycle or two to
+            // push the zeros onto the bus. Conservative 50 ms covers
+            // cycle_us up to 25 ms; paid once, on shutdown.
             tokio::time::sleep(Duration::from_millis(50)).await;
+            // Graceful per-device teardown: signal + JOIN any background
+            // I/O thread (the EtherCAT cyclic worker) so the zeroed
+            // controlword is guaranteed on the wire before we exit — not
+            // left to the drive's own watchdog after the master is gone.
+            // Runs on both the clean and panicked paths (before re-panic).
+            for dev in devices.iter_mut() {
+                if let Err(e) = dev.shutdown().await {
+                    tracing::warn!(device = %dev.name(), %e, "device shutdown failed");
+                }
+            }
             match &result {
                 Ok(()) => tracing::info!(
                     devices = dev_count,
@@ -479,6 +565,7 @@ pub fn spawn_with_options(
         mode,
         forces,
         device_reports,
+        thread: Arc::new(std::sync::Mutex::new(Some(join_handle))),
     }
 }
 
@@ -1043,5 +1130,133 @@ fn build_snapshot(
         timestamp_us: now_us,
         scan_count,
         vars,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iocore::IoError;
+
+    /// Records the order of the safety-critical shutdown callbacks so a
+    /// test can assert `enter_failsafe` runs before `shutdown` — the
+    /// sequence that guarantees zeroed outputs reach the wire before a
+    /// device joins its background I/O thread.
+    struct MockDevice {
+        name: String,
+        failsafe_called: Arc<AtomicBool>,
+        shutdown_called: Arc<AtomicBool>,
+        failsafe_before_shutdown: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl IoDevice for MockDevice {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        async fn read_channel(&mut self, _channel: &str) -> Result<ChannelValue, IoError> {
+            Ok(ChannelValue::I32(0))
+        }
+        async fn write_channel(
+            &mut self,
+            _channel: &str,
+            _value: ChannelValue,
+        ) -> Result<(), IoError> {
+            Ok(())
+        }
+        async fn enter_failsafe(&mut self) -> Result<(), IoError> {
+            self.failsafe_called.store(true, Ordering::Relaxed);
+            Ok(())
+        }
+        async fn shutdown(&mut self) -> Result<(), IoError> {
+            if self.failsafe_called.load(Ordering::Relaxed) {
+                self.failsafe_before_shutdown.store(true, Ordering::Relaxed);
+            }
+            self.shutdown_called.store(true, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    fn trivial_container() -> Container {
+        // A PROGRAM that starts cleanly; mirrors the lib.rs test source.
+        crate::compile(
+            "PROGRAM main\n\
+                VAR x : INT := 1; END_VAR\n\
+                x := x + 1;\n\
+            END_PROGRAM",
+        )
+        .expect("trivial program compiles")
+    }
+
+    fn fast_options() -> SpawnOptions {
+        SpawnOptions {
+            scan_interval_ms: 10,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_runs_failsafe_then_device_shutdown_then_joins() {
+        let failsafe_called = Arc::new(AtomicBool::new(false));
+        let shutdown_called = Arc::new(AtomicBool::new(false));
+        let order_ok = Arc::new(AtomicBool::new(false));
+        let dev = MockDevice {
+            name: "mock".into(),
+            failsafe_called: failsafe_called.clone(),
+            shutdown_called: shutdown_called.clone(),
+            failsafe_before_shutdown: order_ok.clone(),
+        };
+        let devices: Vec<Box<dyn IoDevice>> = vec![Box::new(dev)];
+
+        let handle = spawn_inner(
+            trivial_container(),
+            DeviceSource::Prebuilt(devices),
+            Vec::new(),
+            fast_options(),
+        );
+        // Let a few scans run so we're stopping a live loop, not a cold one.
+        tokio::time::sleep(Duration::from_millis(40)).await;
+
+        // The whole drain must finish well within the supervisor budget;
+        // the timeout also keeps a regression from hanging the suite.
+        tokio::time::timeout(Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("shutdown joined the scan thread within 5s");
+
+        assert!(
+            failsafe_called.load(Ordering::Relaxed),
+            "failsafe must run on a clean stop"
+        );
+        assert!(
+            shutdown_called.load(Ordering::Relaxed),
+            "device shutdown must run on a clean stop"
+        );
+        assert!(
+            order_ok.load(Ordering::Relaxed),
+            "failsafe must precede device shutdown so zeroed outputs flush before the join"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_is_idempotent() {
+        let dev = MockDevice {
+            name: "mock".into(),
+            failsafe_called: Arc::new(AtomicBool::new(false)),
+            shutdown_called: Arc::new(AtomicBool::new(false)),
+            failsafe_before_shutdown: Arc::new(AtomicBool::new(false)),
+        };
+        let devices: Vec<Box<dyn IoDevice>> = vec![Box::new(dev)];
+        let handle = spawn_inner(
+            trivial_container(),
+            DeviceSource::Prebuilt(devices),
+            Vec::new(),
+            fast_options(),
+        );
+
+        handle.shutdown().await;
+        // Second call has no thread left to join; must return immediately.
+        tokio::time::timeout(Duration::from_secs(1), handle.shutdown())
+            .await
+            .expect("second shutdown returns immediately");
     }
 }

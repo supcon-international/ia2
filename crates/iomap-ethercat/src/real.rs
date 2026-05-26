@@ -38,7 +38,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::{mpsc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use ethercrab::std::ethercat_now;
@@ -151,16 +151,53 @@ struct PdiMirror {
     outputs: HashMap<u16, Vec<u8>>,
 }
 
+/// Bounded wait for the cyclic worker thread to stop on graceful
+/// shutdown. The loop observes `shutdown` within ~one cycle (plus, at
+/// worst, one ethercrab PDU timeout on a wedged bus), then flushes a
+/// final zeroed frame and exits — comfortably inside this budget. Capped
+/// so a hung bus can't push the whole shutdown past systemd's kill
+/// timeout: if we blow it, we abandon the thread and let process
+/// teardown reap it.
+const WORKER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
+
 pub struct RealEthercat {
     name: String,
     channels: HashMap<String, EthercatChannel>,
     pdi: Arc<Mutex<PdiMirror>>,
     shutdown: Arc<AtomicBool>,
+    /// Flipped by the worker (via a drop guard) on every `smol_main`
+    /// exit path, so `shutdown` can join with a bound instead of risking
+    /// a wait on a thread that's already gone.
+    stopped: Arc<AtomicBool>,
     /// Subdevices found during the bus walk at connect (for `/discover`).
     discovered: Vec<SlaveDiscovery>,
-    // Kept so we don't drop the JoinHandle silently. Not joined on drop —
-    // the cyclic loop exits cooperatively when `shutdown` flips.
+    // The cyclic worker. Joined by `shutdown` on a clean stop (so the
+    // final zeroed frame is guaranteed on the wire); on `Drop` it's only
+    // signalled, not joined — drop can run mid-teardown and must not block.
     _thread: Option<thread::JoinHandle<()>>,
+}
+
+/// Wait up to `timeout` for the worker to flag `stopped`, then join it.
+/// Returns `true` if the thread was joined, `false` if it didn't stop in
+/// time (caller abandons the handle; the process exit reaps the thread).
+/// Sync + bounded so it can run on a blocking pool without ever holding
+/// the shutdown past the service supervisor's deadline.
+fn join_worker(
+    stopped: &AtomicBool,
+    handle: Option<thread::JoinHandle<()>>,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    while !stopped.load(Ordering::Relaxed) {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+    if let Some(handle) = handle {
+        let _ = handle.join();
+    }
+    true
 }
 
 /// Whether the bus-side init succeeded. Sent back over the oneshot.
@@ -198,6 +235,7 @@ impl RealEthercat {
             .collect();
         let pdi = Arc::new(Mutex::new(PdiMirror::default()));
         let shutdown = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::new(AtomicBool::new(false));
         let (init_tx, init_rx) = mpsc::sync_channel::<InitResult>(1);
 
         let nic = config.nic.clone();
@@ -205,11 +243,22 @@ impl RealEthercat {
         let dc_sync = config.dc_sync;
         let pdi_clone = pdi.clone();
         let shutdown_clone = shutdown.clone();
+        let stopped_clone = stopped.clone();
         let thread_name = format!("ec-{name}");
 
         let thread = thread::Builder::new()
             .name(thread_name)
-            .spawn(move || smol_main(&nic, cycle_us, dc_sync, pdi_clone, shutdown_clone, init_tx))
+            .spawn(move || {
+                smol_main(
+                    &nic,
+                    cycle_us,
+                    dc_sync,
+                    pdi_clone,
+                    shutdown_clone,
+                    stopped_clone,
+                    init_tx,
+                )
+            })
             .map_err(|e| IoError::Connect(format!("spawn ethercat thread: {e}")))?;
 
         // Wait for the worker to report success or failure. The init walk
@@ -238,6 +287,7 @@ impl RealEthercat {
                     channels,
                     pdi,
                     shutdown,
+                    stopped,
                     discovered,
                     _thread: Some(thread),
                 })
@@ -255,9 +305,10 @@ impl RealEthercat {
 impl Drop for RealEthercat {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
-        // Don't join — drop can happen during shutdown sequences and we
-        // never want to block the runtime here. The worker exits on the
-        // next cycle tick.
+        // Don't join here — drop can run mid-teardown and must never block
+        // the runtime. The worker exits on the next cycle tick. A clean
+        // stop goes through `shutdown()` instead, which DOES join (after
+        // failsafe) so the zeroed frame is guaranteed on the wire.
     }
 }
 
@@ -336,6 +387,34 @@ impl IoDevice for RealEthercat {
         tracing::info!(device = %self.name, "ethercat output PDI zeroed for failsafe");
         Ok(())
     }
+
+    /// Graceful teardown: signal the cyclic worker to stop and JOIN it.
+    /// By this point `enter_failsafe` has zeroed the output mirror, so the
+    /// worker's final flush (one last `tx_rx`) puts controlword = 0 on the
+    /// wire before it exits. Joining guarantees that frame was sent before
+    /// the master goes away — the whole point of the in-runtime failsafe.
+    /// Bounded so a wedged bus can't stall the process past its kill
+    /// timeout. The join runs on a blocking thread so we don't park the
+    /// async executor on a std thread join.
+    async fn shutdown(&mut self) -> Result<(), IoError> {
+        self.shutdown.store(true, Ordering::Relaxed);
+        let handle = self._thread.take();
+        let stopped = self.stopped.clone();
+        let joined =
+            tokio::task::spawn_blocking(move || join_worker(&stopped, handle, WORKER_JOIN_TIMEOUT))
+                .await
+                .unwrap_or(false);
+        if joined {
+            tracing::info!(device = %self.name, "ethercat cyclic worker joined (final failsafe frame flushed)");
+        } else {
+            tracing::warn!(
+                device = %self.name,
+                timeout_s = WORKER_JOIN_TIMEOUT.as_secs(),
+                "ethercat cyclic worker did not stop in time; abandoning thread (process teardown will reap it)"
+            );
+        }
+        Ok(())
+    }
 }
 
 /// The entire ethercrab session lives inside this function — bus walk,
@@ -347,8 +426,21 @@ fn smol_main(
     dc_sync: EthercatDcSync,
     pdi: Arc<Mutex<PdiMirror>>,
     shutdown: Arc<AtomicBool>,
+    stopped: Arc<AtomicBool>,
     init_tx: mpsc::SyncSender<InitResult>,
 ) {
+    // Flip `stopped` on EVERY exit path (init failure or loop end) via a
+    // drop guard, so a bounded join never waits on a thread that's already
+    // gone. Created first thing so even the early `try_split` error returns
+    // flag completion.
+    struct DoneGuard(Arc<AtomicBool>);
+    impl Drop for DoneGuard {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+    let _done = DoneGuard(stopped);
+
     // One leaked PduStorage per connect. ethercrab requires `&'static`
     // for `try_split`; Box::leak is the textbook idiom. Bounded by the
     // number of EtherCAT devices the user creates per process lifetime,
@@ -552,6 +644,13 @@ fn smol_main(
                     };
                     smol::Timer::at(cycle_start + next_wait).await;
                 }
+                // Final flush before teardown: failsafe has zeroed the
+                // output mirror; push it out once more so the drive latches
+                // controlword = 0 (Disable Voltage) before the thread stops,
+                // instead of de-energizing only via its own SyncManager
+                // watchdog once the master goes away.
+                copy_outputs_to_bus!(group, maindevice, pdi);
+                let _ = group.tx_rx_dc(&maindevice).await;
                 tracing::info!("ethercat cyclic loop exiting (shutdown signalled)");
             }
 
@@ -581,8 +680,68 @@ fn smol_main(
                     copy_inputs_from_bus!(group, maindevice, pdi);
                     tick.next().await;
                 }
+                // Final flush before teardown: failsafe has zeroed the
+                // output mirror; push it out once more so the SubDevices
+                // latch their safe (zero) outputs before the thread stops.
+                copy_outputs_to_bus!(group, maindevice, pdi);
+                let _ = group.tx_rx(&maindevice).await;
                 tracing::info!("ethercat cyclic loop exiting (shutdown signalled)");
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The bus-side paths need a real NIC + CAP_NET_RAW, so these exercise
+    // the bounded-join logic in isolation — that's the part that has to
+    // hold the line on shutdown latency regardless of bus health.
+
+    #[test]
+    fn join_worker_joins_a_thread_that_stops() {
+        let stopped = Arc::new(AtomicBool::new(false));
+        let flag = stopped.clone();
+        let worker = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            flag.store(true, Ordering::Relaxed);
+        });
+
+        let start = Instant::now();
+        assert!(
+            join_worker(&stopped, Some(worker), WORKER_JOIN_TIMEOUT),
+            "should report a successful join once the worker stops"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "join should return promptly after the worker stops"
+        );
+    }
+
+    #[test]
+    fn join_worker_returns_immediately_if_already_stopped() {
+        let stopped = Arc::new(AtomicBool::new(true));
+        let start = Instant::now();
+        // No handle: the common Drop-already-ran case must not block.
+        assert!(join_worker(&stopped, None, WORKER_JOIN_TIMEOUT));
+        assert!(start.elapsed() < Duration::from_millis(50));
+    }
+
+    #[test]
+    fn join_worker_abandons_a_thread_that_never_stops() {
+        let stopped = Arc::new(AtomicBool::new(false));
+        // A worker that outlives the (short) timeout and never flags stop.
+        let worker = thread::spawn(|| thread::sleep(Duration::from_millis(500)));
+
+        let start = Instant::now();
+        assert!(
+            !join_worker(&stopped, Some(worker), Duration::from_millis(40)),
+            "should give up rather than block on a worker that won't stop"
+        );
+        assert!(
+            start.elapsed() < Duration::from_millis(300),
+            "must return shortly after the timeout, not wait out the worker"
+        );
+    }
 }

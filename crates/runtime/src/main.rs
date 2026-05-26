@@ -42,6 +42,13 @@ use tracing_subscriber::EnvFilter;
 
 const DEFAULT_BIND: &str = "127.0.0.1:13001";
 
+/// Upper bound on the graceful bridge drain (stop scan loop -> failsafe ->
+/// join the EtherCAT cyclic thread). Comfortably under systemd's
+/// `TimeoutStopSec=10s` so a clean exit always wins the race against
+/// SIGKILL; if a wedged bus blows this budget we log and exit anyway,
+/// falling back to the drive's own watchdog.
+const BRIDGE_DRAIN_TIMEOUT: Duration = Duration::from_secs(7);
+
 // ============================================================
 //  Log capture — tee tracing output into a ring buffer + a live
 //  broadcast so the monitor server can surface it (GET /logs and
@@ -435,21 +442,46 @@ async fn main() -> Result<()> {
         .with_context(|| format!("binding {}", args.bind))?;
     tracing::info!(addr = %args.bind, "monitor server listening");
 
-    // Serve until SIGTERM / SIGINT / POST /stop.
-    let server = async move {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(wait_for_shutdown(shutdown))
-            .await
-    };
-    let server_result = server.await;
-    // Bridge is parked on its own std::thread + tokio current_thread runtime;
-    // request_stop sets the AtomicBool the scan loop polls each round.
-    tracing::info!("stop requested; draining bridge");
-    handle.stop();
-    // Give the scan loop a moment to flush; it's cooperative — no hard kill.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Run the HTTP server as a background task. We deliberately do NOT gate
+    // shutdown on it via `with_graceful_shutdown`: the long-lived SSE
+    // streams (/events, /logs/stream) never end on their own, so graceful
+    // shutdown would block on them — which previously stalled the whole
+    // process past systemd's TimeoutStopSec and got us SIGKILLed *before*
+    // the failsafe ran (so a connected servo only de-energized via its own
+    // bus watchdog). Instead we own the shutdown sequence below: drive the
+    // safety-critical bridge drain first, then drop the server.
+    let server_task = tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, app).await {
+            tracing::error!(%e, "monitor server error");
+        }
+    });
+
+    // Block until SIGTERM / SIGINT / POST /stop.
+    wait_for_shutdown(shutdown).await;
+
+    // ---- Safety-critical shutdown ----
+    // Stop the scan loop, drive every device to failsafe (zero outputs —
+    // for a servo that's controlword=0 / Disable Voltage), and JOIN the
+    // EtherCAT cyclic thread so that zeroed frame is actually on the wire
+    // before we exit. `handle.shutdown()` blocks until the scan thread has
+    // done all of that. Bounded so a wedged bus can't hold us past the
+    // service supervisor's kill timeout.
+    tracing::info!(
+        "shutdown signalled; draining bridge (stop scan loop -> failsafe -> join fieldbus)"
+    );
+    match tokio::time::timeout(BRIDGE_DRAIN_TIMEOUT, handle.shutdown()).await {
+        Ok(()) => tracing::info!("bridge drained; outputs in failsafe"),
+        Err(_) => tracing::error!(
+            timeout_s = BRIDGE_DRAIN_TIMEOUT.as_secs(),
+            "bridge drain timed out; exiting anyway (outputs fall back to the drive watchdog)"
+        ),
+    }
+
+    // The server has done its job; stop accepting and drop any in-flight
+    // SSE connections. Clients on the SSH tunnel handle the disconnect.
+    server_task.abort();
     tracing::info!("ia2-runtime exiting");
-    server_result.map_err(Into::into)
+    Ok(())
 }
 
 /// Composite shutdown signal: any of SIGTERM, SIGINT, or POST /stop.

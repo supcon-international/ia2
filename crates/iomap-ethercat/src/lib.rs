@@ -113,6 +113,18 @@ impl IoDevice for EthercatDevice {
             Inner::Real(r) => r.enter_failsafe().await,
         }
     }
+
+    /// Forward to the inner device. This MUST exist: the bridge boxes the
+    /// façade, not the concrete device, so without an explicit forward the
+    /// trait's no-op default would silently swallow `RealEthercat`'s
+    /// signal-and-join — and the cyclic thread would never be joined on a
+    /// clean stop (the whole point of the graceful-shutdown path).
+    async fn shutdown(&mut self) -> Result<(), IoError> {
+        match &mut self.0 {
+            Inner::Sim(s) => s.shutdown().await,
+            Inner::Real(r) => r.shutdown().await,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -221,5 +233,16 @@ mod tests {
         // confirm the read still succeeds (i.e. the channel still exists
         // and wasn't accidentally deleted).
         let _ = dev.read_channel("in_estop").await.unwrap();
+
+        // The façade must forward `shutdown` to the inner device (sim's
+        // no-op here): it should succeed and leave the failsafed outputs
+        // untouched. This guards the forwarding arm that, for the real
+        // device, is what joins the cyclic thread.
+        dev.shutdown().await.unwrap();
+        assert_eq!(
+            dev.read_channel("out_motor").await.unwrap().to_i32(),
+            0,
+            "outputs stay zeroed across shutdown"
+        );
     }
 }

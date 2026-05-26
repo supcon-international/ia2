@@ -75,4 +75,24 @@ pub trait IoDevice: Send {
     async fn enter_failsafe(&mut self) -> Result<(), IoError> {
         Ok(())
     }
+
+    /// Wind the device down for a clean process exit. Called once by the
+    /// bridge on graceful shutdown, AFTER `enter_failsafe`, so an
+    /// implementation can flush its now-safe outputs and join any
+    /// background I/O thread it owns before the process goes away.
+    ///
+    /// This is what lets the in-runtime failsafe actually reach the wire:
+    /// e.g. the EtherCAT adapter runs its cyclic exchange on a dedicated
+    /// thread, so it signals + joins that thread here to guarantee the
+    /// zeroed outputs (controlword = 0) are transmitted before teardown,
+    /// rather than relying on the drive's own watchdog after the master
+    /// is killed.
+    ///
+    /// Implementations MUST be bounded — the runtime only has a few
+    /// seconds before the service supervisor force-kills it. Default impl
+    /// is a no-op for devices with no background work to wind down (e.g.
+    /// sim, or Modbus whose `enter_failsafe` already wrote synchronously).
+    async fn shutdown(&mut self) -> Result<(), IoError> {
+        Ok(())
+    }
 }
