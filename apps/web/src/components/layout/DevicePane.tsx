@@ -17,6 +17,7 @@ import type { Device } from "@/types/generated/Device"
 import type { Direction } from "@/types/generated/Direction"
 import type { EthercatChannel } from "@/types/generated/EthercatChannel"
 import type { EthercatDataType } from "@/types/generated/EthercatDataType"
+import type { EthercatDcSync } from "@/types/generated/EthercatDcSync"
 import type { EthercatPdoDirection } from "@/types/generated/EthercatPdoDirection"
 import type { EthercatSlave } from "@/types/generated/EthercatSlave"
 import type { IoMap } from "@/types/generated/IoMap"
@@ -773,6 +774,32 @@ function EthercatDeviceEditor({
                 }
               />
             </Field>
+            <Field label="Distributed clock (DC)">
+              <Select
+                value={draft.dc_sync ?? "off"}
+                onValueChange={(v) => update({ dc_sync: v as EthercatDcSync })}
+              >
+                <SelectTrigger className="h-9 w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="off">Off (free-run)</SelectItem>
+                  <SelectItem value="sync0">SYNC0</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+            <div className="col-span-2 flex items-start gap-2 text-[11px] text-muted-foreground">
+              <Info className="mt-0.5 size-3 shrink-0" />
+              <span>
+                <span className="font-mono">SYNC0</span> enables the
+                distributed-clock pulse (period = cycle time) — servo drives
+                (e.g. Inovance SV660N) need it to reach{" "}
+                <span className="font-mono">OP</span>. Leave{" "}
+                <span className="font-mono">Off</span> for simple I/O couplers;
+                enabling DC on a slave that doesn't support it fails to
+                configure.
+              </span>
+            </div>
           </div>
         </section>
 
