@@ -11,9 +11,10 @@ The CLI is **designed for you**, not for human shells. Most flags exist so you d
 
 ## How to use this skill
 
-1. **First contact in a session** — run through `checklists/first-contact.md`. Two things you must know before any work:
-   - Where is the server? (`cs` defaults to `http://127.0.0.1:3001`, but `IA2.app` binds ephemeral ports — discover via `lsof` / `curl` scan)
-   - Which projects are open? (`cs project list` to see; use `--project NAME` if more than one)
+1. **First contact in a session** — run through `checklists/first-contact.md`. Three things to settle before any work:
+   - **Is the toolchain installed?** `cs` + `ia2-server` are Rust binaries this skill drives. If the skill was installed standalone (via `npx skills`) and `cs` isn't on `PATH`, build them once: `git clone --recursive https://github.com/supcon-international/ia2 && cd ia2 && ./scripts/install-skill.sh` (needs the Rust toolchain — rustup.rs).
+   - **Where is the server?** `cs` defaults to `http://127.0.0.1:3001`; if nothing answers `/api/health`, start one headless: `ia2-server --bind 127.0.0.1:3001 &`. (`IA2.app` binds ephemeral ports — discover via `lsof` / `curl` scan.)
+   - **Which projects are open?** `cs project list`; pass `--project NAME` if more than one.
 2. **For any multi-step work, wrap it in a session.** This is not optional. See `references/03-agent-sessions.md`:
    ```
    cs agent run --label "what I'm doing" --server "$SRV" -- bash -c '
