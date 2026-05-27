@@ -48,7 +48,7 @@ Now just ask your agent to build a PLC program — it will author ST / LD / FBD 
 | **`crates/server/`** | Rust + axum + tower | HTTP backend (port 3001 dev, random in desktop). REST + SSE. Owns the project, dispatches to ironplc-bridge, schedules tasks. |
 | **`crates/cli/`** | Rust + clap + ureq | The `cs` binary — agent-first command-line. Static analysis, project CRUD, runtime debug. See `cs --help`. |
 | **`crates/ironplc-bridge/`** | Rust | Wraps vendored [ironplc](https://github.com/ironplc/ironplc) compiler + VM. Adds LD / FBD / SFC → ST transpilers + diagnostics enrichment. |
-| **`crates/runtime/`** | Rust | Headless edge runtime (`ia2-runtime` binary). Same scan loop as the IDE-side bridge but with no HTTP / LSP / CORS — designed for Linux edge boxes. |
+| **`crates/runtime/`** | Rust | Headless edge runtime (`ia2-runtime` binary). Same scan loop as the IDE-side bridge, plus a small HTTP monitor (health / status / logs / discover) the server reaches over SSH — no LSP, no CORS, no REST project API. Designed for Linux edge boxes. |
 | **`crates/project/`** | Rust | On-disk project schema (POU files, devices, edges, iomap, tasks). |
 | **`crates/iomap-modbus/` `iomap-ethercat/`** | Rust | I/O adapters: Modbus TCP **and RTU/serial** (tokio-modbus + tokio-serial), EtherCAT (ethercrab). |
 | **`vendor/ironplc/`** | git submodule | The compiler + VM. |
@@ -179,10 +179,19 @@ reaching ironplc; the intermediate ST is observable via
 
 ## Edge deployment
 
-`crates/runtime/` builds the `ia2-runtime` binary — headless, no HTTP,
-no LSP. Push it to a Linux edge box, install the systemd unit
-(`infra/ia2.service`), then `Deploy` from the IDE to atomically swap
-projects without restarting the runtime. See `docs/edge-deploy.md`.
+`crates/runtime/` builds the `ia2-runtime` binary — headless, designed
+for Linux edge boxes. Install the systemd unit (`infra/ia2.service`);
+its `INSTALL_DIR` is the single source of truth for where the runtime
+and project live, and the edge's `install_dir` must match it (`cs
+deploy` warns on drift). `cs deploy <edge>` then tars the project over
+SSH, swaps the `current` symlink atomically, and restarts the unit.
+
+The server reaches a deployed runtime over `ssh + curl` to its HTTP
+monitor: it tries the configured `runtime_port`, then falls back to
+systemd — the unit's `--bind` port and `ActiveState` — so a wrong or
+changed port (or a stopped service) gives a clear answer instead of a
+blind failure. A transient EtherCAT bring-up timeout is retried rather
+than left dead until a manual restart. See `docs/edge-deploy.md`.
 
 ## Claude Code skill
 
