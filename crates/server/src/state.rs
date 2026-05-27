@@ -382,6 +382,43 @@ impl AppState {
         closed
     }
 
+    /// The current agent-activity state as one `AgentActivity`, for
+    /// replaying to a client the instant it connects to `/api/events`.
+    ///
+    /// The SSE stream is delta-only, and agent activity is the one piece
+    /// of live state with **no REST read endpoint** — so without this, a
+    /// reconnecting / late-joining UI (a reloaded window, a second
+    /// window, the desktop webview after a sleep) would not learn about
+    /// an already-open takeover session until the next change, leaving
+    /// the overlay wrong. Mirrors the event the change-path emits.
+    pub fn current_agent_activity(&self) -> AgentActivity {
+        let s = self.agent.lock().expect("agent mutex");
+        let since_ms = s
+            .last_heartbeat
+            .map(|t| t.elapsed().as_millis() as u64)
+            .unwrap_or(0);
+        match s.session.as_ref() {
+            // An open session wins — its label is what the banner shows.
+            Some(sess) => AgentActivity {
+                active: true,
+                command: None,
+                session: Some(sess.id.clone()),
+                session_label: Some(sess.label.clone()),
+                since_ms,
+            },
+            // No session: reflect the transient-heartbeat state. `active`
+            // may be false — which is exactly what a fresh UI needs so it
+            // does NOT paint a stale overlay.
+            None => AgentActivity {
+                active: s.active,
+                command: s.command.clone(),
+                session: s.session_hint.clone(),
+                session_label: None,
+                since_ms,
+            },
+        }
+    }
+
     /// Fire-and-forget mutation notification scoped to one project.
     /// Called from every CRUD handler after the on-disk write
     /// succeeds. The `project` argument is the project the mutation

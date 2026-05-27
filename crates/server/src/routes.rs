@@ -1628,11 +1628,24 @@ pub async fn demo_slave(State(state): State<AppState>) -> Json<DemoSlaveSnapshot
 pub async fn events(
     State(state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    // Subscribe first, then snapshot — so a change that races the
+    // snapshot lands in the live stream (a duplicate AgentActivity just
+    // repaints identical state; missing one would leave the UI wrong).
     let rx = state.event_tx.subscribe();
-    let stream = TokioStreamExt::filter_map(BroadcastStream::new(rx), |res| match res {
+    // Replay current agent-activity on connect. The stream is delta-only
+    // and agent state has no REST read endpoint, so a reconnecting UI
+    // would otherwise miss an in-progress takeover session until the
+    // next change. (Runtime snapshot/status DO have REST reads, so the
+    // frontend back-fills those on load — only this needs replaying.)
+    let initial = Event::default()
+        .json_data(AppEvent::AgentActivity(state.current_agent_activity()))
+        .ok()
+        .map(Ok);
+    let live = TokioStreamExt::filter_map(BroadcastStream::new(rx), |res| match res {
         Ok(event) => Event::default().json_data(&event).ok().map(Ok),
         Err(_) => None,
     });
+    let stream = FuturesStreamExt::chain(tokio_stream::iter(initial), live);
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
 }
 
