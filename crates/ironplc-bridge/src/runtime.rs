@@ -625,7 +625,29 @@ async fn connect_devices(
                 }
             }
             ProtocolConfig::Ethercat(cfg) => {
-                match iomap_ethercat::EthercatDevice::connect(spec.name.clone(), cfg).await {
+                // The EtherCAT bring-up (init_single_group / DC sync) can
+                // lose the first PDU right after a fresh link/bind and fail
+                // with a transient Timeout(Pdu). A failed connect() exits its
+                // worker thread cleanly, so retry a few times with a short
+                // backoff — otherwise one transient timeout leaves the bus
+                // (and the motor) dead until a manual restart.
+                const MAX_ATTEMPTS: u32 = 3;
+                let mut attempt: u32 = 1;
+                let connected = loop {
+                    match iomap_ethercat::EthercatDevice::connect(spec.name.clone(), cfg).await {
+                        Ok(d) => break Ok(d),
+                        Err(e) if attempt < MAX_ATTEMPTS => {
+                            tracing::warn!(
+                                name = %spec.name, attempt, max = MAX_ATTEMPTS, %e,
+                                "ethercat connect failed; retrying after backoff"
+                            );
+                            tokio::time::sleep(Duration::from_millis(800)).await;
+                            attempt += 1;
+                        }
+                        Err(e) => break Err(e),
+                    }
+                };
+                match connected {
                     Ok(d) => {
                         tracing::info!(name = %spec.name, nic = %cfg.nic, "ethercat connected");
                         // Pull the discovered topology before boxing the

@@ -6,9 +6,13 @@ Wants=network-online.target
 [Service]
 # Atomic deploys point `current` at the latest versioned dir; the runtime
 # binary + project dir always live under there.
+# Single source of truth for the install location: change INSTALL_DIR and
+# both the binary and project paths follow. The edge's configured
+# `install_dir` MUST match this (deploy warns if they drift). systemd
+# expands ${INSTALL_DIR} from Environment= below.
 Environment=INSTALL_DIR=/opt/ia2
-ExecStart=/opt/ia2/current/runtime \
-  --project-dir /opt/ia2/current/project \
+ExecStart=${INSTALL_DIR}/current/runtime \
+  --project-dir ${INSTALL_DIR}/current/project \
   --bind 127.0.0.1:13001
 
 # Restart on crash but back off if we're crash-looping (don't hammer the

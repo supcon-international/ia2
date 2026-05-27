@@ -104,61 +104,165 @@ pub struct EdgeProbe {
     pub error: Option<String>,
 }
 
-/// Run a short `ssh host curl 127.0.0.1:<port>/health` and parse the result.
-/// 5s connect timeout so unreachable boxes don't block the UI for long.
-pub async fn probe_edge(edge: &Edge) -> EdgeProbe {
-    let cmd = format!(
-        "curl --silent --max-time 3 http://127.0.0.1:{}/health",
-        edge.runtime_port
-    );
-    let output = match ssh_cmd(edge).arg(cmd).output().await {
-        Ok(out) => out,
-        Err(e) => {
-            return EdgeProbe {
-                reachable: false,
-                scan_count: None,
-                uptime_secs: None,
-                runtime_version: None,
-                error: Some(format!("spawn ssh failed: {e}")),
-            };
-        }
-    };
+/// systemd unit name for the edge runtime. The unit is the single source
+/// of truth on the box for *where* the runtime listens (its `--bind` port)
+/// and *which* project dir it runs — so when the configured port doesn't
+/// answer we ask systemd rather than failing blind on one fixed port.
+const EDGE_UNIT: &str = "ia2";
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return EdgeProbe {
-            reachable: false,
-            scan_count: None,
-            uptime_secs: None,
-            runtime_version: None,
-            error: Some(first_line(&stderr).to_string()),
-        };
+/// What the box's service manager reports about the runtime. Authoritative:
+/// the edge config's `runtime_port` is only a fast-path hint, so a port/path
+/// drift (or a stopped service) yields a real answer instead of a bare
+/// connection failure.
+#[derive(Debug, Default)]
+struct ServiceState {
+    /// `ActiveState` verbatim (`active`|`inactive`|`failed`|…). Empty when
+    /// systemd or the unit isn't present (non-systemd edge / not installed).
+    active_state: String,
+    /// Port parsed from the unit's ExecStart `--bind 127.0.0.1:PORT`.
+    bind_port: Option<u16>,
+    /// `--project-dir` from ExecStart — lets deploy detect path drift.
+    project_dir: Option<String>,
+}
+
+impl ServiceState {
+    fn is_active(&self) -> bool {
+        self.active_state == "active"
+    }
+}
+
+/// Ask systemd on the edge about the runtime unit (one ssh round-trip).
+/// `systemctl show` prints empty values for an unknown unit and still exits
+/// 0, so we parse defensively and never error on "no such unit".
+async fn query_service(edge: &Edge) -> ServiceState {
+    let cmd =
+        format!("systemctl show {EDGE_UNIT} -p ActiveState -p ExecStart --no-pager 2>/dev/null");
+    let Ok(out) = ssh_cmd(edge).arg(cmd).output().await else {
+        return ServiceState::default();
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut st = ServiceState::default();
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("ActiveState=") {
+            st.active_state = v.trim().to_string();
+        } else if line.starts_with("ExecStart=") {
+            // The value embeds `argv[]=<bin> --project-dir <dir> --bind host:port ; …`.
+            // Scan adjacent tokens for the two flags we care about.
+            let toks: Vec<&str> = line.split_whitespace().collect();
+            for w in toks.windows(2) {
+                match w[0] {
+                    "--bind" => st.bind_port = w[1].rsplit(':').next().and_then(|p| p.parse().ok()),
+                    "--project-dir" => st.project_dir = Some(w[1].to_string()),
+                    _ => {}
+                }
+            }
+        }
+    }
+    st
+}
+
+/// Result of one `ssh host curl …` attempt, split so callers can tell
+/// "the box is unreachable" (ssh) apart from "nothing is listening on that
+/// port" (curl) — the two need very different remedies.
+enum CurlOutcome {
+    Body(String),
+    /// curl ran but couldn't connect (e.g. exit 7) — runtime not on that port.
+    NotListening,
+    SshFailed(String),
+}
+
+async fn run_ssh_curl(edge: &Edge, remote_cmd: &str) -> CurlOutcome {
+    let out = match ssh_cmd(edge).arg(remote_cmd).output().await {
+        Ok(o) => o,
+        Err(e) => return CurlOutcome::SshFailed(format!("spawn ssh: {e}")),
+    };
+    if out.status.success() {
+        return CurlOutcome::Body(String::from_utf8_lossy(&out.stdout).into_owned());
+    }
+    // ssh uses exit 255 for its own connect/auth failures; any other code is
+    // the remote curl's (e.g. 7 = connection refused → nothing on that port).
+    if out.status.code() == Some(255) {
+        CurlOutcome::SshFailed(first_line(&String::from_utf8_lossy(&out.stderr)).to_string())
+    } else {
+        CurlOutcome::NotListening
+    }
+}
+
+/// Reach the edge runtime over ssh+curl without hanging on one fixed port.
+/// Strategy: try the configured port first (the fast common case); if
+/// nothing answers there, consult systemd — is the service even running,
+/// and what port did it actually bind? Returns the body or a layered,
+/// actionable error. `make_cmd(port)` builds the remote curl command.
+async fn edge_runtime_curl(
+    edge: &Edge,
+    make_cmd: impl Fn(u16) -> String,
+) -> Result<String, String> {
+    match run_ssh_curl(edge, &make_cmd(edge.runtime_port)).await {
+        CurlOutcome::Body(b) => return Ok(b),
+        CurlOutcome::SshFailed(e) => return Err(format!("ssh to {} failed: {e}", edge.host)),
+        CurlOutcome::NotListening => {} // fall through to the source of truth
     }
 
-    let body = String::from_utf8_lossy(&output.stdout);
+    let svc = query_service(edge).await;
+    if !svc.is_active() {
+        let state = if svc.active_state.is_empty() {
+            "not installed".to_string()
+        } else {
+            svc.active_state.clone()
+        };
+        return Err(format!(
+            "runtime not reachable on {host}: systemd unit '{EDGE_UNIT}' is {state} \
+             — start it with `sudo systemctl start {EDGE_UNIT}`",
+            host = edge.host,
+        ));
+    }
+    match svc.bind_port {
+        // Active, but on a different port than configured — recover via the real one.
+        Some(p) if p != edge.runtime_port => match run_ssh_curl(edge, &make_cmd(p)).await {
+            CurlOutcome::Body(b) => Ok(b),
+            _ => Err(format!(
+                "'{EDGE_UNIT}' is active on {host} bound to :{p}, but the edge config has \
+                 runtime_port={cfg} and neither answers — reconcile runtime_port with the unit",
+                host = edge.host,
+                cfg = edge.runtime_port,
+            )),
+        },
+        _ => Err(format!(
+            "'{EDGE_UNIT}' is active on {host} but not answering on :{} — health endpoint may be down",
+            edge.runtime_port,
+            host = edge.host,
+        )),
+    }
+}
+
+/// Probe the edge runtime's `/health` (port-resilient — see `edge_runtime_curl`).
+pub async fn probe_edge(edge: &Edge) -> EdgeProbe {
     #[derive(Deserialize)]
     struct Health {
         status: String,
         uptime_secs: u64,
         scan_count: u64,
     }
+    let unreachable = |error: String| EdgeProbe {
+        reachable: false,
+        scan_count: None,
+        uptime_secs: None,
+        runtime_version: None,
+        error: Some(error),
+    };
+    let body = match edge_runtime_curl(edge, |port| {
+        format!("curl --silent --max-time 3 http://127.0.0.1:{port}/health")
+    })
+    .await
+    {
+        Ok(b) => b,
+        Err(e) => return unreachable(e),
+    };
     let Ok(parsed) = serde_json::from_str::<Health>(&body) else {
-        return EdgeProbe {
-            reachable: false,
-            scan_count: None,
-            uptime_secs: None,
-            runtime_version: None,
-            error: Some(format!("unexpected body: {}", first_line(&body))),
-        };
+        return unreachable(format!("unexpected body: {}", first_line(&body)));
     };
     if parsed.status != "ok" {
-        return EdgeProbe {
-            reachable: false,
-            scan_count: None,
-            uptime_secs: None,
-            runtime_version: None,
-            error: Some(format!("runtime not ok: {}", parsed.status)),
-        };
+        return unreachable(format!("runtime not ok: {}", parsed.status));
     }
     EdgeProbe {
         reachable: true,
@@ -179,20 +283,10 @@ pub async fn probe_edge(edge: &Edge) -> EdgeProbe {
 /// can render the EtherCAT discovery / bus-health / connect errors
 /// that otherwise only live in journald on the box.
 pub async fn fetch_edge_logs(edge: &Edge, tail: usize) -> Result<serde_json::Value, String> {
-    let cmd = format!(
-        "curl --silent --max-time 4 'http://127.0.0.1:{}/logs?tail={}'",
-        edge.runtime_port, tail
-    );
-    let output = ssh_cmd(edge)
-        .arg(cmd)
-        .output()
-        .await
-        .map_err(|e| format!("spawn ssh failed: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("edge unreachable: {}", first_line(&stderr)));
-    }
-    let body = String::from_utf8_lossy(&output.stdout);
+    let body = edge_runtime_curl(edge, |port| {
+        format!("curl --silent --max-time 4 'http://127.0.0.1:{port}/logs?tail={tail}'")
+    })
+    .await?;
     serde_json::from_str::<serde_json::Value>(&body)
         .map_err(|e| format!("unexpected /logs body: {} ({e})", first_line(&body)))
 }
@@ -206,20 +300,10 @@ pub async fn fetch_edge_logs(edge: &Edge, tail: usize) -> Result<serde_json::Val
 /// (connect status + discovered EtherCAT slaves) so the IDE can author
 /// PDO maps against the real bus topology.
 pub async fn fetch_edge_discover(edge: &Edge) -> Result<serde_json::Value, String> {
-    let cmd = format!(
-        "curl --silent --max-time 4 http://127.0.0.1:{}/discover",
-        edge.runtime_port
-    );
-    let output = ssh_cmd(edge)
-        .arg(cmd)
-        .output()
-        .await
-        .map_err(|e| format!("spawn ssh failed: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("edge unreachable: {}", first_line(&stderr)));
-    }
-    let body = String::from_utf8_lossy(&output.stdout);
+    let body = edge_runtime_curl(edge, |port| {
+        format!("curl --silent --max-time 4 http://127.0.0.1:{port}/discover")
+    })
+    .await?;
     serde_json::from_str::<serde_json::Value>(&body)
         .map_err(|e| format!("unexpected /discover body: {} ({e})", first_line(&body)))
 }
@@ -229,20 +313,10 @@ pub async fn fetch_edge_discover(edge: &Edge) -> Result<serde_json::Value, Strin
 /// against real edge facts (NIC carrier for EtherCAT, /dev/tty* for
 /// Modbus RTU) rather than guessing.
 pub async fn fetch_edge_system(edge: &Edge) -> Result<serde_json::Value, String> {
-    let cmd = format!(
-        "curl --silent --max-time 4 http://127.0.0.1:{}/system",
-        edge.runtime_port
-    );
-    let output = ssh_cmd(edge)
-        .arg(cmd)
-        .output()
-        .await
-        .map_err(|e| format!("spawn ssh failed: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("edge unreachable: {}", first_line(&stderr)));
-    }
-    let body = String::from_utf8_lossy(&output.stdout);
+    let body = edge_runtime_curl(edge, |port| {
+        format!("curl --silent --max-time 4 http://127.0.0.1:{port}/system")
+    })
+    .await?;
     serde_json::from_str::<serde_json::Value>(&body)
         .map_err(|e| format!("unexpected /system body: {} ({e})", first_line(&body)))
 }
@@ -251,20 +325,10 @@ pub async fn fetch_edge_system(edge: &Edge) -> Result<serde_json::Value, String>
 /// debug mode/forces + the last VarSnapshot (with per-variable types,
 /// which `cs runtime --edge` uses to pack force/write values).
 pub async fn fetch_edge_status(edge: &Edge) -> Result<serde_json::Value, String> {
-    let cmd = format!(
-        "curl --silent --max-time 4 http://127.0.0.1:{}/status",
-        edge.runtime_port
-    );
-    let output = ssh_cmd(edge)
-        .arg(cmd)
-        .output()
-        .await
-        .map_err(|e| format!("spawn ssh failed: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("edge unreachable: {}", first_line(&stderr)));
-    }
-    let body = String::from_utf8_lossy(&output.stdout);
+    let body = edge_runtime_curl(edge, |port| {
+        format!("curl --silent --max-time 4 http://127.0.0.1:{port}/status")
+    })
+    .await?;
     serde_json::from_str::<serde_json::Value>(&body)
         .map_err(|e| format!("unexpected /status body: {} ({e})", first_line(&body)))
 }
@@ -283,21 +347,13 @@ pub async fn post_edge_runtime(
     body: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let body_str = body.to_string().replace('\'', r"'\''");
-    let cmd = format!(
-        "curl --silent --max-time 4 -X POST -H 'Content-Type: application/json' \
-         -d '{}' http://127.0.0.1:{}/{}",
-        body_str, edge.runtime_port, path
-    );
-    let output = ssh_cmd(edge)
-        .arg(cmd)
-        .output()
-        .await
-        .map_err(|e| format!("spawn ssh failed: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("edge unreachable: {}", first_line(&stderr)));
-    }
-    let resp = String::from_utf8_lossy(&output.stdout);
+    let resp = edge_runtime_curl(edge, |port| {
+        format!(
+            "curl --silent --max-time 4 -X POST -H 'Content-Type: application/json' \
+             -d '{body_str}' http://127.0.0.1:{port}/{path}"
+        )
+    })
+    .await?;
     // The edge returns JSON on success; on a 4xx/5xx curl still exits 0
     // and the body is the plain-text error — surface that.
     serde_json::from_str::<serde_json::Value>(&resp)
@@ -427,6 +483,27 @@ pub async fn deploy_to_edge(
         .find_map(|l| l.strip_prefix("VERSION="))
         .unwrap_or("?")
         .to_string();
+
+    // Guard the classic drift: deploying to an `install_dir` the running
+    // service doesn't actually read. systemd is the source of truth — if its
+    // ExecStart runs from a different tree, this deploy is invisible to it.
+    let mut combined = combined;
+    let svc = query_service(edge).await;
+    if let Some(svc_root) = svc
+        .project_dir
+        .as_deref()
+        .map(|pd| pd.strip_suffix("/current/project").unwrap_or(pd))
+    {
+        if svc_root != edge.install_dir {
+            combined = format!(
+                "WARNING: deployed to install_dir={} but systemd '{EDGE_UNIT}' runs from {} — \
+                 the service will NOT see this deploy. Reconcile the edge's install_dir with the \
+                 unit's INSTALL_DIR.\n{}",
+                edge.install_dir, svc_root, combined,
+            );
+        }
+    }
+
     Ok(DeployReport {
         ok: true,
         version,
