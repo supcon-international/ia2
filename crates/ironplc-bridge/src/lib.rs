@@ -458,7 +458,7 @@ pub struct DiagnosticRelated {
 /// (syntax errors, type errors, undeclared identifiers, etc.). Does NOT run
 /// codegen — this is the fast path for editor squiggles.
 pub fn check(source: &str) -> Vec<CheckDiagnostic> {
-    check_inner(source, SourceMapKind::None)
+    check_inner(source, SourceMapKind::None, &[])
 }
 
 /// Like `check`, but for a graphical-language POU: parses the source,
@@ -471,8 +471,43 @@ pub fn check(source: &str) -> Vec<CheckDiagnostic> {
 /// parse (so the editor still gets a squiggle pointing at the broken
 /// document rather than silent failure).
 pub fn check_pou_source(source: &str, language: project::PouLanguage) -> Vec<CheckDiagnostic> {
+    check_pou_source_with_context(source, language, &[])
+}
+
+/// Like `check_pou_source`, but analyses the buffer together with every
+/// other POU in the project, so references to FUNCTION_BLOCKs / FUNCTIONs
+/// declared in sibling files resolve instead of false-positiving
+/// (P2008 "cannot determine kind of type" + the P4012 cascade). This is
+/// what makes a library FB usable from the editor: per-file `cs check`
+/// can't cross-resolve FBs — only a project-wide view can.
+///
+/// Diagnostics are filtered to the checked buffer; context files never
+/// contribute squiggles (the Run/Deploy project compile is the place
+/// that surfaces *their* problems). Context files that fail to read or
+/// parse are skipped — a broken sibling then simply leaves its FBs
+/// undeclared, which honestly re-surfaces as P2008 here.
+///
+/// `buffer_path` is the store slug the buffer was loaded from, used to
+/// keep its on-disk copy from double-declaring the same POUs. When the
+/// caller can't name it (older clients), context files declaring any of
+/// the buffer's own POU names are skipped instead.
+pub fn check_pou_in_project(
+    store: &project::ProjectStore,
+    source: &str,
+    language: project::PouLanguage,
+    buffer_path: Option<&str>,
+) -> Vec<CheckDiagnostic> {
+    let context = project_context_libraries(store, source, language, buffer_path);
+    check_pou_source_with_context(source, language, &context)
+}
+
+fn check_pou_source_with_context(
+    source: &str,
+    language: project::PouLanguage,
+    context: &[Library],
+) -> Vec<CheckDiagnostic> {
     match language {
-        project::PouLanguage::St => check(source),
+        project::PouLanguage::St => check_inner(source, SourceMapKind::None, context),
         project::PouLanguage::Ld => {
             let prog: project::LdProgram = match serde_json::from_str(source) {
                 Ok(p) => p,
@@ -482,7 +517,7 @@ pub fn check_pou_source(source: &str, language: project::PouLanguage) -> Vec<Che
                 Ok(pair) => pair,
                 Err(e) => return vec![synthetic_transpile_diag("LD-TRANSPILE", &e)],
             };
-            check_inner(&st, SourceMapKind::Ld(&map))
+            check_inner(&st, SourceMapKind::Ld(&map), context)
         }
         project::PouLanguage::Fbd => {
             let prog: project::FbdProgram = match serde_json::from_str(source) {
@@ -493,7 +528,7 @@ pub fn check_pou_source(source: &str, language: project::PouLanguage) -> Vec<Che
                 Ok(pair) => pair,
                 Err(e) => return vec![synthetic_transpile_diag("FBD-TRANSPILE", &e)],
             };
-            check_inner(&st, SourceMapKind::Fbd(&map))
+            check_inner(&st, SourceMapKind::Fbd(&map), context)
         }
         project::PouLanguage::Sfc => {
             let prog: project::SfcProgram = match serde_json::from_str(source) {
@@ -504,10 +539,77 @@ pub fn check_pou_source(source: &str, language: project::PouLanguage) -> Vec<Che
                 Ok(pair) => pair,
                 Err(e) => return vec![synthetic_transpile_diag("SFC-TRANSPILE", &e)],
             };
-            check_inner(&st, SourceMapKind::Sfc(&map))
+            check_inner(&st, SourceMapKind::Sfc(&map), context)
         }
         _ => Vec::new(),
     }
+}
+
+/// Parse every project POU except the buffer's own file into `Library`
+/// values carrying their store slug as `FileId` — the analyzer keeps
+/// that identity on each diagnostic, which is what lets `check_inner`
+/// filter results back to just the buffer with no line-offset games.
+fn project_context_libraries(
+    store: &project::ProjectStore,
+    buffer_source: &str,
+    buffer_language: project::PouLanguage,
+    buffer_path: Option<&str>,
+) -> Vec<Library> {
+    let Ok(paths) = store.list_pou_paths() else {
+        return Vec::new();
+    };
+    // Identity fallback: with no slug to exclude, skip any context file
+    // that re-declares one of the buffer's own POU names (IEC names are
+    // case-insensitive).
+    let buffer_names: Vec<String> = if buffer_path.is_none() {
+        extract_pou_declarations(buffer_source, buffer_language)
+            .into_iter()
+            .map(|d| d.name.to_lowercase())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let options = CompilerOptions {
+        allow_empty_var_blocks: true,
+        ..Default::default()
+    };
+    let mut out = Vec::new();
+    for path in &paths {
+        if buffer_path == Some(path.as_str()) {
+            continue;
+        }
+        let Ok(language) = store.pou_file_language(path) else {
+            continue;
+        };
+        let Ok(raw) = store.read_pou_source(path) else {
+            continue;
+        };
+        let Ok(st) = source_to_st(&raw, language) else {
+            continue;
+        };
+        let cleaned = strip_any_configuration(&st);
+        let file_id = FileId::from_string(path);
+        let Ok(lib) = ironplc_parser::parse_program(&cleaned, &file_id, &options) else {
+            continue;
+        };
+        if !buffer_names.is_empty() && library_declares_any(&lib, &buffer_names) {
+            continue;
+        }
+        out.push(lib);
+    }
+    out
+}
+
+fn library_declares_any(lib: &Library, lower_names: &[String]) -> bool {
+    lib.elements.iter().any(|e| {
+        let name = match e {
+            LibraryElementKind::ProgramDeclaration(p) => p.name.to_string(),
+            LibraryElementKind::FunctionBlockDeclaration(fb) => fb.name.to_string(),
+            LibraryElementKind::FunctionDeclaration(f) => f.name.to_string(),
+            _ => return false,
+        };
+        lower_names.contains(&name.to_lowercase())
+    })
 }
 
 /// One of: no map, or a map for each graphical language. Used by
@@ -558,8 +660,11 @@ fn synthetic_transpile_diag(code: &str, e: &BridgeError) -> CheckDiagnostic {
 
 /// Shared implementation of `check` / `check_pou_source`. If `map` is
 /// present, every produced diagnostic is annotated with the LD / FBD
-/// element whose generated ST line was reported.
-fn check_inner(source: &str, map: SourceMapKind<'_>) -> Vec<CheckDiagnostic> {
+/// element whose generated ST line was reported. `context` carries the
+/// other project files' parsed libraries; when non-empty, diagnostics
+/// are filtered to the checked buffer (its `FileId::default()` identity)
+/// so a sibling file's problems don't squiggle this one.
+fn check_inner(source: &str, map: SourceMapKind<'_>, context: &[Library]) -> Vec<CheckDiagnostic> {
     let file_id = FileId::default();
     // `allow_empty_var_blocks` mirrors the ironplc CLI flag. POU templates
     // we ship intentionally start with empty VAR / VAR_INPUT / VAR_OUTPUT
@@ -571,23 +676,33 @@ fn check_inner(source: &str, map: SourceMapKind<'_>) -> Vec<CheckDiagnostic> {
 
     let library = match ironplc_parser::parse_program(source, &file_id, &options) {
         Ok(l) => l,
-        Err(d) => return vec![diag_to_dto_with_map(&d, source, &map)],
+        Err(d) => return vec![diag_to_dto_with_map(&d, source, &map, &file_id)],
     };
 
-    let (_, context) = match ironplc_analyzer::stages::analyze(&[&library], &options) {
+    let mut sources: Vec<&Library> = Vec::with_capacity(1 + context.len());
+    sources.push(&library);
+    sources.extend(context.iter());
+
+    // With no context every diagnostic necessarily belongs to the buffer;
+    // keep that path unfiltered so `check` behaves exactly as before.
+    let keep = |d: &Diagnostic| context.is_empty() || d.primary.file_id == file_id;
+
+    let (_, semantic) = match ironplc_analyzer::stages::analyze(&sources, &options) {
         Ok(t) => t,
         Err(ds) => {
             return ds
                 .iter()
-                .map(|d| diag_to_dto_with_map(d, source, &map))
+                .filter(|d| keep(d))
+                .map(|d| diag_to_dto_with_map(d, source, &map, &file_id))
                 .collect()
         }
     };
 
-    context
+    semantic
         .diagnostics()
         .iter()
-        .map(|d| diag_to_dto_with_map(d, source, &map))
+        .filter(|d| keep(d))
+        .map(|d| diag_to_dto_with_map(d, source, &map, &file_id))
         .collect()
 }
 
@@ -863,7 +978,12 @@ fn init_type_name(init: &InitialValueAssignmentKind) -> String {
 /// temps) arrive with both `ld_location` and `fbd_location` = None,
 /// which the editor renders as a generic file-level error rather than
 /// a per-element squiggle.
-fn diag_to_dto_with_map(d: &Diagnostic, source: &str, map: &SourceMapKind<'_>) -> CheckDiagnostic {
+fn diag_to_dto_with_map(
+    d: &Diagnostic,
+    source: &str,
+    map: &SourceMapKind<'_>,
+    buffer_file_id: &FileId,
+) -> CheckDiagnostic {
     let start = LineColumn::from_offset(source, d.primary.location.start);
     let end = LineColumn::from_offset(source, d.primary.location.end);
     let start_line = start.line + 1;
@@ -873,21 +993,32 @@ fn diag_to_dto_with_map(d: &Diagnostic, source: &str, map: &SourceMapKind<'_>) -
     // "type=BOOL", etc. We pass it through verbatim; the editor /
     // CLI present it as one short line per entry under the primary
     // message.
-    let context = d.described.clone();
+    let mut context = d.described.clone();
 
     // Each secondary label resolves to a related-info entry. ironplc
     // emits them with byte offsets, so we run them through the same
     // (offset → line/col → optional graphical location) pipeline as
-    // the primary label.
+    // the primary label. With project context in play a label can live
+    // in a DIFFERENT file ("first declared here", say) — its offsets
+    // mean nothing against this buffer, so it's demoted to a plain
+    // context line naming that file instead of a jumpable range.
     let related: Vec<DiagnosticRelated> = d
         .secondary
         .iter()
-        .map(|label| {
+        .filter_map(|label| {
+            if label.file_id != *buffer_file_id {
+                let loc = match &label.file_id {
+                    FileId::File(p) if !p.is_empty() => format!("see {p}: {}", label.message),
+                    _ => label.message.clone(),
+                };
+                context.push(loc);
+                return None;
+            }
             let rs = LineColumn::from_offset(source, label.location.start);
             let re = LineColumn::from_offset(source, label.location.end);
             let rline = rs.line + 1;
             let (rl_loc, rf_loc, rs_loc) = lookup_locations(map, rline as usize);
-            DiagnosticRelated {
+            Some(DiagnosticRelated {
                 message: label.message.clone(),
                 start_line: rline,
                 start_column: rs.column + 1,
@@ -896,7 +1027,7 @@ fn diag_to_dto_with_map(d: &Diagnostic, source: &str, map: &SourceMapKind<'_>) -
                 ld_location: rl_loc,
                 fbd_location: rf_loc,
                 sfc_location: rs_loc,
-            }
+            })
         })
         .collect();
 

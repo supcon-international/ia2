@@ -1,56 +1,69 @@
 #!/usr/bin/env bash
 #
-# import-fb-library.sh — copy the process-control FB library into a
-# project so its blocks are usable (in ST, and in the FBD/LD palette).
+# import-fb-library.sh — import process-control FB blocks into a project
+# via the server's library API (the same path the IDE's import dialog
+# uses). Blocks land in `pous/lib/process-control/` (read-only via the
+# generic POU routes) and the import is recorded in project.toml's
+# `[libraries]` table.
 #
 # Usage:
-#   scripts/import-fb-library.sh <project-dir> [fb_name ...]
+#   scripts/import-fb-library.sh <project-name-or-dir> [fb_name ...]
 #
-#   # whole library:
-#   scripts/import-fb-library.sh ~/Documents/IA2/my_line
-#   # just a few:
+#   # whole library, project already open in the server:
+#   scripts/import-fb-library.sh my_line
+#   # open-by-path, then import just a few blocks:
 #   scripts/import-fb-library.sh ~/Documents/IA2/my_line fb_pid fb_alarm_hl
 #
-# The graphical editors discover FUNCTION_BLOCKs from the open project,
-# so after importing, reopen/refresh the project and the blocks appear
-# in the "+ Block" palette. (demo_main.st is skipped — it's a demo
-# PROGRAM, not a library block.)
+# Server URL defaults to http://127.0.0.1:3001 (IA2_SERVER_URL overrides).
+# Equivalent raw API, for agents:
+#   GET    /api/library                  — registry + imported state
+#   POST   /api/library/import           — {"library":"…","blocks":["fb_pid.st",…]}
+#   DELETE /api/library/<name>           — remove from project
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LIB="$REPO_ROOT/library/process-control/pous"
+SERVER="${IA2_SERVER_URL:-http://127.0.0.1:3001}"
+LIBRARY="process-control"
 PROJ="${1:-}"
 
-[ -n "$PROJ" ] || { echo "usage: $0 <project-dir> [fb_name ...]" >&2; exit 2; }
-[ -d "$LIB" ] || { echo "library not found at $LIB" >&2; exit 2; }
-[ -f "$PROJ/project.toml" ] || {
-  echo "ERROR: $PROJ is not an IA2 project (no project.toml)." >&2
-  echo "       Point at a project dir, e.g. ~/Documents/IA2/<name>." >&2
+[ -n "$PROJ" ] || { echo "usage: $0 <project-name-or-dir> [fb_name ...]" >&2; exit 2; }
+shift || true
+
+curl -sf "$SERVER/api/health" >/dev/null || {
+  echo "ERROR: no IA2 server at $SERVER — start it (or set IA2_SERVER_URL)." >&2
   exit 2
 }
 
-mkdir -p "$PROJ/pous"
-shift || true
-
-if [ "$#" -gt 0 ]; then
-  files=()
-  for n in "$@"; do
-    f="$LIB/${n%.st}.st"
-    [ -f "$f" ] || { echo "no such library block: $n" >&2; exit 2; }
-    files+=("$f")
-  done
-else
-  files=("$LIB"/fb_*.st)   # every FB; demo_main.st deliberately excluded
+# A directory argument means "open that project first" (idempotent),
+# then address it by name like any other client.
+if [ -d "$PROJ" ]; then
+  curl -sf -X POST "$SERVER/api/projects/open" \
+    -H "Content-Type: application/json" \
+    -d "{\"path\":\"$PROJ\"}" >/dev/null || {
+      echo "ERROR: could not open project at $PROJ" >&2; exit 2; }
+  PROJ="$(basename "$PROJ")"
 fi
 
-n=0
-for f in "${files[@]}"; do
-  base="$(basename "$f")"
-  cp "$f" "$PROJ/pous/$base"
-  echo "  + $base"
-  n=$((n + 1))
-done
-echo "imported $n function block(s) into $PROJ/pous/"
-echo "Reopen the project in the IDE (or it'll refresh on next tree load);"
-echo "the blocks then show under '+ Block' in the FBD/LD editors."
+blocks_json="[]"
+if [ "$#" -gt 0 ]; then
+  blocks_json="$(printf '%s\n' "$@" | sed -E 's/(\.st)?$/.st/' \
+    | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')"
+fi
+
+resp="$(curl -sf -X POST "$SERVER/api/library/import" \
+  -H "Content-Type: application/json" \
+  -H "X-IA2-Project: $PROJ" \
+  -d "{\"library\":\"$LIBRARY\",\"blocks\":$blocks_json}")" || {
+    echo "ERROR: import failed — is project '$PROJ' open in the server?" >&2
+    echo "       check: curl -s $SERVER/api/library -H 'X-IA2-Project: $PROJ'" >&2
+    exit 2
+  }
+
+echo "$resp" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+print(f"imported {len(r[\"imported\"])} block(s) from {r[\"library\"]}@{r[\"version\"]}:")
+for f in r["imported"]:
+    print(f"  + pous/lib/{r[\"library\"]}/{f}")
+'
+echo "Blocks now show under the Libraries section and the FBD/LD '+ Block' palette."

@@ -214,6 +214,10 @@ pub struct AppState {
     /// Updated by `POST /api/agent/heartbeat`; aged out by the
     /// background watchdog task in main.rs.
     pub agent: Arc<Mutex<AgentActivityState>>,
+    /// Root of the importable FB-library registry (`--library-dir` /
+    /// `IA2_LIBRARY_DIR`, defaulting to `./library` when that exists).
+    /// `None` = no registry on this install; /api/library lists empty.
+    pub library_dir: Option<std::path::PathBuf>,
 }
 
 /// Pairs the active `ProgramHandle` with the name of the project it
@@ -240,7 +244,11 @@ pub enum RunningInfo {
 }
 
 impl AppState {
-    pub fn new(demo_slave: DemoSlave, demo_modbus_addr: String) -> Self {
+    pub fn new(
+        demo_slave: DemoSlave,
+        demo_modbus_addr: String,
+        library_dir: Option<std::path::PathBuf>,
+    ) -> Self {
         let (event_tx, _) = broadcast::channel(256);
         Self {
             start_time: Instant::now(),
@@ -254,6 +262,7 @@ impl AppState {
             last_error: Arc::new(Mutex::new(None)),
             running_info: Arc::new(Mutex::new(None)),
             agent: Arc::new(Mutex::new(AgentActivityState::default())),
+            library_dir,
         }
     }
 

@@ -51,6 +51,10 @@ export interface FbDef {
    * this (`myT1`, `myT2`, ...). Lowercase identifier.
    */
   instancePrefix: string
+  /** Imported-library name when the FB lives under `pous/lib/<name>/`
+   *  (palette groups by it); undefined for builtins and the project's
+   *  own FBs. */
+  library?: string
 }
 
 /* ---------------------------------------------------------------- */
@@ -229,22 +233,57 @@ export function allFbs(): FbDef[] {
   return [...STANDARD_FBS, ...PROJECT_FBS]
 }
 
+/** Palette grouping for the block pickers: builtins under "Standard",
+ *  the project's own FBs under "Project blocks", and each imported
+ *  library under its own name. Groups with no members are omitted. */
+export function groupedFbs(): Array<{ label: string; fbs: FbDef[] }> {
+  const groups: Array<{ label: string; fbs: FbDef[] }> = [
+    { label: "Standard", fbs: [...STANDARD_FBS] },
+  ]
+  const own = PROJECT_FBS.filter((f) => !f.library)
+  if (own.length > 0) groups.push({ label: "Project blocks", fbs: own })
+  const byLibrary = new Map<string, FbDef[]>()
+  for (const f of PROJECT_FBS) {
+    if (!f.library) continue
+    if (!byLibrary.has(f.library)) byLibrary.set(f.library, [])
+    byLibrary.get(f.library)!.push(f)
+  }
+  for (const [library, fbs] of [...byLibrary.entries()].sort(([a], [b]) =>
+    a.localeCompare(b),
+  )) {
+    groups.push({ label: library, fbs })
+  }
+  return groups
+}
+
 /** Build FbDefs from project POUs. `fbPous` is the FUNCTION_BLOCK
- *  declarations (name + file path); `pinsFor` yields each one's pins
- *  from its parsed VAR_INPUT / VAR_OUTPUT. FBs with no pins yet (failed
- *  parse / empty skeleton) are still listed so they can be placed. */
+ *  declarations (name + the file's slug); `pinsFor` yields each one's
+ *  pins from its parsed VAR_INPUT / VAR_OUTPUT. FBs with no pins yet
+ *  (failed parse / empty skeleton) are still listed so they can be
+ *  placed. FBs under `lib/<library>/` carry the library name so the
+ *  palette can group them. */
 export function buildProjectFbDefs(
-  fbPous: { type: string }[],
+  fbPous: { type: string; path?: string }[],
   pinsFor: (type: string) => FbPin[],
 ): FbDef[] {
-  return fbPous.map((p) => ({
-    type: p.type,
-    label: `${p.type} — project block`,
-    category: "project" as const,
-    description: "User-defined function block from this project.",
-    pins: pinsFor(p.type),
-    instancePrefix: p.type.replace(/^FB_/i, "").toLowerCase() || "fb",
-  }))
+  return fbPous.map((p) => {
+    const library = p.path?.startsWith("lib/")
+      ? p.path.split("/")[1]
+      : undefined
+    return {
+      type: p.type,
+      label: library
+        ? `${p.type} — ${library}`
+        : `${p.type} — project block`,
+      category: "project" as const,
+      description: library
+        ? `Function block from the ${library} library.`
+        : "User-defined function block from this project.",
+      pins: pinsFor(p.type),
+      instancePrefix: p.type.replace(/^FB_/i, "").toLowerCase() || "fb",
+      library,
+    }
+  })
 }
 
 /** Look up an FB by its IEC type name (builtin or project). Case-sensitive. */

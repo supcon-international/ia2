@@ -44,13 +44,15 @@ import {
   setBlockPosition,
   setOutputBinding,
 } from "@/lib/fbd-edit"
-import { allFbs, fbByType, fbInputs } from "@/lib/ld-fbs"
+import { fbByType, fbInputs, groupedFbs } from "@/lib/ld-fbs"
 import { cn } from "@/lib/utils"
 import { Input } from "@/components/ui/input"
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
@@ -109,16 +111,20 @@ export function FBDEditor({
   onChange,
   className,
   readOnly = false,
+  path,
 }: {
   value: string
   onChange: (next: string) => void
   className?: string
   readOnly?: boolean
+  /** Store slug this buffer came from — keeps the project-aware check
+   *  from double-counting the on-disk copy. */
+  path?: string
 }) {
   const parsed = useMemo(() => safeParse(value), [value])
 
   // Live values for online-mode wire coloring.
-  const { lastSnapshot, isRunning } = useRuntime()
+  const { lastSnapshot, isRunning, projectEpoch } = useRuntime()
   const liveValues = useMemo<{ bools: Record<string, boolean> } | null>(() => {
     if (!isRunning || !lastSnapshot) return null
     const bools: Record<string, boolean> = {}
@@ -139,14 +145,16 @@ export function FBDEditor({
     }
     const handle = setTimeout(async () => {
       try {
-        const diags = await checkProgram(value, "fbd")
+        const diags = await checkProgram(value, "fbd", path)
         setDiagnostics(diags)
       } catch (e) {
         console.warn("FBD diagnostics fetch failed:", e)
       }
     }, 350)
     return () => clearTimeout(handle)
-  }, [value, parsed.kind])
+    // projectEpoch: a library import/remove can (un)resolve this POU's
+    // FB references without the buffer changing — re-check.
+  }, [value, parsed.kind, path, projectEpoch])
 
   // ---- Selection ----
   const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null)
@@ -324,13 +332,18 @@ function Toolbar({
           Block
         </SelectTrigger>
         <SelectContent>
-          {allFbs().map((fb) => (
-            <SelectItem key={fb.type} value={fb.type}>
-              <span className="font-mono">{fb.type}</span>
-              <span className="ml-2 text-muted-foreground">
-                {fb.label.replace(`${fb.type} — `, "")}
-              </span>
-            </SelectItem>
+          {groupedFbs().map((group) => (
+            <SelectGroup key={group.label}>
+              <SelectLabel>{group.label}</SelectLabel>
+              {group.fbs.map((fb) => (
+                <SelectItem key={fb.type} value={fb.type}>
+                  <span className="font-mono">{fb.type}</span>
+                  <span className="ml-2 text-muted-foreground">
+                    {fb.label.replace(`${fb.type} — `, "")}
+                  </span>
+                </SelectItem>
+              ))}
+            </SelectGroup>
           ))}
         </SelectContent>
       </Select>
@@ -1044,10 +1057,15 @@ function BlockDetail({
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          {allFbs().map((fb) => (
-            <SelectItem key={fb.type} value={fb.type}>
-              {fb.type}
-            </SelectItem>
+          {groupedFbs().map((group) => (
+            <SelectGroup key={group.label}>
+              <SelectLabel>{group.label}</SelectLabel>
+              {group.fbs.map((fb) => (
+                <SelectItem key={fb.type} value={fb.type}>
+                  {fb.type}
+                </SelectItem>
+              ))}
+            </SelectGroup>
           ))}
         </SelectContent>
       </Select>

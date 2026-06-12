@@ -332,13 +332,21 @@ export async function fetchSymbols(
 export async function checkProgram(
   source: string,
   language: "st" | "ld" | "fbd" | "sfc" = "st",
+  path?: string,
 ): Promise<CheckDiagnostic[]> {
   // ST source is plain text; LD / FBD source is JSON. Different
   // Content-Type plus a `?language=` query so the bridge knows what
   // shape to expect before running ironplc. Without the query the
   // server defaults to ST for back-compat with older clients.
-  const url =
-    language === "st" ? `/api/check` : `/api/check?language=${language}`
+  //
+  // The check runs against the whole open project (sibling files'
+  // FUNCTION_BLOCKs resolve); `path` names the slug this buffer was
+  // loaded from so its on-disk copy doesn't double-declare.
+  const params = new URLSearchParams()
+  if (language !== "st") params.set("language", language)
+  if (path) params.set("path", path)
+  const qs = params.toString()
+  const url = qs ? `/api/check?${qs}` : `/api/check`
   const contentType =
     language === "st" ? "text/plain" : "application/json"
   return jsonOrThrow(
@@ -348,6 +356,39 @@ export async function checkProgram(
       body: source,
     }),
     "POST /api/check",
+  )
+}
+
+// ---------- Libraries ----------
+
+export async function fetchLibraries(): Promise<
+  import("@/types/generated/LibrarySummary").LibrarySummary[]
+> {
+  return jsonOrThrow(await apiFetch(`/api/library`), "GET /api/library")
+}
+
+/** Import registry blocks (empty `blocks` = the whole library).
+ *  Re-importing overwrites — that's the update path. */
+export async function importLibrary(
+  library: string,
+  blocks: string[] = [],
+): Promise<import("@/types/generated/ImportLibraryResponse").ImportLibraryResponse> {
+  return jsonOrThrow(
+    await apiFetch(`/api/library/import`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ library, blocks }),
+    }),
+    "POST /api/library/import",
+  )
+}
+
+export async function removeLibrary(name: string): Promise<RunResponse> {
+  return jsonOrThrow(
+    await apiFetch(`/api/library/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }),
+    `DELETE /api/library/${name}`,
   )
 }
 

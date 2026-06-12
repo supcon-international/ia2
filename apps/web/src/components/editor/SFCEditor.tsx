@@ -91,16 +91,20 @@ export function SFCEditor({
   onChange,
   className,
   readOnly = false,
+  path,
 }: {
   value: string
   onChange: (next: string) => void
   className?: string
   readOnly?: boolean
+  /** Store slug this buffer came from — keeps the project-aware check
+   *  from double-counting the on-disk copy. */
+  path?: string
 }) {
   const parsed = useMemo(() => safeParse(value), [value])
 
   // Online-mode current step lookup (see also LDEditor / FBDEditor).
-  const { lastSnapshot, isRunning } = useRuntime()
+  const { lastSnapshot, isRunning, projectEpoch } = useRuntime()
   const activeStep = useMemo<string | null>(() => {
     if (!isRunning || !lastSnapshot) return null
     const v = lastSnapshot.vars.find((x) => x.name === "__sfc_step")
@@ -117,14 +121,16 @@ export function SFCEditor({
     }
     const handle = setTimeout(async () => {
       try {
-        const diags = await checkProgram(value, "sfc")
+        const diags = await checkProgram(value, "sfc", path)
         setDiagnostics(diags)
       } catch (e) {
         console.warn("SFC diagnostics fetch failed:", e)
       }
     }, 350)
     return () => clearTimeout(handle)
-  }, [value, parsed.kind])
+    // projectEpoch: a library import/remove can (un)resolve this POU's
+    // FB references without the buffer changing — re-check.
+  }, [value, parsed.kind, path, projectEpoch])
 
   const [sel, setSel] = useState<Selection>(null)
   // Drop selection on external source changes (revert, POU switch).

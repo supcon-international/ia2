@@ -7,15 +7,18 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
+  Library,
   Network,
   Plus,
   Server,
 } from "lucide-react"
 
+import { ImportLibraryDialog } from "@/components/dialogs/ImportLibraryDialog"
 import { NewDeviceDialog } from "@/components/dialogs/NewDeviceDialog"
 import { NewEdgeDialog } from "@/components/dialogs/NewEdgeDialog"
 import { NewFolderDialog } from "@/components/dialogs/NewFolderDialog"
 import { NewPouDialog } from "@/components/dialogs/NewPouDialog"
+import { importLibrary, removeLibrary } from "@/lib/api"
 import {
   ContextMenu,
   ContextMenuContent,
@@ -53,8 +56,10 @@ export function ProjectTree() {
   // Section open/close. Persists across re-renders so toggling a sibling
   // folder doesn't collapse the section.
   const [appsOpen, setAppsOpen] = useState(true)
+  const [librariesOpen, setLibrariesOpen] = useState(true)
   const [devicesOpen, setDevicesOpen] = useState(true)
   const [edgesOpen, setEdgesOpen] = useState(true)
+  const [importDialogOpen, setImportDialogOpen] = useState(false)
 
   // Folder open-state keyed by `section/path` so each section is independent.
   const [openFolders, setOpenFolders] = useState<Record<string, boolean>>({})
@@ -73,16 +78,41 @@ export function ProjectTree() {
   )
   const [edgeDialog, setEdgeDialog] = useState<{ parent: string } | null>(null)
 
+  // Imported library blocks live under the reserved `lib/<library>/`
+  // POU subtree. They're project POUs as far as compile/deploy are
+  // concerned, but the tree presents them as a separate read-only
+  // "Libraries" section so they don't drown the user's own programs.
+  const { ownPous, ownPouFolders, libraryGroups } = useMemo(() => {
+    const pous = project?.pous ?? []
+    const folders = project?.pou_folders ?? []
+    const own = pous.filter((p) => !p.path.startsWith("lib/"))
+    const groups = new Map<string, PouFile[]>()
+    for (const p of pous) {
+      if (!p.path.startsWith("lib/")) continue
+      const lib = p.path.split("/")[1] ?? ""
+      if (!groups.has(lib)) groups.set(lib, [])
+      groups.get(lib)!.push(p)
+    }
+    for (const blocks of groups.values()) {
+      blocks.sort((a, b) => a.path.localeCompare(b.path))
+    }
+    return {
+      ownPous: own,
+      ownPouFolders: folders.filter(
+        (f) => f !== "lib" && !f.startsWith("lib/"),
+      ),
+      libraryGroups: [...groups.entries()].sort(([a], [b]) =>
+        a.localeCompare(b),
+      ),
+    }
+  }, [project])
+
   const pouTree = useMemo(
     () =>
       project
-        ? buildTree<PouFile>(
-            project.pous,
-            project.pou_folders,
-            (p) => p.path,
-          )
+        ? buildTree<PouFile>(ownPous, ownPouFolders, (p) => p.path)
         : [],
-    [project],
+    [project, ownPous, ownPouFolders],
   )
 
   const deviceTree = useMemo(
@@ -108,7 +138,7 @@ export function ProjectTree() {
       <SectionHeader
         label="POUs"
         open={appsOpen}
-        count={project.pous.length}
+        count={ownPous.length}
         onToggle={() => setAppsOpen(!appsOpen)}
         action={
           <SectionActions
@@ -160,12 +190,70 @@ export function ProjectTree() {
           toggleFolder={toggleFolder}
           section="apps"
           emptyHint={
-            project.pous.length === 0 &&
-            project.pou_folders.length === 0
+            ownPous.length === 0 && ownPouFolders.length === 0
               ? "No POUs yet — click + to create one."
               : null
           }
         />
+      )}
+
+      <SectionHeader
+        label="Libraries"
+        open={librariesOpen}
+        count={libraryGroups.length}
+        onToggle={() => setLibrariesOpen(!librariesOpen)}
+        action={
+          <button
+            type="button"
+            title="Import library blocks…"
+            onClick={(e) => {
+              e.stopPropagation()
+              setImportDialogOpen(true)
+            }}
+            className="flex size-5 items-center justify-center rounded text-muted-foreground hover:bg-accent/40 hover:text-foreground"
+          >
+            <Plus className="size-3.5" />
+          </button>
+        }
+      />
+      {librariesOpen && (
+        <>
+          {libraryGroups.length === 0 && (
+            <div
+              className="py-1 text-[11px] italic text-muted-foreground"
+              style={{ paddingLeft: pad(1) }}
+            >
+              No libraries imported — click + to browse.
+            </div>
+          )}
+          {libraryGroups.map(([lib, blocks]) => (
+            <LibraryGroup
+              key={lib}
+              name={lib}
+              blocks={blocks}
+              open={openFolders[`libs/${lib}`] ?? true}
+              onToggle={() => toggleFolder(`libs/${lib}`)}
+              activePath={view === "app" ? currentPou?.path ?? null : null}
+              onOpenBlock={(path) => selectPou(path)}
+              onUpdate={() => {
+                void importLibrary(lib).catch((e) =>
+                  alert(`Update failed: ${e}`),
+                )
+              }}
+              onRemove={() => {
+                if (
+                  confirm(
+                    `Remove library "${lib}" (${blocks.length} block file(s)) from this project?\nPOUs that call its blocks will stop compiling until you re-import.`,
+                  )
+                ) {
+                  void removeLibrary(lib).catch((e) =>
+                    alert(`Remove failed: ${e}`),
+                  )
+                }
+              }}
+            />
+          ))}
+        </>
       )}
 
       <SectionHeader
@@ -351,6 +439,90 @@ export function ProjectTree() {
           }}
           parent={edgeDialog.parent}
         />
+      )}
+      {importDialogOpen && (
+        <ImportLibraryDialog
+          open
+          onOpenChange={(o) => {
+            if (!o) setImportDialogOpen(false)
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+/// One imported library in the Libraries section: a folder-style header
+/// row (name + block count) with Update / Remove in its context menu,
+/// and the block files as read-only POU rows beneath.
+function LibraryGroup({
+  name,
+  blocks,
+  open,
+  onToggle,
+  activePath,
+  onOpenBlock,
+  onUpdate,
+  onRemove,
+}: {
+  name: string
+  blocks: PouFile[]
+  open: boolean
+  onToggle: () => void
+  activePath: string | null
+  onOpenBlock: (path: string) => void
+  onUpdate: () => void
+  onRemove: () => void
+}) {
+  return (
+    <div>
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
+          <button
+            type="button"
+            onClick={onToggle}
+            className="flex w-full items-center gap-1 py-1 text-left text-sm text-muted-foreground transition-colors hover:bg-accent/40 hover:text-foreground"
+            style={{ paddingLeft: pad(0) }}
+          >
+            {open ? (
+              <ChevronDown className="size-3 shrink-0" />
+            ) : (
+              <ChevronRight className="size-3 shrink-0" />
+            )}
+            <Library className="size-3.5 shrink-0 text-muted-foreground" />
+            <span className="flex-1 truncate text-foreground">{name}</span>
+            <span className="pr-2 font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+              {blocks.length} blocks
+            </span>
+          </button>
+        </ContextMenuTrigger>
+        <ContextMenuContent>
+          <ContextMenuItem onSelect={onUpdate}>
+            Update (re-import all)
+          </ContextMenuItem>
+          <ContextMenuSeparator />
+          <ContextMenuItem variant="destructive" onSelect={onRemove}>
+            Remove library…
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
+      {open && (
+        <div>
+          {blocks.map((b) => {
+            const leaf = b.path.split("/").pop() ?? b.path
+            return (
+              <div key={b.path} style={{ paddingLeft: pad(1) }}>
+                <PouItem
+                  node={{ name: leaf, path: b.path, item: b }}
+                  active={activePath === b.path}
+                  onOpen={() => onOpenBlock(b.path)}
+                  onDelete={() => {}}
+                  readOnly
+                />
+              </div>
+            )
+          })}
+        </div>
       )}
     </div>
   )
@@ -593,15 +765,22 @@ function PouItem({
   active,
   onOpen,
   onDelete,
+  readOnly = false,
 }: {
   node: { name: string; path: string; item: PouFile }
   active: boolean
   onOpen: () => void
   onDelete: () => void
+  /** Library blocks: no Delete in the context menu (the whole library
+   *  is removed via its own row; single files via /api/library). */
+  readOnly?: boolean
 }) {
   const decls = node.item.declarations
+  // IEC identifiers are case-insensitive — `fb_pid.st` declaring
+  // `FB_PID` is the 1-POU-per-file convention, not a mismatch.
   const simple =
-    decls.length === 1 && decls[0].name === node.name
+    decls.length === 1 &&
+    decls[0].name.toLowerCase() === node.name.toLowerCase()
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
@@ -655,10 +834,14 @@ function PouItem({
       </ContextMenuTrigger>
       <ContextMenuContent>
         <ContextMenuItem onSelect={onOpen}>Open</ContextMenuItem>
-        <ContextMenuSeparator />
-        <ContextMenuItem variant="destructive" onSelect={onDelete}>
-          Delete
-        </ContextMenuItem>
+        {!readOnly && (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuItem variant="destructive" onSelect={onDelete}>
+              Delete
+            </ContextMenuItem>
+          </>
+        )}
       </ContextMenuContent>
     </ContextMenu>
   )

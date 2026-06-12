@@ -102,6 +102,8 @@ pub enum MutationDetail {
     PouCreated { path: String },
     PouUpdated { path: String },
     PouDeleted { path: String },
+    LibraryImported { name: String },
+    LibraryRemoved { name: String },
     PouFolderCreated { path: String },
     PouFolderDeleted { path: String },
     DeviceUpserted { name: String },

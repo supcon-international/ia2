@@ -22,9 +22,12 @@ type Props = {
   value: string
   onChange: (value: string) => void
   diagnostics: CheckDiagnostic[]
+  /** Library blocks open read-only — the server rejects writes under
+   *  `pous/lib/**`, so the editor shouldn't accept them either. */
+  readOnly?: boolean
 }
 
-export function STEditor({ value, onChange, diagnostics }: Props) {
+export function STEditor({ value, onChange, diagnostics, readOnly = false }: Props) {
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null)
   const monacoRef = useRef<Monaco | null>(null)
   const dark = useDarkMode()
@@ -194,7 +197,7 @@ export function STEditor({ value, onChange, diagnostics }: Props) {
       theme={theme}
       onChange={(v) => onChange(v ?? "")}
       onMount={handleMount}
-      options={editorOptions}
+      options={{ ...editorOptions, readOnly, domReadOnly: readOnly }}
     />
   )
 }

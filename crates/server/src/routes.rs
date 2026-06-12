@@ -533,6 +533,7 @@ pub async fn create_pou(
     project: ProjectName,
     Json(req): Json<CreatePouRequest>,
 ) -> Result<Json<Pou>, ApiError> {
+    reject_library_path(&req.path)?;
     let created_path = req.path.clone();
     let pou = with_project(&state, &project, |store| {
         let language = req.language;
@@ -558,6 +559,7 @@ pub async fn save_pou(
     AxumPath(path): AxumPath<String>,
     body: String,
 ) -> Result<Json<RunResponse>, ApiError> {
+    reject_library_path(&path)?;
     with_project(&state, &project, |store| {
         store.write_pou_source(&path, &body).map_err(Into::into)
     })?;
@@ -584,6 +586,7 @@ pub async fn delete_pou(
     project: ProjectName,
     AxumPath(path): AxumPath<String>,
 ) -> Result<Json<RunResponse>, ApiError> {
+    reject_library_path(&path)?;
     with_project(&state, &project, |store| {
         store.delete_pou_file(&path).map_err(Into::into)
     })?;
@@ -601,6 +604,7 @@ pub async fn create_pou_folder(
     project: ProjectName,
     Json(req): Json<CreateFolderRequest>,
 ) -> Result<Json<RunResponse>, ApiError> {
+    reject_library_path(&req.path)?;
     with_project(&state, &project, |store| {
         store.create_pou_folder(&req.path).map_err(Into::into)
     })?;
@@ -618,6 +622,7 @@ pub async fn delete_pou_folder(
     project: ProjectName,
     AxumPath(path): AxumPath<String>,
 ) -> Result<Json<RunResponse>, ApiError> {
+    reject_library_path(&path)?;
     with_project(&state, &project, |store| {
         store.delete_pou_folder(&path).map_err(Into::into)
     })?;
@@ -626,6 +631,154 @@ pub async fn delete_pou_folder(
         &project,
         topic::PROJECT,
         MutationDetail::PouFolderDeleted { path },
+    );
+    Ok(Json(RunResponse { ok: true }))
+}
+
+// ============================================================
+//  Libraries
+// ============================================================
+
+/// The `pous/lib/**` subtree only mutates through /api/library — the
+/// generic POU CRUD refuses it so an imported block can't silently
+/// drift from its registry source. Reading (GET) stays open; "I want
+/// to change FB_PID" = copy it out of `lib/` and own the copy.
+fn reject_library_path(path: &str) -> Result<(), ApiError> {
+    if project::is_library_slug(path) {
+        return Err(ApiError::Conflict(
+            "library files are read-only — import / update / remove them via /api/library, \
+             or copy the POU out of lib/ to make it editable"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+/// GET /api/library — every library in the server's registry, each
+/// decorated with its imported state in the addressed project (when
+/// one is open; browse works without).
+pub async fn list_libraries(
+    State(state): State<AppState>,
+    project: ProjectName,
+) -> Json<Vec<crate::library::LibrarySummary>> {
+    let registry = crate::library::scan(state.library_dir.as_deref());
+    let mut out: Vec<_> = registry.iter().map(|l| l.to_summary()).collect();
+    // No open project (agent browsing a fresh server) → plain listing.
+    let _ = with_project(&state, &project, |store| {
+        let versions = store.read_libraries()?;
+        let slugs = store.list_pou_paths()?;
+        for summary in &mut out {
+            summary.imported_version = versions.get(&summary.name).cloned();
+            let prefix = format!("{}/{}/", project::LIBRARY_SLUG_PREFIX, summary.name);
+            summary.imported_files = slugs
+                .iter()
+                .filter_map(|s| s.strip_prefix(&prefix))
+                .filter(|rest| !rest.contains('/'))
+                .map(str::to_string)
+                .collect();
+        }
+        Ok(())
+    });
+    Json(out)
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct ImportLibraryRequest {
+    /// Registry library name, e.g. `process-control`.
+    pub library: String,
+    /// Bare block file names to import (`fb_pid.st`). Empty / omitted
+    /// imports every block in the library. Re-importing overwrites —
+    /// that's the update path.
+    #[serde(default)]
+    pub blocks: Vec<String>,
+}
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct ImportLibraryResponse {
+    pub library: String,
+    pub version: String,
+    /// Block files written under `pous/lib/<library>/`.
+    pub imported: Vec<String>,
+}
+
+/// POST /api/library/import — vendor registry blocks into the project.
+pub async fn import_library(
+    State(state): State<AppState>,
+    project: ProjectName,
+    Json(req): Json<ImportLibraryRequest>,
+) -> Result<Json<ImportLibraryResponse>, ApiError> {
+    let registry = crate::library::scan(state.library_dir.as_deref());
+    let lib = registry
+        .into_iter()
+        .find(|l| l.name == req.library)
+        .ok_or_else(|| ApiError::NotFound(format!("library '{}' not in registry", req.library)))?;
+
+    let chosen: Vec<&crate::library::RegistryBlockFile> = if req.blocks.is_empty() {
+        lib.blocks.iter().collect()
+    } else {
+        req.blocks
+            .iter()
+            .map(|want| {
+                lib.blocks.iter().find(|b| &b.file == want).ok_or_else(|| {
+                    ApiError::BadRequest(format!(
+                        "library '{}' has no block file '{want}'",
+                        lib.name
+                    ))
+                })
+            })
+            .collect::<Result<_, _>>()?
+    };
+
+    // Read every source up-front so an unreadable registry file fails
+    // the request before the project is half-written.
+    let mut files = Vec::with_capacity(chosen.len());
+    for block in &chosen {
+        let content = fs::read_to_string(&block.path).map_err(|e| {
+            ApiError::Internal(format!("reading registry block '{}': {e}", block.file))
+        })?;
+        files.push((block.file.clone(), content));
+    }
+
+    let imported = with_project(&state, &project, |store| {
+        for (file, content) in &files {
+            store.write_library_file(&lib.name, file, content)?;
+        }
+        store.set_library_entry(&lib.name, &lib.version)?;
+        Ok(files.iter().map(|(f, _)| f.clone()).collect::<Vec<_>>())
+    })?;
+    emit_mutation(
+        &state,
+        &project,
+        topic::PROJECT,
+        MutationDetail::LibraryImported {
+            name: lib.name.clone(),
+        },
+    );
+    Ok(Json(ImportLibraryResponse {
+        library: lib.name,
+        version: lib.version,
+        imported,
+    }))
+}
+
+/// DELETE /api/library/{name} — drop `pous/lib/<name>/` and the
+/// project.toml entry. Idempotent on the directory.
+pub async fn remove_library(
+    State(state): State<AppState>,
+    project: ProjectName,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<RunResponse>, ApiError> {
+    with_project(&state, &project, |store| {
+        store.remove_library_dir(&name)?;
+        store.remove_library_entry(&name).map_err(Into::into)
+    })?;
+    emit_mutation(
+        &state,
+        &project,
+        topic::PROJECT,
+        MutationDetail::LibraryRemoved { name },
     );
     Ok(Json(RunResponse { ok: true }))
 }
@@ -1237,6 +1390,12 @@ pub async fn migrate_tasks(
 pub struct CheckQuery {
     #[serde(default)]
     pub language: Option<String>,
+    /// Store slug the checked buffer was loaded from (e.g.
+    /// `lib/process-control/fb_pid`). Lets the project-aware check
+    /// exclude the buffer's own on-disk copy from the analysis context
+    /// so it doesn't double-declare its POUs.
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 /// Symbol extraction for the editor's hover / completion providers
@@ -1264,7 +1423,12 @@ pub async fn symbols(
     Json(ironplc_bridge::extract_symbols(&body, language))
 }
 
-pub async fn check(Query(q): Query<CheckQuery>, body: String) -> Json<Vec<CheckDiagnostic>> {
+pub async fn check(
+    State(state): State<AppState>,
+    project: ProjectName,
+    Query(q): Query<CheckQuery>,
+    body: String,
+) -> Json<Vec<CheckDiagnostic>> {
     // The frontend posts `?language=ld` when the editor source on the
     // wire is `.ld.json`. Anything else (or absent) is treated as ST,
     // which is the historical behaviour. Keeping `check` and
@@ -1281,7 +1445,20 @@ pub async fn check(Query(q): Query<CheckQuery>, body: String) -> Json<Vec<CheckD
         Some("sfc") => PouLanguage::Sfc,
         _ => PouLanguage::St,
     };
-    Json(ironplc_bridge::check_pou_source(&body, language))
+    // Check against the open project when there is one, so FBs declared
+    // in sibling files resolve (the editor-squiggle counterpart of the
+    // project compile). No open project — agents checking a loose
+    // snippet — falls back to the isolated check.
+    let diags = with_project(&state, &project, |store| {
+        Ok(ironplc_bridge::check_pou_in_project(
+            store,
+            &body,
+            language,
+            q.path.as_deref(),
+        ))
+    })
+    .unwrap_or_else(|_| ironplc_bridge::check_pou_source(&body, language));
+    Json(diags)
 }
 
 /// Compile the whole project (every POU + tasks.toml-synthesized

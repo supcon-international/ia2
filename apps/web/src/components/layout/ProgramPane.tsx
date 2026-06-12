@@ -30,6 +30,12 @@ export function ProgramPane() {
   // across reloads (keeping the state ephemeral keeps the toolbar simple).
   const [varsOpen, setVarsOpen] = useState(true)
 
+  // Imported library blocks (pous/lib/**) open read-only: the server
+  // rejects writes there anyway (they're managed via /api/library), so
+  // don't let edits accumulate that can only fail on Save.
+  const isLibrary = currentPou?.path.startsWith("lib/") ?? false
+  const libraryName = isLibrary ? currentPou!.path.split("/")[1] : null
+
   if (!currentPou) {
     return (
       <main className="flex h-full min-h-0 min-w-0 flex-col">
@@ -106,7 +112,7 @@ export function ProgramPane() {
           />
         </span>
         <div className="flex items-center gap-1">
-          {isDirty && (
+          {isDirty && !isLibrary && (
             <>
               <button
                 type="button"
@@ -188,6 +194,14 @@ export function ProgramPane() {
           {error}
         </div>
       )}
+      {isLibrary && (
+        <div className="border-b border-border bg-muted/40 px-3 py-1.5 text-xs text-muted-foreground">
+          Library block from <span className="font-mono">{libraryName}</span> —
+          read-only. To customize it, copy the file out of{" "}
+          <span className="font-mono">lib/</span> as a project POU; to update
+          or remove it, use the Libraries section in the tree.
+        </div>
+      )}
       <div className="flex min-h-0 flex-1">
         <div className="min-h-0 min-w-0 flex-1">
           {/* Editor dispatch by POU language:
@@ -199,16 +213,32 @@ export function ProgramPane() {
                       `cs check` / `cs transpile` as the agent loop).
                       Phase 3c will add drag-to-place editing. */}
           {currentPou.declarations[0]?.language === "ld" ? (
-            <LDEditor value={source} onChange={setSource} />
+            <LDEditor
+              value={source}
+              onChange={setSource}
+              path={currentPou.path}
+              readOnly={isLibrary}
+            />
           ) : currentPou.declarations[0]?.language === "fbd" ? (
-            <FBDEditor value={source} onChange={setSource} />
+            <FBDEditor
+              value={source}
+              onChange={setSource}
+              path={currentPou.path}
+              readOnly={isLibrary}
+            />
           ) : currentPou.declarations[0]?.language === "sfc" ? (
-            <SFCEditor value={source} onChange={setSource} />
+            <SFCEditor
+              value={source}
+              onChange={setSource}
+              path={currentPou.path}
+              readOnly={isLibrary}
+            />
           ) : (
             <STEditor
               value={source}
               onChange={setSource}
               diagnostics={diagnostics}
+              readOnly={isLibrary}
             />
           )}
         </div>

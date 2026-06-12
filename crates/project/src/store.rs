@@ -296,6 +296,111 @@ impl ProjectStore {
         self.delete_folder("pous", path)
     }
 
+    // ---------------- Libraries ----------------
+    //
+    // Imported library blocks are vendored under `pous/lib/<library>/`
+    // — still ordinary POU files (the walk, compile and deploy paths
+    // need no special casing; an edge deploy stays a self-contained
+    // project) but in a reserved subtree the API write-protects and
+    // the IDE renders as a separate read-only "Libraries" section.
+    // Which libraries (and versions) were imported is recorded in
+    // project.toml's `[libraries]` table.
+
+    /// `[libraries]` table from project.toml: library name → version.
+    /// Read fresh from disk each call — the file is tiny and this keeps
+    /// the in-memory manifest immutable.
+    pub fn read_libraries(&self) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
+        let table = self.read_manifest_table()?;
+        let mut out = std::collections::BTreeMap::new();
+        if let Some(toml::Value::Table(libs)) = table.get("libraries") {
+            for (k, v) in libs {
+                if let toml::Value::String(ver) = v {
+                    out.insert(k.clone(), ver.clone());
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Record (or version-bump) a library in project.toml. Preserves
+    /// every other key in the manifest verbatim.
+    pub fn set_library_entry(&self, library: &str, version: &str) -> Result<(), StoreError> {
+        validate_single_segment(library)?;
+        let mut table = self.read_manifest_table()?;
+        let libs = table
+            .entry("libraries".to_string())
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        if let toml::Value::Table(libs) = libs {
+            libs.insert(
+                library.to_string(),
+                toml::Value::String(version.to_string()),
+            );
+        }
+        self.write_manifest_table(&table)
+    }
+
+    /// Drop a library's entry from project.toml. Removing the last one
+    /// removes the `[libraries]` table entirely.
+    pub fn remove_library_entry(&self, library: &str) -> Result<(), StoreError> {
+        let mut table = self.read_manifest_table()?;
+        if let Some(toml::Value::Table(libs)) = table.get_mut("libraries") {
+            libs.remove(library);
+            if libs.is_empty() {
+                table.remove("libraries");
+            }
+        }
+        self.write_manifest_table(&table)
+    }
+
+    /// Write one imported block file under `pous/lib/<library>/`.
+    /// `file_name` is the bare on-disk name (e.g. `fb_pid.st`).
+    pub fn write_library_file(
+        &self,
+        library: &str,
+        file_name: &str,
+        content: &str,
+    ) -> Result<(), StoreError> {
+        validate_single_segment(library)?;
+        validate_single_segment(file_name)?;
+        let dir = self
+            .root
+            .join("pous")
+            .join(LIBRARY_SLUG_PREFIX)
+            .join(library);
+        fs::create_dir_all(&dir)?;
+        fs::write(dir.join(file_name), content)?;
+        Ok(())
+    }
+
+    /// Remove `pous/lib/<library>/` and everything in it; prunes the
+    /// now-empty `pous/lib/` too so an empty shell doesn't linger in
+    /// the tree. Missing dir is fine — removal is idempotent.
+    pub fn remove_library_dir(&self, library: &str) -> Result<(), StoreError> {
+        validate_single_segment(library)?;
+        let lib_root = self.root.join("pous").join(LIBRARY_SLUG_PREFIX);
+        let dir = lib_root.join(library);
+        if dir.exists() {
+            fs::remove_dir_all(&dir)?;
+        }
+        if lib_root.exists() && fs::read_dir(&lib_root)?.next().is_none() {
+            fs::remove_dir(&lib_root)?;
+        }
+        Ok(())
+    }
+
+    fn read_manifest_table(&self) -> Result<toml::Table, StoreError> {
+        let text = fs::read_to_string(self.root.join("project.toml"))?;
+        Ok(toml::from_str(&text)?)
+    }
+
+    fn write_manifest_table(&self, table: &toml::Table) -> Result<(), StoreError> {
+        fs::write(
+            self.root.join("project.toml"),
+            toml::to_string_pretty(table)?,
+        )?;
+        Ok(())
+    }
+
     // ---------------- Devices ----------------
 
     pub fn list_devices(&self) -> Result<Vec<Device>, StoreError> {
@@ -851,6 +956,27 @@ fn parse_priority(args: &str) -> Option<i32> {
         .next()?
         .trim();
     value.parse().ok()
+}
+
+/// Reserved first segment of the POU slug space holding imported
+/// library blocks (`pous/lib/<library>/...`). The generic POU CRUD
+/// routes refuse to write here; the library import/remove API is the
+/// only mutator.
+pub const LIBRARY_SLUG_PREFIX: &str = "lib";
+
+/// True when a POU slug (or folder path) lives in the reserved library
+/// subtree.
+pub fn is_library_slug(slug: &str) -> bool {
+    slug == LIBRARY_SLUG_PREFIX || slug.starts_with("lib/")
+}
+
+/// A single path segment: no separators at all, plus the usual
+/// `validate_path` per-segment rules.
+fn validate_single_segment(name: &str) -> Result<(), StoreError> {
+    if name.contains('/') {
+        return Err(StoreError::InvalidName(name.into()));
+    }
+    validate_path(name)
 }
 
 /// Validate a project-relative path. Accepts forward-slash separated

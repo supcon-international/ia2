@@ -15,7 +15,9 @@ import { Input } from "@/components/ui/input"
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
@@ -54,7 +56,7 @@ import {
   updateVariable,
   type NodePath,
 } from "@/lib/ld-edit"
-import { allFbs, fbByType, fbInputs, fbOutputs } from "@/lib/ld-fbs"
+import { fbByType, fbInputs, fbOutputs, groupedFbs } from "@/lib/ld-fbs"
 import { useRuntime } from "@/state/runtime"
 import type { LdCoilKind } from "@/types/generated/LdCoilKind"
 import type { LdNode } from "@/types/generated/LdNode"
@@ -90,11 +92,15 @@ export function LDEditor({
   onChange,
   readOnly = false,
   className,
+  path,
 }: {
   value: string
   onChange: (next: string) => void
   readOnly?: boolean
   className?: string
+  /** Store slug this buffer came from — keeps the project-aware check
+   *  from double-counting the on-disk copy. */
+  path?: string
 }) {
   const parsed = useMemo(() => safeParse(value), [value])
   const [sel, setSel] = useState<Selection>(null)
@@ -104,7 +110,7 @@ export function LDEditor({
   //   numerics → Compare-block evaluation
   // Both null when nothing's running; the renderer falls back to
   // static (uncoloured) glyphs in that case.
-  const { lastSnapshot, isRunning } = useRuntime()
+  const { lastSnapshot, isRunning, projectEpoch } = useRuntime()
   const liveValues = useMemo<{
     bools: Record<string, boolean>
     numerics: Record<string, number>
@@ -159,7 +165,7 @@ export function LDEditor({
     }
     const handle = setTimeout(async () => {
       try {
-        const diags = await checkProgram(value, "ld")
+        const diags = await checkProgram(value, "ld", path)
         setDiagnostics(diags)
       } catch (e) {
         // Network errors don't constitute LD errors — keep the last
@@ -168,7 +174,9 @@ export function LDEditor({
       }
     }, 350)
     return () => clearTimeout(handle)
-  }, [value, parsed.kind])
+    // projectEpoch: a library import/remove can (un)resolve this POU's
+    // FB references without the buffer changing — re-check.
+  }, [value, parsed.kind, path, projectEpoch])
 
   if (parsed.kind === "error") {
     return (
@@ -2167,10 +2175,15 @@ function FbCallEditFields({
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          {allFbs().map((fb) => (
-            <SelectItem key={fb.type} value={fb.type}>
-              {fb.type}
-            </SelectItem>
+          {groupedFbs().map((group) => (
+            <SelectGroup key={group.label}>
+              <SelectLabel>{group.label}</SelectLabel>
+              {group.fbs.map((fb) => (
+                <SelectItem key={fb.type} value={fb.type}>
+                  {fb.type}
+                </SelectItem>
+              ))}
+            </SelectGroup>
           ))}
         </SelectContent>
       </Select>
@@ -2308,13 +2321,18 @@ function FbInsertPicker({
         {label}
       </SelectTrigger>
       <SelectContent>
-        {allFbs().map((fb) => (
-          <SelectItem key={fb.type} value={fb.type}>
-            <span className="font-mono">{fb.type}</span>
-            <span className="ml-2 text-muted-foreground">
-              {fb.label.replace(`${fb.type} — `, "")}
-            </span>
-          </SelectItem>
+        {groupedFbs().map((group) => (
+          <SelectGroup key={group.label}>
+            <SelectLabel>{group.label}</SelectLabel>
+            {group.fbs.map((fb) => (
+              <SelectItem key={fb.type} value={fb.type}>
+                <span className="font-mono">{fb.type}</span>
+                <span className="ml-2 text-muted-foreground">
+                  {fb.label.replace(`${fb.type} — `, "")}
+                </span>
+              </SelectItem>
+            ))}
+          </SelectGroup>
         ))}
       </SelectContent>
     </Select>

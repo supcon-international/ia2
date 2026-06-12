@@ -1,6 +1,7 @@
 mod edges;
 mod error;
 mod events;
+mod library;
 mod routes;
 mod state;
 
@@ -75,6 +76,15 @@ struct Cli {
     #[arg(long, value_name = "ADDR")]
     demo_modbus_addr: Option<String>,
 
+    /// Root directory of the importable FB-library registry (one
+    /// subdirectory per library, each holding `library.toml` +
+    /// `pous/*.st`). Equivalent to the `IA2_LIBRARY_DIR` env var; flag
+    /// wins when both are set. When neither is set, `./library` is
+    /// used if it exists (the dev layout: server started from the repo
+    /// root). Without a registry, /api/library lists nothing.
+    #[arg(long, value_name = "DIR")]
+    library_dir: Option<PathBuf>,
+
     /// If set, periodically check whether the given PID is still
     /// alive and exit if not. The Mac/Windows desktop shell passes
     /// its own PID here so the server reaps itself if the shell is
@@ -130,7 +140,18 @@ async fn main() -> anyhow::Result<()> {
         .clone()
         .or_else(|| std::env::var("DEMO_MODBUS_ADDR").ok())
         .unwrap_or_else(|| DEFAULT_DEMO_MODBUS_ADDR.into());
-    let state = AppState::new(demo_slave.clone(), demo_addr.clone());
+    let library_dir = cli
+        .library_dir
+        .clone()
+        .or_else(|| std::env::var("IA2_LIBRARY_DIR").ok().map(PathBuf::from))
+        .or_else(|| {
+            let dev_default = PathBuf::from("library");
+            dev_default.is_dir().then_some(dev_default)
+        });
+    if let Some(dir) = &library_dir {
+        tracing::info!(library_dir = %dir.display(), "FB-library registry enabled");
+    }
+    let state = AppState::new(demo_slave.clone(), demo_addr.clone(), library_dir);
     try_open_last_project(&state);
 
     if !demo_addr.is_empty() {
@@ -172,6 +193,12 @@ async fn main() -> anyhow::Result<()> {
         // POUs (PROGRAM + FB + FUNCTION side by side); declarations are
         // parsed and surfaced in /api/project + /api/project/pous.
         .route("/api/pous", post(routes::create_pou))
+        .route("/api/library", get(routes::list_libraries))
+        .route("/api/library/import", post(routes::import_library))
+        .route(
+            "/api/library/{name}",
+            axum::routing::delete(routes::remove_library),
+        )
         .route("/api/pous/folders", post(routes::create_pou_folder))
         .route(
             "/api/pous/folders/{*path}",

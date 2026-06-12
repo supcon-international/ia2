@@ -27,6 +27,7 @@ import { buildProjectFbDefs, setProjectFbs, type FbPin } from "@/lib/ld-fbs"
 import { invalidationBus, Topic } from "@/state/invalidation"
 import {
   attachEdge as apiAttachEdge,
+  checkProgram,
   closeProject as apiCloseProject,
   currentProject,
   createDevice as apiCreateDevice,
@@ -152,6 +153,10 @@ type AppState = {
   setSource: (s: string) => void
   isDirty: boolean
   diagnostics: CheckDiagnostic[]
+  /** Bumps on every project-tree refresh. Editors put it in their
+   *  diagnostics-effect deps so importing/removing a library re-checks
+   *  an already-open POU (its FB references may have just (un)resolved). */
+  projectEpoch: number
 
   currentDevice: Device | null
   currentEdge: Edge | null
@@ -232,6 +237,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   const [currentPou, setCurrentPou] = useState<Pou | null>(null)
   const [source, setSource] = useState("")
   const [diagnostics, setDiagnostics] = useState<CheckDiagnostic[]>([])
+  const [projectEpoch, setProjectEpoch] = useState(0)
   const [currentDevice, setCurrentDevice] = useState<Device | null>(null)
   const [currentEdge, setCurrentEdge] = useState<Edge | null>(null)
   const [attached, setAttached] = useState<AttachedEdge>(null)
@@ -294,6 +300,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     )
     ;(async () => {
       const pinsByType = new Map<string, FbPin[]>()
+      const pathByType = new Map<string, string>()
       await Promise.all(
         fbFiles.map(async (p) => {
           try {
@@ -310,6 +317,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
               (d) => d.type === "function_block",
             )) {
               pinsByType.set(d.name, pins)
+              pathByType.set(d.name, p.path)
             }
           } catch {
             // Leave this FB pinless rather than dropping it — it can
@@ -319,7 +327,10 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       )
       if (cancelled) return
       const defs = buildProjectFbDefs(
-        [...pinsByType.keys()].map((type) => ({ type })),
+        [...pinsByType.keys()].map((type) => ({
+          type,
+          path: pathByType.get(type),
+        })),
         (type) => pinsByType.get(type) ?? [],
       )
       setProjectFbs(defs)
@@ -336,6 +347,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     try {
       const tree = await fetchProject()
       setProject(tree)
+      setProjectEpoch((e) => e + 1)
       // Drop currentPou if the project lost it (e.g. deleted).
       if (
         tree &&
@@ -518,11 +530,14 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     return () => es.close()
   }, [])
 
-  // ---------------- LSP-driven diagnostics ----------------
+  // ---------------- Editor diagnostics (ST) ----------------
 
-  // One client per opened POU. Tears down on app switch / project close;
-  // publishDiagnostics from the ironplc LSP land in `diagnostics` and
-  // flow to Monaco markers + the ProgramPane header badge.
+  // One LSP client per opened POU — it still powers Monaco's semantic
+  // tokens / symbols, but its publishDiagnostics are IGNORED: the LSP
+  // sees one file in isolation, so any reference to a FUNCTION_BLOCK
+  // declared in a sibling file (i.e. every library call) would
+  // false-positive P2008. The project-aware `/api/check` below is the
+  // diagnostics source instead, same as the graphical editors.
   const lspRef = useRef<LspClient | null>(null)
   useEffect(() => {
     if (!currentPou) {
@@ -534,7 +549,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     const client = new LspClient({
       uri: `file:///${currentPou.path}.st`,
       languageId: "iec61131",
-      onDiagnostics: setDiagnostics,
+      onDiagnostics: () => {},
     })
     lspRef.current = client
     return () => {
@@ -546,6 +561,31 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     lspRef.current?.setSource(source)
   }, [source])
+
+  // Project-aware squiggles for ST buffers, 350 ms debounced (the
+  // graphical editors run their own identical loop with their JSON
+  // languages — see FBDEditor/LDEditor/SFCEditor).
+  const currentLanguage = currentPou?.declarations[0]?.language ?? "st"
+  useEffect(() => {
+    if (!currentPou || currentLanguage !== "st") {
+      setDiagnostics([])
+      return
+    }
+    const path = currentPou.path
+    let cancelled = false
+    const handle = setTimeout(async () => {
+      try {
+        const diags = await checkProgram(source, "st", path)
+        if (!cancelled) setDiagnostics(diags)
+      } catch (e) {
+        console.warn("ST diagnostics fetch failed:", e)
+      }
+    }, 350)
+    return () => {
+      cancelled = true
+      clearTimeout(handle)
+    }
+  }, [source, currentPou?.path, currentLanguage, projectEpoch])
 
   // ---------------- Invalidation bus subscriptions ----------------
   //
@@ -1039,6 +1079,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         setSource,
         isDirty,
         diagnostics,
+        projectEpoch,
         currentDevice,
         currentEdge,
         attached,

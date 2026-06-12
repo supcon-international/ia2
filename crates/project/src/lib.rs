@@ -33,7 +33,7 @@ pub use paths::{
     save_last_opened,
 };
 pub use sfc::{SfcAction, SfcProgram, SfcQualifier, SfcStep, SfcTransition};
-pub use store::{MigrationReport, ProjectStore};
+pub use store::{is_library_slug, MigrationReport, ProjectStore, LIBRARY_SLUG_PREFIX};
 pub use types::{
     Device, Direction, Edge, EthercatChannel, EthercatConfig, EthercatDataType, EthercatDcSync,
     EthercatPdoDirection, EthercatSlave, IoMap, Mapping, ModbusChannel, ModbusChannelKind,
