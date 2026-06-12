@@ -39,8 +39,9 @@ export interface FbDef {
   type: string
   /** Short human label for the picker (e.g. "On-delay timer"). */
   label: string
-  /** Picker category — groups related FBs together. */
-  category: "timer" | "counter" | "edge" | "bistable"
+  /** Picker category — groups related FBs together. `project` is for
+   *  user-defined FBs discovered in the open project (the library). */
+  category: "timer" | "counter" | "edge" | "bistable" | "project"
   /** Two-line description for the picker. */
   description: string
   /** All pins, in render order (top-to-bottom on each side). */
@@ -204,9 +205,51 @@ export const STANDARD_FBS: FbDef[] = [
   },
 ]
 
-/** Look up an FB by its IEC type name. Case-sensitive. */
+/* ---------------------------------------------------------------- */
+/* Project FB registry — user-defined FUNCTION_BLOCKs discovered in  */
+/* the open project (e.g. the process-control library once imported).*/
+/* Set once when the project tree loads (see runtime state); the     */
+/* graphical editors then offer them in the block palette alongside  */
+/* the builtins, with pins derived from each FB's VAR_INPUT /         */
+/* VAR_OUTPUT. Module-level so the existing pure lookup helpers       */
+/* resolve them without threading a catalogue through every caller.  */
+/* ---------------------------------------------------------------- */
+
+let PROJECT_FBS: FbDef[] = []
+
+/** Replace the project FB registry. Builtins always win on a name
+ *  clash (a project must not shadow TON, etc.). */
+export function setProjectFbs(fbs: FbDef[]): void {
+  const builtinNames = new Set(STANDARD_FBS.map((f) => f.type))
+  PROJECT_FBS = fbs.filter((f) => !builtinNames.has(f.type))
+}
+
+/** The full palette: builtins first, then project FBs. */
+export function allFbs(): FbDef[] {
+  return [...STANDARD_FBS, ...PROJECT_FBS]
+}
+
+/** Build FbDefs from project POUs. `fbPous` is the FUNCTION_BLOCK
+ *  declarations (name + file path); `pinsFor` yields each one's pins
+ *  from its parsed VAR_INPUT / VAR_OUTPUT. FBs with no pins yet (failed
+ *  parse / empty skeleton) are still listed so they can be placed. */
+export function buildProjectFbDefs(
+  fbPous: { type: string }[],
+  pinsFor: (type: string) => FbPin[],
+): FbDef[] {
+  return fbPous.map((p) => ({
+    type: p.type,
+    label: `${p.type} — project block`,
+    category: "project" as const,
+    description: "User-defined function block from this project.",
+    pins: pinsFor(p.type),
+    instancePrefix: p.type.replace(/^FB_/i, "").toLowerCase() || "fb",
+  }))
+}
+
+/** Look up an FB by its IEC type name (builtin or project). Case-sensitive. */
 export function fbByType(type: string): FbDef | undefined {
-  return STANDARD_FBS.find((fb) => fb.type === type)
+  return STANDARD_FBS.find((fb) => fb.type === type) ?? PROJECT_FBS.find((fb) => fb.type === type)
 }
 
 /** All BOOL output pin names for the given FB type, used by the

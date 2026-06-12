@@ -23,6 +23,7 @@ import type { Protocol } from "@/types/generated/Protocol"
 import type { Tasks } from "@/types/generated/Tasks"
 import type { VarSnapshot } from "@/types/generated/VarSnapshot"
 import { agentActivityStore } from "@/state/agent-activity"
+import { buildProjectFbDefs, setProjectFbs, type FbPin } from "@/lib/ld-fbs"
 import { invalidationBus, Topic } from "@/state/invalidation"
 import {
   attachEdge as apiAttachEdge,
@@ -45,6 +46,7 @@ import {
   fetchIomap,
   fetchPou,
   fetchProject,
+  fetchPouVariables,
   fetchProjects as apiFetchProjects,
   fetchRuntimeStatus,
   fetchTasks,
@@ -263,6 +265,70 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     sourceRef.current = source
   }, [source])
+
+  // Register the project's own FUNCTION_BLOCKs (e.g. the imported
+  // process-control library) so the graphical FBD / LD editors offer
+  // them in the block palette alongside the builtins, with pins from
+  // each FB's VAR_INPUT / VAR_OUTPUT. Re-runs whenever the POU set
+  // changes (import/create/delete a block).
+  const fbSignature = project?.pous
+    .flatMap((p) =>
+      p.declarations
+        .filter((d) => d.type === "function_block")
+        .map((d) => `${p.path}:${d.name}`),
+    )
+    .sort()
+    .join(",")
+  useEffect(() => {
+    let cancelled = false
+    const tree = project
+    if (!tree) {
+      setProjectFbs([])
+      return
+    }
+    // One file → its FB declarations; pins come from the file's
+    // input/output vars (library convention is one FB per file, so the
+    // mapping is exact). Fetch each FB file's variables once.
+    const fbFiles = tree.pous.filter((p) =>
+      p.declarations.some((d) => d.type === "function_block"),
+    )
+    ;(async () => {
+      const pinsByType = new Map<string, FbPin[]>()
+      await Promise.all(
+        fbFiles.map(async (p) => {
+          try {
+            const vars = await fetchPouVariables(p.path)
+            const pins: FbPin[] = vars
+              .filter((v) => v.direction === "input" || v.direction === "output")
+              .map((v) => ({
+                pin: v.name,
+                direction: v.direction === "output" ? "output" : "input",
+                type: v.type_name,
+                doc: `${v.direction} ${v.type_name}`,
+              }))
+            for (const d of p.declarations.filter(
+              (d) => d.type === "function_block",
+            )) {
+              pinsByType.set(d.name, pins)
+            }
+          } catch {
+            // Leave this FB pinless rather than dropping it — it can
+            // still be placed; pins fill in once it parses.
+          }
+        }),
+      )
+      if (cancelled) return
+      const defs = buildProjectFbDefs(
+        [...pinsByType.keys()].map((type) => ({ type })),
+        (type) => pinsByType.get(type) ?? [],
+      )
+      setProjectFbs(defs)
+    })()
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fbSignature])
 
   // ---------------- Bootstrap ----------------
 

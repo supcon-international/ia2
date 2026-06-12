@@ -44,7 +44,7 @@ import {
   setBlockPosition,
   setOutputBinding,
 } from "@/lib/fbd-edit"
-import { fbByType, fbInputs, STANDARD_FBS } from "@/lib/ld-fbs"
+import { allFbs, fbByType, fbInputs } from "@/lib/ld-fbs"
 import { cn } from "@/lib/utils"
 import { Input } from "@/components/ui/input"
 import {
@@ -324,7 +324,7 @@ function Toolbar({
           Block
         </SelectTrigger>
         <SelectContent>
-          {STANDARD_FBS.map((fb) => (
+          {allFbs().map((fb) => (
             <SelectItem key={fb.type} value={fb.type}>
               <span className="font-mono">{fb.type}</span>
               <span className="ml-2 text-muted-foreground">
@@ -1044,7 +1044,7 @@ function BlockDetail({
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          {STANDARD_FBS.map((fb) => (
+          {allFbs().map((fb) => (
             <SelectItem key={fb.type} value={fb.type}>
               {fb.type}
             </SelectItem>
