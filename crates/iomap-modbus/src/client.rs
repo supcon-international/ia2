@@ -22,14 +22,15 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use iocore::{ChannelValue, IoDevice, IoError};
+use iocore::{ChannelValue, HealthTracker, HealthTransition, IoDevice, IoError};
 use project::{
     ModbusChannel, ModbusChannelKind, ModbusConfig, ModbusDataBits, ModbusDataType, ModbusParity,
-    ModbusRtuParams, ModbusStopBits, ModbusTcpParams, ModbusTransport, ModbusWordOrder,
+    ModbusStopBits, ModbusTransport, ModbusWordOrder,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio_modbus::client::{rtu, tcp, Context, Reader, Writer};
@@ -46,6 +47,115 @@ const MAX_SPAN_GAP: u16 = 8;
 /// spec maxima of 125 registers / 2000 bits).
 const MAX_REGS_PER_READ: u16 = 120;
 const MAX_BITS_PER_READ: u16 = 1968;
+
+/// Consecutive failed mirror refreshes before the device is flagged
+/// unhealthy (one ERROR log per outage, not one per poll).
+const UNHEALTHY_AFTER_FAILURES: u32 = 3;
+/// Default per-request timeout (TCP connect + every Modbus request) when
+/// `ModbusConfig.timeout_ms` is unset.
+const DEFAULT_TIMEOUT_MS: u32 = 1_000;
+/// Default initial reconnect backoff when `reconnect_backoff_ms` is unset.
+const DEFAULT_RECONNECT_BACKOFF_MS: u32 = 1_000;
+/// Reconnect backoff doubles per failed attempt up to this cap.
+const RECONNECT_BACKOFF_CAP: Duration = Duration::from_secs(10);
+
+/// Per-request timeout from config (adapter default when unset).
+fn request_timeout(config: &ModbusConfig) -> Duration {
+    Duration::from_millis(config.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).max(1) as u64)
+}
+
+/// Initial reconnect backoff from config (adapter default when unset).
+fn initial_backoff(config: &ModbusConfig) -> Duration {
+    let ms = config
+        .reconnect_backoff_ms
+        .unwrap_or(DEFAULT_RECONNECT_BACKOFF_MS)
+        .max(10);
+    Duration::from_millis(ms as u64)
+}
+
+/// Exponential reconnect backoff: starts at `initial`, doubles per
+/// failed attempt, saturates at `cap`, resets on a healthy poll.
+#[derive(Debug)]
+struct Backoff {
+    initial: Duration,
+    cap: Duration,
+    next: Duration,
+}
+
+impl Backoff {
+    fn new(initial: Duration, cap: Duration) -> Self {
+        let initial = initial.min(cap);
+        Self {
+            initial,
+            cap,
+            next: initial,
+        }
+    }
+
+    /// Delay to wait before the next attempt (doubles for the one after).
+    fn next_delay(&mut self) -> Duration {
+        let delay = self.next;
+        self.next = (self.next * 2).min(self.cap);
+        delay
+    }
+
+    fn reset(&mut self) {
+        self.next = self.initial;
+    }
+}
+
+/// Internal transfer-failure classification. The distinction drives the
+/// reconnect logic:
+/// - `Protocol` — the slave answered with a Modbus exception code. The
+///   link works; reconnecting would not help.
+/// - `Transport` — socket/serial error or request timeout. The
+///   connection is dead (or desynced) and must be re-established.
+#[derive(Debug)]
+enum XferError {
+    Protocol(String),
+    Transport(String),
+}
+
+impl XferError {
+    fn message(&self) -> &str {
+        match self {
+            XferError::Protocol(m) | XferError::Transport(m) => m,
+        }
+    }
+
+    /// Boundary mapping — both flavors surface to callers as
+    /// `IoError::Transport`, preserving the adapter's existing error
+    /// surface (`modbus exception: …` messages included).
+    fn into_io(self) -> IoError {
+        match self {
+            XferError::Protocol(m) | XferError::Transport(m) => IoError::Transport(m),
+        }
+    }
+}
+
+/// Run one Modbus request under the per-request timeout and flatten
+/// tokio-modbus's nested `Result<Result<T, Exception>, Error>` into our
+/// transport/protocol classification. A timeout counts as transport: a
+/// late response would desync the transaction stream (fatal on RTU,
+/// risky on TCP), so the connection is rebuilt.
+async fn request<T, P, E>(
+    timeout: Duration,
+    fut: impl std::future::Future<Output = Result<Result<T, P>, E>>,
+) -> Result<T, XferError>
+where
+    P: std::fmt::Display,
+    E: std::fmt::Display,
+{
+    match tokio::time::timeout(timeout, fut).await {
+        Err(_) => Err(XferError::Transport(format!(
+            "request timed out after {}ms",
+            timeout.as_millis()
+        ))),
+        Ok(Err(e)) => Err(XferError::Transport(e.to_string())),
+        Ok(Ok(Err(e))) => Err(XferError::Protocol(format!("modbus exception: {e}"))),
+        Ok(Ok(Ok(v))) => Ok(v),
+    }
+}
 
 /// One contiguous read of `count` units starting at `start` for a
 /// function-code group.
@@ -73,18 +183,18 @@ pub struct ModbusDevice {
     name: String,
     channels: HashMap<String, ModbusChannel>,
     mirror: Arc<RwLock<HashMap<String, ChannelValue>>>,
+    /// Mirrored from the poll task's `HealthTracker`: `false` after
+    /// `UNHEALTHY_AFTER_FAILURES` consecutive failed refreshes, `true`
+    /// again on the first successful poll.
+    healthy: Arc<AtomicBool>,
     cmd_tx: mpsc::Sender<Cmd>,
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl ModbusDevice {
     pub async fn connect(name: String, config: &ModbusConfig) -> Result<Self, IoError> {
-        // Branch on transport: TCP opens a socket, RTU opens a serial
-        // port. Past this point the Modbus PDUs are identical.
-        let mut client = match &config.transport {
-            ModbusTransport::Tcp(p) => Self::connect_tcp(p, config.slave_id).await?,
-            ModbusTransport::Rtu(p) => Self::connect_rtu(p, config.slave_id).await?,
-        };
+        let timeout = request_timeout(config);
+        let mut client = establish(&config.transport, config.slave_id, timeout).await?;
 
         let channels: HashMap<String, ModbusChannel> = config
             .channels
@@ -97,23 +207,27 @@ impl ModbusDevice {
         // Seed the mirror with one full poll so the first scan round sees
         // real values — and so an unreachable slave fails the connect
         // loudly instead of silently serving zeros.
-        poll_once(&mut client, &spans, &config.channels, &mirror).await?;
+        poll_once(&mut client, &spans, &config.channels, &mirror, timeout)
+            .await
+            .map_err(XferError::into_io)?;
 
+        let healthy = Arc::new(AtomicBool::new(true));
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let task = tokio::spawn(poll_task(
             name.clone(),
             client,
+            config.clone(),
             spans,
-            config.channels.clone(),
             mirror.clone(),
             cmd_rx,
-            Duration::from_millis(config.poll_interval_ms.max(20) as u64),
+            healthy.clone(),
         ));
 
         tracing::info!(
             device = %name,
             channels = channels.len(),
             poll_ms = config.poll_interval_ms,
+            timeout_ms = timeout.as_millis() as u64,
             "modbus connected; mirror seeded"
         );
 
@@ -121,47 +235,10 @@ impl ModbusDevice {
             name,
             channels,
             mirror,
+            healthy,
             cmd_tx,
             task: Some(task),
         })
-    }
-
-    async fn connect_tcp(p: &ModbusTcpParams, slave_id: u8) -> Result<Context, IoError> {
-        let addr_str = format!("{}:{}", p.host, p.port);
-        let socket = SocketAddr::from_str(&addr_str)
-            .map_err(|e| IoError::Connect(format!("invalid address {addr_str}: {e}")))?;
-        tcp::connect_slave(socket, Slave(slave_id))
-            .await
-            .map_err(|e| IoError::Connect(e.to_string()))
-    }
-
-    async fn connect_rtu(p: &ModbusRtuParams, slave_id: u8) -> Result<Context, IoError> {
-        // 500 ms read timeout: generous for most slaves, short enough
-        // that a missing slave doesn't wedge the poll task.
-        let builder = tokio_serial::new(&p.serial_device, p.baud_rate)
-            .data_bits(match p.data_bits {
-                ModbusDataBits::Five => SerialDataBits::Five,
-                ModbusDataBits::Six => SerialDataBits::Six,
-                ModbusDataBits::Seven => SerialDataBits::Seven,
-                ModbusDataBits::Eight => SerialDataBits::Eight,
-            })
-            .parity(match p.parity {
-                ModbusParity::None => SerialParity::None,
-                ModbusParity::Even => SerialParity::Even,
-                ModbusParity::Odd => SerialParity::Odd,
-            })
-            .stop_bits(match p.stop_bits {
-                ModbusStopBits::One => SerialStopBits::One,
-                ModbusStopBits::Two => SerialStopBits::Two,
-            })
-            .timeout(Duration::from_millis(500));
-        let stream = SerialStream::open(&builder).map_err(|e| {
-            IoError::Connect(format!(
-                "opening serial port {device}: {e}",
-                device = p.serial_device
-            ))
-        })?;
-        Ok(rtu::attach_slave(stream, Slave(slave_id)))
     }
 
     fn channel(&self, name: &str) -> Result<ModbusChannel, IoError> {
@@ -169,6 +246,59 @@ impl ModbusDevice {
             .get(name)
             .cloned()
             .ok_or_else(|| IoError::UnknownChannel(name.into()))
+    }
+}
+
+/// Open the configured transport: TCP opens a socket (bounded by the
+/// per-request timeout — a SYN to a black-holed host can otherwise hang
+/// for minutes), RTU opens a serial port. Past this point the Modbus
+/// PDUs are identical. Used both at `connect` and by the poll task's
+/// reconnect path.
+async fn establish(
+    transport: &ModbusTransport,
+    slave_id: u8,
+    timeout: Duration,
+) -> Result<Context, IoError> {
+    match transport {
+        ModbusTransport::Tcp(p) => {
+            let addr_str = format!("{}:{}", p.host, p.port);
+            let socket = SocketAddr::from_str(&addr_str)
+                .map_err(|e| IoError::Connect(format!("invalid address {addr_str}: {e}")))?;
+            match tokio::time::timeout(timeout, tcp::connect_slave(socket, Slave(slave_id))).await {
+                Err(_) => Err(IoError::Connect(format!(
+                    "connect to {addr_str} timed out after {}ms",
+                    timeout.as_millis()
+                ))),
+                Ok(Err(e)) => Err(IoError::Connect(e.to_string())),
+                Ok(Ok(ctx)) => Ok(ctx),
+            }
+        }
+        ModbusTransport::Rtu(p) => {
+            let builder = tokio_serial::new(&p.serial_device, p.baud_rate)
+                .data_bits(match p.data_bits {
+                    ModbusDataBits::Five => SerialDataBits::Five,
+                    ModbusDataBits::Six => SerialDataBits::Six,
+                    ModbusDataBits::Seven => SerialDataBits::Seven,
+                    ModbusDataBits::Eight => SerialDataBits::Eight,
+                })
+                .parity(match p.parity {
+                    ModbusParity::None => SerialParity::None,
+                    ModbusParity::Even => SerialParity::Even,
+                    ModbusParity::Odd => SerialParity::Odd,
+                })
+                .stop_bits(match p.stop_bits {
+                    ModbusStopBits::One => SerialStopBits::One,
+                    ModbusStopBits::Two => SerialStopBits::Two,
+                })
+                .timeout(timeout);
+            let stream = SerialStream::open(&builder).map_err(|e| {
+                IoError::Connect(format!(
+                    "opening serial port {device}: {e}",
+                    device = p.serial_device
+                ))
+            })?;
+            Ok(rtu::attach_slave(stream, Slave(slave_id)))
+        }
     }
 }
 
@@ -277,28 +407,25 @@ fn encode_regs(ch: &ModbusChannel, value: ChannelValue) -> Vec<u16> {
     }
 }
 
-fn xerr<T>(e: impl std::fmt::Display) -> Result<T, IoError> {
-    Err(IoError::Transport(e.to_string()))
-}
-
 /// One full mirror refresh: every span in one bulk read each.
 async fn poll_once(
     client: &mut Context,
     spans: &[Span],
     channels: &[ModbusChannel],
     mirror: &Arc<RwLock<HashMap<String, ChannelValue>>>,
-) -> Result<(), IoError> {
+    timeout: Duration,
+) -> Result<(), XferError> {
     for span in spans {
         match span.kind {
             ModbusChannelKind::Coil | ModbusChannelKind::DiscreteInput => {
-                let res = match span.kind {
-                    ModbusChannelKind::Coil => client.read_coils(span.start, span.count).await,
-                    _ => client.read_discrete_inputs(span.start, span.count).await,
-                };
-                let bits = match res {
-                    Ok(Ok(v)) => v,
-                    Ok(Err(e)) => return xerr(format!("modbus exception: {e}")),
-                    Err(e) => return xerr(e),
+                let bits = match span.kind {
+                    ModbusChannelKind::Coil => {
+                        request(timeout, client.read_coils(span.start, span.count)).await?
+                    }
+                    _ => {
+                        request(timeout, client.read_discrete_inputs(span.start, span.count))
+                            .await?
+                    }
                 };
                 let mut m = mirror.write().expect("mirror poisoned");
                 for ch in channels.iter().filter(|c| c.kind == span.kind) {
@@ -311,16 +438,18 @@ async fn poll_once(
                 }
             }
             ModbusChannelKind::HoldingRegister | ModbusChannelKind::InputRegister => {
-                let res = match span.kind {
+                let words = match span.kind {
                     ModbusChannelKind::HoldingRegister => {
-                        client.read_holding_registers(span.start, span.count).await
+                        request(
+                            timeout,
+                            client.read_holding_registers(span.start, span.count),
+                        )
+                        .await?
                     }
-                    _ => client.read_input_registers(span.start, span.count).await,
-                };
-                let words = match res {
-                    Ok(Ok(v)) => v,
-                    Ok(Err(e)) => return xerr(format!("modbus exception: {e}")),
-                    Err(e) => return xerr(e),
+                    _ => {
+                        request(timeout, client.read_input_registers(span.start, span.count))
+                            .await?
+                    }
                 };
                 let mut m = mirror.write().expect("mirror poisoned");
                 for ch in channels.iter().filter(|c| c.kind == span.kind) {
@@ -338,52 +467,45 @@ async fn poll_once(
     Ok(())
 }
 
-/// Execute one write command against the connection.
+/// Execute one write command against the connection. Read-only kinds are
+/// rejected up front in `write_channel`, before the command is queued.
 async fn do_write(
     client: &mut Context,
     ch: &ModbusChannel,
     value: ChannelValue,
-) -> Result<(), IoError> {
+    timeout: Duration,
+) -> Result<(), XferError> {
     match ch.kind {
         ModbusChannelKind::Coil => {
             let b = value.to_i32() != 0;
-            match client.write_single_coil(ch.address, b).await {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(e)) => xerr(format!("modbus exception: {e}")),
-                Err(e) => xerr(e),
-            }
+            request(timeout, client.write_single_coil(ch.address, b)).await
         }
         ModbusChannelKind::HoldingRegister => {
             let regs = encode_regs(ch, value);
-            let res = if regs.len() == 1 {
-                client.write_single_register(ch.address, regs[0]).await
+            if regs.len() == 1 {
+                request(timeout, client.write_single_register(ch.address, regs[0])).await
             } else {
-                client.write_multiple_registers(ch.address, &regs).await
-            };
-            match res {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(e)) => xerr(format!("modbus exception: {e}")),
-                Err(e) => xerr(e),
+                request(timeout, client.write_multiple_registers(ch.address, &regs)).await
             }
         }
-        ModbusChannelKind::DiscreteInput | ModbusChannelKind::InputRegister => {
-            Err(IoError::TypeMismatch {
-                channel: ch.name.clone(),
-                value,
-            })
-        }
+        ModbusChannelKind::DiscreteInput | ModbusChannelKind::InputRegister => Err(
+            XferError::Protocol(format!("channel '{}' is read-only", ch.name)),
+        ),
     }
 }
 
-/// Zero every writable channel. Continues past per-channel errors and
-/// returns the first — drive as many outputs safe as possible even if
-/// one register write fails.
+/// Zero every writable channel. Continues past per-channel *protocol*
+/// errors and returns the first — drive as many outputs safe as possible
+/// even if one register write is rejected. A *transport* error aborts the
+/// sweep instead: the link is gone, so the remaining writes can only burn
+/// the shutdown budget timing out one by one.
 async fn do_failsafe(
     device: &str,
     client: &mut Context,
     channels: &[ModbusChannel],
-) -> Result<(), IoError> {
-    let mut first_err: Option<IoError> = None;
+    timeout: Duration,
+) -> Result<(), XferError> {
+    let mut first_err: Option<XferError> = None;
     for ch in channels.iter().filter(|c| {
         matches!(
             c.kind,
@@ -394,9 +516,16 @@ async fn do_failsafe(
             ModbusDataType::F32 => ChannelValue::Real(0.0),
             _ => ChannelValue::I32(0),
         };
-        if let Err(e) = do_write(client, ch, zero).await {
-            tracing::warn!(device = %device, channel = %ch.name, %e, "failsafe write failed");
-            first_err.get_or_insert(e);
+        match do_write(client, ch, zero, timeout).await {
+            Ok(()) => {}
+            Err(e @ XferError::Transport(_)) => {
+                tracing::warn!(device = %device, channel = %ch.name, error = %e.message(), "failsafe aborted: transport gone");
+                return Err(e);
+            }
+            Err(e) => {
+                tracing::warn!(device = %device, channel = %ch.name, error = %e.message(), "failsafe write failed");
+                first_err.get_or_insert(e);
+            }
         }
     }
     match first_err {
@@ -408,35 +537,156 @@ async fn do_failsafe(
     }
 }
 
+/// Drop a dead connection and schedule the next reconnect attempt.
+fn drop_link(
+    device: &str,
+    link: &mut Option<Context>,
+    retry_at: &mut tokio::time::Instant,
+    backoff: &mut Backoff,
+) {
+    *link = None;
+    let delay = backoff.next_delay();
+    *retry_at = tokio::time::Instant::now() + delay;
+    tracing::warn!(
+        device = %device,
+        retry_in_ms = delay.as_millis() as u64,
+        "modbus transport error; connection dropped, reconnecting with backoff"
+    );
+}
+
+/// Health bookkeeping for one failed mirror refresh. Exactly one ERROR
+/// per outage (when the threshold is crossed); WARN before that, DEBUG
+/// for the repeats while already unhealthy.
+fn note_poll_failure(device: &str, health: &mut HealthTracker, error: &str) {
+    match health.record_failure() {
+        HealthTransition::BecameUnhealthy => {
+            tracing::error!(
+                device = %device,
+                consecutive_failures = health.consecutive_failures(),
+                error = %error,
+                "modbus device unhealthy; serving last-known values until it recovers"
+            );
+        }
+        _ if health.is_healthy() => {
+            tracing::warn!(device = %device, error = %error, "modbus poll failed; serving last-known values");
+        }
+        _ => {
+            tracing::debug!(device = %device, error = %error, "modbus poll still failing");
+        }
+    }
+}
+
 /// The connection-owning task: periodic mirror refresh, interleaved
 /// with write/failsafe commands. Single owner = no concurrent use of
 /// the transport (mandatory for RTU, polite for TCP slaves).
+///
+/// Resilience model:
+/// - every failed refresh bumps the consecutive-failure counter; at
+///   `UNHEALTHY_AFTER_FAILURES` the shared `healthy` flag flips (ERROR
+///   logged once), and the first successful refresh clears it (INFO);
+/// - a *transport* failure additionally drops the connection and
+///   re-establishes it with exponential backoff (initial =
+///   `reconnect_backoff_ms`, doubling to a 10 s cap) — instead of
+///   polling a dead context forever. RTU reopens the serial port the
+///   same way;
+/// - while disconnected, writes fail fast and reads keep serving the
+///   last-known mirror.
 async fn poll_task(
     device: String,
-    mut client: Context,
+    client: Context,
+    config: ModbusConfig,
     spans: Vec<Span>,
-    channels: Vec<ModbusChannel>,
     mirror: Arc<RwLock<HashMap<String, ChannelValue>>>,
     mut cmd_rx: mpsc::Receiver<Cmd>,
-    interval: Duration,
+    healthy: Arc<AtomicBool>,
 ) {
+    let interval = Duration::from_millis(config.poll_interval_ms.max(20) as u64);
+    let timeout = request_timeout(&config);
+    let mut health = HealthTracker::with_flag(UNHEALTHY_AFTER_FAILURES, healthy);
+    let mut backoff = Backoff::new(initial_backoff(&config), RECONNECT_BACKOFF_CAP);
+    let mut link: Option<Context> = Some(client);
+    let mut retry_at = tokio::time::Instant::now();
+
     let mut tick = tokio::time::interval(interval);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             cmd = cmd_rx.recv() => match cmd {
                 Some(Cmd::Write { channel, value, ack }) => {
-                    let _ = ack.send(do_write(&mut client, &channel, value).await);
+                    let res = match link.as_mut() {
+                        Some(client) => do_write(client, &channel, value, timeout).await,
+                        None => Err(XferError::Transport(
+                            "modbus connection down (reconnecting)".into(),
+                        )),
+                    };
+                    if matches!(res, Err(XferError::Transport(_))) && link.is_some() {
+                        drop_link(&device, &mut link, &mut retry_at, &mut backoff);
+                    }
+                    let _ = ack.send(res.map_err(XferError::into_io));
                 }
                 Some(Cmd::Failsafe { ack }) => {
-                    let _ = ack.send(do_failsafe(&device, &mut client, &channels).await);
+                    let res = match link.as_mut() {
+                        Some(client) => {
+                            do_failsafe(&device, client, &config.channels, timeout).await
+                        }
+                        None => Err(XferError::Transport(
+                            "modbus connection down (reconnecting)".into(),
+                        )),
+                    };
+                    if matches!(res, Err(XferError::Transport(_))) && link.is_some() {
+                        drop_link(&device, &mut link, &mut retry_at, &mut backoff);
+                    }
+                    let _ = ack.send(res.map_err(XferError::into_io));
                 }
                 Some(Cmd::Stop) | None => break,
             },
             _ = tick.tick() => {
-                if let Err(e) = poll_once(&mut client, &spans, &channels, &mirror).await {
-                    // Keep serving last-known values; the next tick retries.
-                    tracing::warn!(device = %device, %e, "modbus poll failed; serving last-known values");
+                // Reconnect first if the link is down and the backoff has
+                // elapsed, so the same tick can already refresh the mirror.
+                if link.is_none() && tokio::time::Instant::now() >= retry_at {
+                    match establish(&config.transport, config.slave_id, timeout).await {
+                        Ok(ctx) => {
+                            tracing::info!(device = %device, "modbus transport re-established");
+                            link = Some(ctx);
+                        }
+                        Err(e) => {
+                            let delay = backoff.next_delay();
+                            retry_at = tokio::time::Instant::now() + delay;
+                            tracing::debug!(
+                                device = %device,
+                                %e,
+                                retry_in_ms = delay.as_millis() as u64,
+                                "modbus reconnect attempt failed"
+                            );
+                        }
+                    }
+                }
+                match link.as_mut() {
+                    Some(client) => {
+                        match poll_once(client, &spans, &config.channels, &mirror, timeout).await {
+                            Ok(()) => {
+                                backoff.reset();
+                                if health.record_success() == HealthTransition::Recovered {
+                                    tracing::info!(device = %device, "modbus device recovered; mirror refreshing again");
+                                }
+                            }
+                            Err(e) => {
+                                let transport_dead = matches!(e, XferError::Transport(_));
+                                note_poll_failure(&device, &mut health, e.message());
+                                if transport_dead {
+                                    drop_link(&device, &mut link, &mut retry_at, &mut backoff);
+                                }
+                            }
+                        }
+                    }
+                    // No link: the mirror is stale — count it as a failed
+                    // refresh so the unhealthy flag flips even if the very
+                    // first transport drop happened on a write.
+                    None => note_poll_failure(
+                        &device,
+                        &mut health,
+                        "connection down (reconnecting)",
+                    ),
                 }
             }
         }
@@ -471,6 +721,17 @@ impl IoDevice for ModbusDevice {
 
     async fn write_channel(&mut self, channel: &str, value: ChannelValue) -> Result<(), IoError> {
         let ch = self.channel(channel)?;
+        // Reject read-only kinds before the round-trip to the poll task —
+        // same `TypeMismatch` the write used to produce, just earlier.
+        if matches!(
+            ch.kind,
+            ModbusChannelKind::DiscreteInput | ModbusChannelKind::InputRegister
+        ) {
+            return Err(IoError::TypeMismatch {
+                channel: ch.name.clone(),
+                value,
+            });
+        }
         let (ack, rx) = oneshot::channel();
         self.cmd_tx
             .send(Cmd::Write {
@@ -482,6 +743,15 @@ impl IoDevice for ModbusDevice {
             .map_err(|_| IoError::Transport("modbus poll task gone".into()))?;
         rx.await
             .map_err(|_| IoError::Transport("modbus poll task gone".into()))?
+    }
+
+    /// `false` once the poll task has seen `UNHEALTHY_AFTER_FAILURES`
+    /// consecutive failed refreshes (link down / slave silent); `true`
+    /// again after the first successful refresh. Reads keep serving
+    /// last-known values while unhealthy — this flag is how callers
+    /// tell live data from a stale mirror.
+    fn is_healthy(&self) -> bool {
+        self.healthy.load(Ordering::Relaxed)
     }
 
     async fn enter_failsafe(&mut self) -> Result<(), IoError> {
@@ -561,5 +831,54 @@ mod tests {
             decode_regs(&ch, &[0x0002, 0x0001]),
             ChannelValue::I32(0x0001_0002)
         );
+    }
+
+    // ---- reconnect backoff state machine ---------------------------------
+
+    #[test]
+    fn backoff_doubles_to_cap_and_resets() {
+        let mut b = Backoff::new(Duration::from_secs(1), Duration::from_secs(10));
+        assert_eq!(b.next_delay(), Duration::from_secs(1));
+        assert_eq!(b.next_delay(), Duration::from_secs(2));
+        assert_eq!(b.next_delay(), Duration::from_secs(4));
+        assert_eq!(b.next_delay(), Duration::from_secs(8));
+        assert_eq!(b.next_delay(), Duration::from_secs(10), "caps at 10s");
+        assert_eq!(b.next_delay(), Duration::from_secs(10), "stays capped");
+        b.reset();
+        assert_eq!(b.next_delay(), Duration::from_secs(1), "reset → initial");
+    }
+
+    #[test]
+    fn backoff_initial_above_cap_is_clamped() {
+        let mut b = Backoff::new(Duration::from_secs(60), Duration::from_secs(10));
+        assert_eq!(b.next_delay(), Duration::from_secs(10));
+        b.reset();
+        assert_eq!(b.next_delay(), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn config_timing_helpers_apply_defaults_and_overrides() {
+        let mut cfg = ModbusConfig {
+            transport: ModbusTransport::Tcp(project::ModbusTcpParams {
+                host: "127.0.0.1".into(),
+                port: 502,
+            }),
+            slave_id: 1,
+            poll_interval_ms: 100,
+            timeout_ms: None,
+            reconnect_backoff_ms: None,
+            channels: vec![],
+        };
+        assert_eq!(request_timeout(&cfg), Duration::from_millis(1_000));
+        assert_eq!(initial_backoff(&cfg), Duration::from_millis(1_000));
+        cfg.timeout_ms = Some(250);
+        cfg.reconnect_backoff_ms = Some(50);
+        assert_eq!(request_timeout(&cfg), Duration::from_millis(250));
+        assert_eq!(initial_backoff(&cfg), Duration::from_millis(50));
+        // Degenerate values are clamped to something usable.
+        cfg.timeout_ms = Some(0);
+        cfg.reconnect_backoff_ms = Some(0);
+        assert_eq!(request_timeout(&cfg), Duration::from_millis(1));
+        assert_eq!(initial_backoff(&cfg), Duration::from_millis(10));
     }
 }

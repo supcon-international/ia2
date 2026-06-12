@@ -14,6 +14,7 @@
 
 mod errors;
 mod fbd;
+mod iomap_check;
 mod ld;
 mod paths;
 mod sfc;
@@ -24,6 +25,7 @@ pub use errors::StoreError;
 pub use fbd::{
     FbdBlock, FbdInputBinding, FbdInputSource, FbdOutputBinding, FbdPosition, FbdProgram,
 };
+pub use iomap_check::{validate_iomap, IomapIssue, IomapIssueSeverity};
 pub use ld::{
     LdCoil, LdCoilKind, LdComparator, LdFbInput, LdNode, LdOperand, LdPouType, LdProgram, LdRung,
     LdVarSection, LdVariable,

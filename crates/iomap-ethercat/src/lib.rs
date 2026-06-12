@@ -18,6 +18,7 @@
 mod bits;
 mod real;
 mod sim;
+mod validate;
 
 use async_trait::async_trait;
 use iocore::{ChannelValue, IoDevice, IoError};
@@ -90,6 +91,17 @@ impl IoDevice for EthercatDevice {
         match &self.0 {
             Inner::Sim(s) => s.name(),
             Inner::Real(r) => r.name(),
+        }
+    }
+
+    /// Forwarded like `shutdown` (see below): the bridge boxes the
+    /// façade, so without this the trait's default `true` would mask
+    /// `RealEthercat`'s tx_rx health flag. Sim has no link to lose and
+    /// reports the default `true`.
+    fn is_healthy(&self) -> bool {
+        match &self.0 {
+            Inner::Sim(s) => s.is_healthy(),
+            Inner::Real(r) => r.is_healthy(),
         }
     }
 
@@ -188,6 +200,38 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[tokio::test]
+    async fn sim_connect_rejects_bit_packed_channel_spilling_its_extent() {
+        // bit_offset 7 + bit_length 2 needs 9 bits but the derived extent
+        // covers 1 byte — the same config the real PDI accessors could
+        // never serve. Must fail at connect, not per cycle.
+        let mut cfg = sim_config_with_two_outputs_and_one_input();
+        cfg.channels.push(EthercatChannel {
+            name: "spill".into(),
+            slave_index: 0,
+            direction: EthercatPdoDirection::TxPdo,
+            pdo_index: 0x6001,
+            sub_index: 1,
+            bit_length: 2,
+            data_type: EthercatDataType::U8,
+            pdi_byte_offset: 4,
+            pdi_bit_offset: 7,
+        });
+        let err = EthercatDevice::connect("bad".into(), &cfg)
+            .await
+            .err()
+            .expect("connect must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("spill"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn sim_device_reports_healthy_through_the_facade() {
+        let cfg = sim_config_with_two_outputs_and_one_input();
+        let dev = EthercatDevice::connect("h".into(), &cfg).await.unwrap();
+        assert!(dev.is_healthy(), "sim has no link to lose");
     }
 
     #[tokio::test]

@@ -68,6 +68,8 @@ async fn bulk_poll_decodes_sparse_layout_and_32bit_types() {
         }),
         slave_id: 1,
         poll_interval_ms: 50,
+        timeout_ms: None,
+        reconnect_backoff_ms: None,
         channels: vec![
             ch(
                 "plain",

@@ -48,6 +48,8 @@ fn config_with_mixed_channels(port: u16) -> ModbusConfig {
         }),
         slave_id: 1,
         poll_interval_ms: 100,
+        timeout_ms: None,
+        reconnect_backoff_ms: None,
         channels: vec![
             ModbusChannel {
                 name: "pump".into(),

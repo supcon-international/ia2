@@ -173,6 +173,17 @@ pub struct ModbusConfig {
     /// Polling interval in milliseconds (u32 so it round-trips through JSON
     /// as a number rather than a TS bigint).
     pub poll_interval_ms: u32,
+    /// Per-request timeout in milliseconds, applied to the TCP connect and
+    /// to every Modbus request (reads, writes, failsafe). `None` = adapter
+    /// default (1000 ms). Optional + skip-if-none so existing device tomls
+    /// round-trip byte-identical until the user sets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u32>,
+    /// Initial reconnect backoff in milliseconds after a transport failure
+    /// (the adapter doubles it per failed attempt up to a fixed 10 s cap).
+    /// `None` = adapter default (1000 ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconnect_backoff_ms: Option<u32>,
     #[serde(default)]
     pub channels: Vec<ModbusChannel>,
 }
@@ -195,6 +206,10 @@ impl<'de> Deserialize<'de> for ModbusConfig {
                 #[serde(default = "default_poll_interval_ms")]
                 poll_interval_ms: u32,
                 #[serde(default)]
+                timeout_ms: Option<u32>,
+                #[serde(default)]
+                reconnect_backoff_ms: Option<u32>,
+                #[serde(default)]
                 channels: Vec<ModbusChannel>,
             },
             // Legacy: TCP fields at the top level, no `transport`.
@@ -206,6 +221,10 @@ impl<'de> Deserialize<'de> for ModbusConfig {
                 #[serde(default = "default_poll_interval_ms")]
                 poll_interval_ms: u32,
                 #[serde(default)]
+                timeout_ms: Option<u32>,
+                #[serde(default)]
+                reconnect_backoff_ms: Option<u32>,
+                #[serde(default)]
                 channels: Vec<ModbusChannel>,
             },
         }
@@ -215,11 +234,15 @@ impl<'de> Deserialize<'de> for ModbusConfig {
                 transport,
                 slave_id,
                 poll_interval_ms,
+                timeout_ms,
+                reconnect_backoff_ms,
                 channels,
             } => Self {
                 transport,
                 slave_id,
                 poll_interval_ms,
+                timeout_ms,
+                reconnect_backoff_ms,
                 channels,
             },
             Compat::Old {
@@ -227,11 +250,15 @@ impl<'de> Deserialize<'de> for ModbusConfig {
                 port,
                 slave_id,
                 poll_interval_ms,
+                timeout_ms,
+                reconnect_backoff_ms,
                 channels,
             } => Self {
                 transport: ModbusTransport::Tcp(ModbusTcpParams { host, port }),
                 slave_id,
                 poll_interval_ms,
+                timeout_ms,
+                reconnect_backoff_ms,
                 channels,
             },
         })
@@ -395,13 +422,52 @@ mod modbus_config_compat_tests {
             "channels": [],
         });
         let cfg: ModbusConfig = serde_json::from_value(json).unwrap();
-        match cfg.transport {
+        match &cfg.transport {
             ModbusTransport::Tcp(p) => {
                 assert_eq!(p.host, "192.168.1.50");
                 assert_eq!(p.port, 502);
             }
             other => panic!("expected Tcp, got {other:?}"),
         }
+        // Fields added after v0 default to None on legacy input…
+        assert_eq!(cfg.timeout_ms, None);
+        assert_eq!(cfg.reconnect_backoff_ms, None);
+        // …and stay absent on re-serialize, so untouched device tomls
+        // keep round-tripping byte-identical.
+        let back = serde_json::to_value(&cfg).unwrap();
+        assert!(back.get("timeout_ms").is_none());
+        assert!(back.get("reconnect_backoff_ms").is_none());
+    }
+
+    /// Explicit timeout / backoff values survive a round-trip in both
+    /// the new and the legacy top-level shape.
+    #[test]
+    fn timeout_and_backoff_roundtrip_when_set() {
+        let json = serde_json::json!({
+            "transport": { "kind": "tcp", "host": "127.0.0.1", "port": 5502 },
+            "slave_id": 1,
+            "poll_interval_ms": 100,
+            "timeout_ms": 250,
+            "reconnect_backoff_ms": 500,
+            "channels": [],
+        });
+        let cfg: ModbusConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(cfg.timeout_ms, Some(250));
+        assert_eq!(cfg.reconnect_backoff_ms, Some(500));
+        let back = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(back["timeout_ms"], 250);
+        assert_eq!(back["reconnect_backoff_ms"], 500);
+
+        // Legacy flat shape with the new fields also picks them up.
+        let legacy = serde_json::json!({
+            "host": "10.0.0.9",
+            "port": 502,
+            "slave_id": 3,
+            "timeout_ms": 750,
+        });
+        let cfg: ModbusConfig = serde_json::from_value(legacy).unwrap();
+        assert_eq!(cfg.timeout_ms, Some(750));
+        assert_eq!(cfg.reconnect_backoff_ms, None);
     }
 
     /// New-shape JSON with `transport.kind = "tcp"` round-trips.

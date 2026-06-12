@@ -14,6 +14,8 @@ use async_trait::async_trait;
 use iocore::{ChannelValue, IoDevice, IoError};
 use project::{EthercatChannel, EthercatConfig, EthercatDataType, EthercatPdoDirection};
 
+use crate::validate;
+
 pub struct SimEthercat {
     name: String,
     values: HashMap<String, ChannelValue>,
@@ -80,6 +82,18 @@ impl SimEthercat {
                 }
             })
             .collect();
+
+        // Same connect-time PDI range validation as the real path, run
+        // against the derived extents. Byte-aligned channels fit their
+        // own extent by construction; what this actually catches is a
+        // bit-packed entry spilling past the byte its extent accounts
+        // for (e.g. bit_offset 7 with bit_length 2) — a layout the real
+        // PDI accessors could never serve, surfaced here at connect so
+        // sim and real reject the same configs.
+        if !config.slaves.is_empty() {
+            validate::validate_pdi_ranges(&config.channels, &discovered)
+                .map_err(IoError::Connect)?;
+        }
 
         tracing::info!(
             name = %name,

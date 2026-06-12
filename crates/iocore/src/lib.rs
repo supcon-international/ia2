@@ -6,9 +6,13 @@
 //! `iomap-ethercat`) and the ironplc-bridge runtime can all depend on it
 //! without forming a cycle.
 
+mod health;
+
 use async_trait::async_trait;
 use serde::Serialize;
 use thiserror::Error;
+
+pub use health::{HealthTracker, HealthTransition};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub enum ChannelValue {
@@ -101,6 +105,21 @@ pub trait IoDevice: Send {
     fn name(&self) -> &str;
     async fn read_channel(&mut self, channel: &str) -> Result<ChannelValue, IoError>;
     async fn write_channel(&mut self, channel: &str, value: ChannelValue) -> Result<(), IoError>;
+
+    /// Whether the device's transport is currently believed good.
+    ///
+    /// Adapters with a background transfer loop (Modbus poll task,
+    /// EtherCAT cyclic thread) flip this to `false` after a run of
+    /// consecutive transfer failures and back to `true` on recovery —
+    /// see [`HealthTracker`]. While unhealthy, reads typically keep
+    /// serving last-known values; this flag is how the scan loop /
+    /// monitor layer can tell "live data" from "stale mirror".
+    ///
+    /// Default `true` for devices without a background link to track
+    /// (sim adapters, synchronous one-shot transports).
+    fn is_healthy(&self) -> bool {
+        true
+    }
 
     /// Drive all writable outputs to a known-safe state (zero / "off").
     ///

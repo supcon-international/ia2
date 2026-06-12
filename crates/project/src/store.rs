@@ -1322,6 +1322,8 @@ fn default_config_for(protocol: Protocol) -> ProtocolConfig {
             }),
             slave_id: 1,
             poll_interval_ms: 100,
+            timeout_ms: None,
+            reconnect_backoff_ms: None,
             channels: vec![],
         }),
         Protocol::Ethercat => ProtocolConfig::Ethercat(crate::types::EthercatConfig {

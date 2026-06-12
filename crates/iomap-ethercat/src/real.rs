@@ -44,11 +44,17 @@ use async_trait::async_trait;
 use ethercrab::std::ethercat_now;
 use ethercrab::subdevice_group::DcConfiguration;
 use ethercrab::{DcSync, MainDevice, MainDeviceConfig, PduStorage, Timeouts};
-use iocore::{ChannelValue, IoDevice, IoError};
+use iocore::{ChannelValue, HealthTracker, HealthTransition, IoDevice, IoError};
 use project::{EthercatChannel, EthercatConfig, EthercatDcSync, EthercatPdoDirection};
 
 use crate::bits;
+use crate::validate;
 use crate::SlaveDiscovery;
+
+/// Consecutive cyclic `tx_rx` failures before the device is flagged
+/// unhealthy (one ERROR log per outage, not one per cycle — at a 1 ms
+/// cycle that distinction matters).
+const UNHEALTHY_AFTER_TX_ERRORS: u32 = 10;
 
 // Storage sizing — picked to comfortably cover a typical edge configuration
 // (an EK1100-class coupler + EL modules). Sized for plant-scale buses,
@@ -175,12 +181,25 @@ pub struct RealEthercat {
     /// exit path, so `shutdown` can join with a bound instead of risking
     /// a wait on a thread that's already gone.
     stopped: Arc<AtomicBool>,
+    /// Mirrored from the cyclic worker's `HealthTracker`: `false` after
+    /// `UNHEALTHY_AFTER_TX_ERRORS` consecutive `tx_rx` failures, `true`
+    /// again on the first successful exchange.
+    healthy: Arc<AtomicBool>,
     /// Subdevices found during the bus walk at connect (for `/discover`).
     discovered: Vec<SlaveDiscovery>,
     // The cyclic worker. Joined by `shutdown` on a clean stop (so the
     // final zeroed frame is guaranteed on the wire); on `Drop` it's only
     // signalled, not joined — drop can run mid-teardown and must not block.
     _thread: Option<thread::JoinHandle<()>>,
+}
+
+/// The `Arc` handles `connect` shares with the cyclic worker thread,
+/// bundled so `smol_main` keeps a readable signature.
+struct WorkerShared {
+    pdi: Arc<Mutex<PdiMirror>>,
+    shutdown: Arc<AtomicBool>,
+    stopped: Arc<AtomicBool>,
+    healthy: Arc<AtomicBool>,
 }
 
 /// Wait up to `timeout` for the worker to flag `stopped`, then join it.
@@ -234,6 +253,10 @@ impl RealEthercat {
             }
         }
 
+        // Shape problems (zero-length / misaligned entries) are knowable
+        // before touching the bus — reject them before spawning anything.
+        validate::validate_channel_shapes(&config.channels).map_err(IoError::Connect)?;
+
         let channels: HashMap<String, EthercatChannel> = config
             .channels
             .iter()
@@ -242,29 +265,23 @@ impl RealEthercat {
         let pdi = Arc::new(Mutex::new(PdiMirror::default()));
         let shutdown = Arc::new(AtomicBool::new(false));
         let stopped = Arc::new(AtomicBool::new(false));
+        let healthy = Arc::new(AtomicBool::new(true));
         let (init_tx, init_rx) = mpsc::sync_channel::<InitResult>(1);
 
         let nic = config.nic.clone();
         let cycle_us = config.cycle_us.max(100); // hard floor: don't melt the CPU
         let dc_sync = config.dc_sync;
-        let pdi_clone = pdi.clone();
-        let shutdown_clone = shutdown.clone();
-        let stopped_clone = stopped.clone();
+        let shared = WorkerShared {
+            pdi: pdi.clone(),
+            shutdown: shutdown.clone(),
+            stopped: stopped.clone(),
+            healthy: healthy.clone(),
+        };
         let thread_name = format!("ec-{name}");
 
         let thread = thread::Builder::new()
             .name(thread_name)
-            .spawn(move || {
-                smol_main(
-                    &nic,
-                    cycle_us,
-                    dc_sync,
-                    pdi_clone,
-                    shutdown_clone,
-                    stopped_clone,
-                    init_tx,
-                )
-            })
+            .spawn(move || smol_main(&nic, cycle_us, dc_sync, shared, init_tx))
             .map_err(|e| IoError::Connect(format!("spawn ethercat thread: {e}")))?;
 
         // Wait for the worker to report success or failure. The init walk
@@ -281,6 +298,36 @@ impl RealEthercat {
 
         match init {
             InitResult::Ok { discovered } => {
+                // The bus is walked and the cyclic worker is live — now
+                // hold the discovered topology against the configuration.
+                // Identity first (wrong/missing module), then PDI ranges
+                // (channel windows that the real PDI cannot serve). Fail
+                // the connect with everything found at once, instead of
+                // letting each problem surface later as per-cycle
+                // Transport errors or, worse, bits driven on the wrong
+                // module.
+                let mut problems: Vec<String> = Vec::new();
+                if let Err(m) = validate::validate_identities(&config.slaves, &discovered) {
+                    problems.push(m);
+                }
+                if let Err(m) = validate::validate_pdi_ranges(&config.channels, &discovered) {
+                    problems.push(m);
+                }
+                if !problems.is_empty() {
+                    // A failed connect must not leak a live cyclic thread
+                    // driving the bus: signal it down and join (bounded).
+                    shutdown.store(true, Ordering::Relaxed);
+                    let stopped_for_join = stopped.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        join_worker(&stopped_for_join, Some(thread), WORKER_JOIN_TIMEOUT)
+                    })
+                    .await;
+                    return Err(IoError::Connect(format!(
+                        "ethercat bus validation failed: {}",
+                        problems.join("; ")
+                    )));
+                }
+
                 tracing::info!(
                     name = %name,
                     nic = %config.nic,
@@ -294,6 +341,7 @@ impl RealEthercat {
                     pdi,
                     shutdown,
                     stopped,
+                    healthy,
                     discovered,
                     _thread: Some(thread),
                 })
@@ -322,6 +370,14 @@ impl Drop for RealEthercat {
 impl IoDevice for RealEthercat {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    /// `false` once the cyclic worker has seen `UNHEALTHY_AFTER_TX_ERRORS`
+    /// consecutive `tx_rx` failures (cable pulled, slave dropped off,
+    /// watchdog tripped); `true` again after the first good exchange.
+    /// While unhealthy the PDI mirror serves last-known inputs.
+    fn is_healthy(&self) -> bool {
+        self.healthy.load(Ordering::Relaxed)
     }
 
     async fn read_channel(&mut self, channel: &str) -> Result<ChannelValue, IoError> {
@@ -423,6 +479,24 @@ impl IoDevice for RealEthercat {
     }
 }
 
+/// Health bookkeeping for one failed cyclic exchange. Exactly one ERROR
+/// per outage (when the threshold is crossed); WARN before that, DEBUG
+/// for the repeats while already unhealthy (a dead bus at a 1 ms cycle
+/// would otherwise log a thousand lines a second).
+fn note_txrx_failure<E: std::fmt::Debug>(health: &mut HealthTracker, error: &E) {
+    match health.record_failure() {
+        HealthTransition::BecameUnhealthy => {
+            tracing::error!(
+                ?error,
+                consecutive_failures = health.consecutive_failures(),
+                "ethercat unhealthy: cyclic tx_rx failing; inputs frozen at last-known values"
+            );
+        }
+        _ if health.is_healthy() => tracing::warn!(?error, "ethercat tx_rx failed"),
+        _ => tracing::debug!(?error, "ethercat tx_rx still failing"),
+    }
+}
+
 /// The entire ethercrab session lives inside this function — bus walk,
 /// state-machine transition to OP, and the cyclic exchange loop. Runs on
 /// its own thread under `smol::block_on` to drive `async-io`.
@@ -430,11 +504,15 @@ fn smol_main(
     nic: &str,
     cycle_us: u32,
     dc_sync: EthercatDcSync,
-    pdi: Arc<Mutex<PdiMirror>>,
-    shutdown: Arc<AtomicBool>,
-    stopped: Arc<AtomicBool>,
+    shared: WorkerShared,
     init_tx: mpsc::SyncSender<InitResult>,
 ) {
+    let WorkerShared {
+        pdi,
+        shutdown,
+        stopped,
+        healthy,
+    } = shared;
     // Flip `stopped` on EVERY exit path (init failure or loop end) via a
     // drop guard, so a bounded join never waits on a thread that's already
     // gone. Created first thing so even the early `try_split` error returns
@@ -635,16 +713,20 @@ fn smol_main(
                 // DC cyclic loop: tx_rx_dc keeps the reference clock synced
                 // and its CycleInfo tells us when to send the next frame
                 // (stays aligned to SYNC0).
+                let mut health = HealthTracker::with_flag(UNHEALTHY_AFTER_TX_ERRORS, healthy);
                 while !shutdown.load(Ordering::Relaxed) {
                     let cycle_start = std::time::Instant::now();
                     copy_outputs_to_bus!(group, maindevice, pdi);
                     let next_wait = match group.tx_rx_dc(&maindevice).await {
                         Ok(resp) => {
                             copy_inputs_from_bus!(group, maindevice, pdi);
+                            if health.record_success() == HealthTransition::Recovered {
+                                tracing::info!("ethercat recovered; cyclic exchange running again");
+                            }
                             resp.extra.next_cycle_wait
                         }
                         Err(e) => {
-                            tracing::warn!(?e, "ethercat tx_rx_dc failed");
+                            note_txrx_failure(&mut health, &e);
                             sync0
                         }
                     };
@@ -678,10 +760,16 @@ fn smol_main(
 
                 let mut tick = smol::Timer::interval(sync0);
                 use smol::stream::StreamExt;
+                let mut health = HealthTracker::with_flag(UNHEALTHY_AFTER_TX_ERRORS, healthy);
                 while !shutdown.load(Ordering::Relaxed) {
                     copy_outputs_to_bus!(group, maindevice, pdi);
-                    if let Err(e) = group.tx_rx(&maindevice).await {
-                        tracing::warn!(?e, "ethercat tx_rx failed");
+                    match group.tx_rx(&maindevice).await {
+                        Ok(_) => {
+                            if health.record_success() == HealthTransition::Recovered {
+                                tracing::info!("ethercat recovered; cyclic exchange running again");
+                            }
+                        }
+                        Err(e) => note_txrx_failure(&mut health, &e),
                     }
                     copy_inputs_from_bus!(group, maindevice, pdi);
                     tick.next().await;
