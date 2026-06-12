@@ -778,6 +778,9 @@ async fn run_loop_async(
         /// REAL var — channel values cross the VM boundary as IEEE-754
         /// bits instead of numeric i32 (see `ChannelValue::to_vm_bits`).
         is_real: bool,
+        /// LREAL var — crosses as a full 64-bit double via
+        /// `write_variable_raw` (the i32 lane would truncate).
+        is_lreal: bool,
     }
 
     let mut inputs: Vec<ResolvedMapping> = Vec::new();
@@ -795,16 +798,13 @@ async fn run_loop_async(
             .get(&var_index)
             .map(|d| d.iec_type_tag)
             .unwrap_or(0);
-        if type_tag == iec_type_tag::LREAL {
-            tracing::warn!(var = %m.variable, "LREAL iomap binding unsupported (64-bit); skipping");
-            continue;
-        }
         let rm = ResolvedMapping {
             device_index,
             channel: m.channel.clone(),
             var_index,
             type_tag,
             is_real: type_tag == iec_type_tag::REAL,
+            is_lreal: type_tag == iec_type_tag::LREAL,
         };
         match m.direction {
             Direction::Input => inputs.push(rm),
@@ -845,7 +845,13 @@ async fn run_loop_async(
                     let mut restored = 0;
                     for (name, idx) in &retain_indices {
                         if let Some(&value) = state.vars.get(name) {
-                            if running.write_variable(VarIndex::new(*idx), value).is_ok() {
+                            // Raw 64-bit slot write — lossless for all
+                            // IEC types (schema 2; v1 files arrive here
+                            // pre-widened by retain::load's migration).
+                            if running
+                                .write_variable_raw(VarIndex::new(*idx), value)
+                                .is_ok()
+                            {
                                 restored += 1;
                             } else {
                                 tracing::warn!(var = %name, "restore write trapped; skipping");
@@ -967,8 +973,19 @@ async fn run_loop_async(
             };
             match dev.read_channel(&rm.channel).await {
                 Ok(value) => {
-                    let _ = running
-                        .write_variable(VarIndex::new(rm.var_index), value.to_vm_bits(rm.is_real));
+                    let _ = if rm.is_lreal {
+                        // 64-bit lane: any channel value widens to f64
+                        // losslessly; the slot takes the double's bits.
+                        running.write_variable_raw(
+                            VarIndex::new(rm.var_index),
+                            value.to_f64().to_bits(),
+                        )
+                    } else {
+                        running.write_variable(
+                            VarIndex::new(rm.var_index),
+                            value.to_vm_bits(rm.is_real),
+                        )
+                    };
                 }
                 Err(e) => tracing::debug!(channel = %rm.channel, %e, "input read failed"),
             }
@@ -1127,6 +1144,8 @@ fn value_for_type(raw: u64, type_tag: u8) -> ChannelValue {
         // REAL vars store IEEE-754 bits in the VM cell — decode to a true
         // float so analog outputs keep their fraction on the bus.
         iec_type_tag::REAL => ChannelValue::Real(f32::from_bits(raw as u32)),
+        // LREAL: the slot is the double's full bit pattern.
+        iec_type_tag::LREAL => ChannelValue::F64(f64::from_bits(raw)),
         _ => ChannelValue::I32(raw as i32),
     }
 }
@@ -1145,10 +1164,12 @@ fn persist_retain_values(
     now_us: u64,
     scan_count: u64,
 ) {
-    let mut vars: HashMap<String, i32> = HashMap::with_capacity(retain_indices.len());
+    let mut vars: HashMap<String, u64> = HashMap::with_capacity(retain_indices.len());
     for (name, idx) in retain_indices {
         if let Ok(raw) = running.read_variable_raw(VarIndex::new(*idx)) {
-            vars.insert(name.clone(), raw as i32);
+            // Raw slot verbatim (schema 2): lossless for every IEC
+            // type including LREAL / LINT / ULINT / LWORD.
+            vars.insert(name.clone(), raw);
         }
     }
     let state = crate::retain::build(vars, now_us, scan_count);
@@ -1298,6 +1319,95 @@ mod tests {
         assert!(
             order_ok.load(Ordering::Relaxed),
             "failsafe must precede device shutdown so zeroed outputs flush before the join"
+        );
+    }
+
+    /// F64 device channel → LREAL var → F64 device channel, verifying
+    /// the 64-bit lane end to end. The probe value carries more
+    /// precision than an f32 can hold, so any accidental trip through
+    /// the 32-bit path fails the exact-equality assert.
+    struct LrealLoopDevice {
+        name: String,
+        input_value: f64,
+        written: Arc<std::sync::Mutex<Option<f64>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl IoDevice for LrealLoopDevice {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        async fn read_channel(&mut self, _channel: &str) -> Result<ChannelValue, IoError> {
+            Ok(ChannelValue::F64(self.input_value))
+        }
+        async fn write_channel(
+            &mut self,
+            _channel: &str,
+            value: ChannelValue,
+        ) -> Result<(), IoError> {
+            if let ChannelValue::F64(v) = value {
+                *self.written.lock().unwrap() = Some(v);
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn lreal_mapping_round_trips_full_double_precision() {
+        // Needs 64-bit mantissa: f32 would collapse the tail digits.
+        let probe = 1234.5678901234567_f64;
+        assert_ne!(
+            probe as f32 as f64, probe,
+            "probe must exceed f32 precision"
+        );
+
+        let container = crate::compile(
+            "PROGRAM main\n\
+                VAR lr_in : LREAL; lr_out : LREAL; END_VAR\n\
+                lr_out := lr_in;\n\
+            END_PROGRAM",
+        )
+        .expect("LREAL program compiles");
+
+        let written = Arc::new(std::sync::Mutex::new(None));
+        let dev = LrealLoopDevice {
+            name: "mock".into(),
+            input_value: probe,
+            written: written.clone(),
+        };
+        let devices: Vec<Box<dyn IoDevice>> = vec![Box::new(dev)];
+        let mappings = vec![
+            project::Mapping {
+                application: "main".into(),
+                variable: "lr_in".into(),
+                direction: project::Direction::Input,
+                device: "mock".into(),
+                channel: "ain".into(),
+            },
+            project::Mapping {
+                application: "main".into(),
+                variable: "lr_out".into(),
+                direction: project::Direction::Output,
+                device: "mock".into(),
+                channel: "aout".into(),
+            },
+        ];
+
+        let handle = spawn_inner(
+            container,
+            DeviceSource::Prebuilt(devices),
+            mappings,
+            fast_options(),
+        );
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        tokio::time::timeout(Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("shutdown joins");
+
+        let got = written.lock().unwrap().expect("output channel was written");
+        assert_eq!(
+            got, probe,
+            "LREAL must cross device→VM→device without 32-bit truncation"
         );
     }
 

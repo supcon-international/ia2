@@ -266,7 +266,9 @@ fn from_variant(v: &Variant, ty: OpcuaDataType) -> Option<ChannelValue> {
         OpcuaDataType::Bool => ChannelValue::Bool(n != 0.0),
         OpcuaDataType::I16 | OpcuaDataType::U16 => ChannelValue::U16(n as i64 as u16),
         OpcuaDataType::I32 | OpcuaDataType::U32 => ChannelValue::I32(n as i64 as i32),
-        OpcuaDataType::F32 | OpcuaDataType::F64 => ChannelValue::Real(n as f32),
+        OpcuaDataType::F32 => ChannelValue::Real(n as f32),
+        // Double tags ride the 64-bit lane end to end (→ LREAL vars).
+        OpcuaDataType::F64 => ChannelValue::F64(n),
     })
 }
 
@@ -279,7 +281,7 @@ fn to_variant(value: ChannelValue, ty: OpcuaDataType) -> Variant {
         OpcuaDataType::I32 => Variant::Int32(value.to_i32()),
         OpcuaDataType::U32 => Variant::UInt32(value.to_i32() as u32),
         OpcuaDataType::F32 => Variant::Float(value.to_f32()),
-        OpcuaDataType::F64 => Variant::Double(value.to_f32() as f64),
+        OpcuaDataType::F64 => Variant::Double(value.to_f64()),
     }
 }
 
@@ -324,7 +326,10 @@ impl IoDevice for OpcuaDevice {
             .collect();
         for ch in targets {
             let fs = ch.meta.failsafe.expect("filtered Some");
-            let value = ChannelValue::Real(fs as f32);
+            let value = match ch.meta.data_type {
+                OpcuaDataType::F64 => ChannelValue::F64(fs),
+                _ => ChannelValue::Real(fs as f32),
+            };
             if let Err(e) = self.write_node(&ch, value).await {
                 tracing::warn!(tag = %ch.meta.name, %e, "opcua failsafe write failed");
                 first_err.get_or_insert(e);
@@ -358,6 +363,7 @@ fn default_for(ty: OpcuaDataType) -> ChannelValue {
         OpcuaDataType::Bool => ChannelValue::Bool(false),
         OpcuaDataType::I16 | OpcuaDataType::U16 => ChannelValue::U16(0),
         OpcuaDataType::I32 | OpcuaDataType::U32 => ChannelValue::I32(0),
-        OpcuaDataType::F32 | OpcuaDataType::F64 => ChannelValue::Real(0.0),
+        OpcuaDataType::F32 => ChannelValue::Real(0.0),
+        OpcuaDataType::F64 => ChannelValue::F64(0.0),
     }
 }

@@ -19,10 +19,14 @@ pub enum ChannelValue {
     /// PDOs, scaled 4-20 mA). Carried as a real float so fractional
     /// process values (12.7 m³/h) survive the trip to a REAL PLC var.
     Real(f32),
+    /// IEEE-754 double — OPC UA Double tags and any other 64-bit analog
+    /// source, bound to LREAL PLC vars without precision loss. (`Real`
+    /// keeps its historical name = f32.)
+    F64(f64),
 }
 
 impl ChannelValue {
-    /// Coerce to a *numeric* i32 (Real is truncated). Display/legacy
+    /// Coerce to a *numeric* i32 (floats are truncated). Display/legacy
     /// lane — for feeding the VM use `to_vm_bits`, which respects the
     /// target variable's type.
     pub fn to_i32(self) -> i32 {
@@ -31,16 +35,30 @@ impl ChannelValue {
             Self::U16(v) => v as i32,
             Self::I32(v) => v,
             Self::Real(f) => f as i32,
+            Self::F64(f) => f as i32,
         }
     }
 
-    /// Numeric f32 view (integers convert by value).
+    /// Numeric f32 view (integers convert by value, doubles narrow).
     pub fn to_f32(self) -> f32 {
         match self {
             Self::Bool(b) => b as i32 as f32,
             Self::U16(v) => v as f32,
             Self::I32(v) => v as f32,
             Self::Real(f) => f,
+            Self::F64(f) => f as f32,
+        }
+    }
+
+    /// Numeric f64 view — the widening lane for LREAL variables: every
+    /// other variant converts by value without loss.
+    pub fn to_f64(self) -> f64 {
+        match self {
+            Self::Bool(b) => b as i32 as f64,
+            Self::U16(v) => v as f64,
+            Self::I32(v) => v as f64,
+            Self::Real(f) => f as f64,
+            Self::F64(f) => f,
         }
     }
 
@@ -49,7 +67,9 @@ impl ChannelValue {
     /// variables reinterpret the i32 as IEEE-754 bits, integer variables
     /// take it by value. Mismatched pairs convert numerically first, so
     /// an integer channel bound to a REAL var (or vice versa) does the
-    /// right thing instead of smuggling a bit pattern.
+    /// right thing instead of smuggling a bit pattern. LREAL targets use
+    /// `to_f64().to_bits()` with `write_variable_raw` instead — see the
+    /// bridge's input phase.
     pub fn to_vm_bits(self, var_is_real: bool) -> i32 {
         if var_is_real {
             self.to_f32().to_bits() as i32
