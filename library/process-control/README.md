@@ -16,8 +16,16 @@
 | `pous/fb_rate_limit.st` | `FB_RATE_LIMIT` | 变化率限幅器（velocity limiter）：跟随连续变化的输入，只钳 |Δ|/s；与 RAMP 的区别是无固定目标 |
 | `pous/fb_sqrt_flow.st` | `FB_SQRT_FLOW` | 差压流量开方提取：flow_max*SQRT(dp/100)，小流量切除（默认 6.25% 差压 ↔ 25% 流量） |
 | `pous/fb_char.st` | `FB_CHAR` | 折线特性化（piecewise-linear characterizer）：2..8 点分段线性插值，两端钳位；标量点对形式（FB 内数组不能 codegen，见坑 7） |
+| `pous/fb_limit.st` | `FB_LIMIT` | 值限幅器（limiter）：钳位到 [lo,hi] + 越限指示 q_hi/q_lo；lo>hi 时出中值且双越限位同亮（组态错误信号） |
+| `pous/fb_stats.st` | `FB_STATS` | 累计统计 min/max/均值/总体标准差（Welford 单遍递推，无数组、数值稳定）；按样本计、enable 门控，长期运行按班/天 reset |
+| `pous/fb_avg_time.st` | `FB_AVG_TIME` | 翻转窗时间平均（tumbling window）：每 window_s 出一个整窗均值 avg + 当前窗滚动均值 avg_run + ready；真滑动窗需数组（坑 7），连续平滑用 FB_LAG |
+| `pous/fb_integ.st` | `FB_INTEG` | 通用积分器 `out := out + k*u*dt_s`：优先级 reset > preset > hold，输出钳位 + 贴限位 q_hi/q_lo（流量累积专用形态见 FB_TOTALIZER） |
+| `pous/fb_deriv.st` | `FB_DERIV` | 滤波微分器 du/dt（单位/s）：u 先 PT1（t_filt_s=0 自动 3*dt_s）后差分，与 FB_ALARM_ROC 同核——只出值不报警 |
+| `pous/fb_deadtime8.st` | `FB_DEADTIME8` | 纯滞后（dead time / transport delay）：8 标量抽头 + 相位线性插值，分辨率 t_delay/8；t_delay<=0 直通；与 FB_LAG 串联即 FOPDT 仿真对象 |
+| `pous/fb_mid3.st` | `FB_MID3` | 三取中表决（median / 2oo3）：3 好取中、2 好取均、1 好直通、全坏保持 + q_fail；好通道间偏差监视 q_dev |
 | `pous/fb_pid.st` | `FB_PID` | 增量式（速度型）PID：条件积分+回算抗饱和、手/自动无扰，新增 ff 前馈、track 输出跟踪、sp_rate 设定值斜坡、dev 偏差输出（全带默认值，向后兼容；典型场景：流量 PID 驱动变频泵，输出限幅即频率上下限） |
 | `pous/fb_ratio.st` | `FB_RATIO` | 比值站（ratio station）：sp = clamp(ratio)*wild_flow + bias，接下游 FB_PID 的 sp |
+| `pous/fb_cascade.st` | `FB_CASCADE` | 级联耦合胶水（cascade SP coupling）：CAS 时主输出 0..100% 映射为副回路 SP 量程；非 CAS 副回路用本地 SP、主调经 track 跟踪其等效百分比，投切无扰 |
 | `pous/fb_select_hl.st` | `FB_SELECT_HL` | 高/低选择器（超驰控制 >/< 选择），a_selected 指示选中通道 |
 | `pous/fb_split_range.st` | `FB_SPLIT_RANGE` | 分程输出：u 0..100 按 split 分到两阀，A 段 [0,split] 0→100，B 段 [split,100] 0→100 或反转（reverse_b），全程钳位连续 |
 | `pous/fb_pwm.st` | `FB_PWM` | 时间比例输出（time-proportioning）：0..100% → 周期占空比通断，带最小通/断时间钳位，停用清相位 |
@@ -35,7 +43,7 @@
 | `pous/fb_hilo_fill.st` | `FB_HILO_FILL` | 高位关低位开补给控制（水箱补水/料仓补料），区间内保持 |
 | `pous/fb_pulser.st` | `FB_PULSER` | 周期脉冲发生器（空气炮/气锤吹扫）：每 period_s 出 pulse_len_s 脉冲，停用清相位 |
 | `pous/fb_alt2.st` | `FB_ALT2` | 双阀定时轮换 + 双外部联锁（除铁器+包装秤）：任一联锁失去两阀全关 |
-| `pous/demo_main.st` | `demo_main`（PROGRAM） | 迷你碳化塔回路演示：量程→PID→报警→空气炮→补水 + 比值→PID(前馈/track)→分程、双泵 DUTY2+RUNTIME、INTERLOCK8 首出；**自包含**（内联 10 个 FB 拷贝，原因见下） |
+| `pous/demo_main.st` | `demo_main`（PROGRAM） | 迷你碳化塔回路演示：量程→PID→报警→空气炮→补水 + 比值→PID(前馈/track)→分程、双泵 DUTY2+RUNTIME、INTERLOCK8 首出 + 蒸汽级联（CASCADE+双 PID）、FOPDT 对象仿真（DEADTIME8+PT1）、MID3 表决、DERIV/LIMIT/INTEG/STATS/AVG_TIME；**自包含**（内联 18 个 FB 拷贝，原因见下） |
 
 ## 使用说明
 
@@ -59,7 +67,8 @@
   SP 斜坡后的工作偏差（pv - sp_int）。
 - **首扫描对中**：`FB_LAG` / `FB_LEADLAG` / `FB_RATE_LIMIT` 首个扫描周期自动
   `out := u`（避免从 0 爬升的投运冲击）；`FB_RAMP` / `FB_PID` 的 sp 斜坡同理
-  （RAMP 输出本身用 track 对中）。
+  （RAMP 输出本身用 track 对中）；`FB_DERIV`（滤波态对中、out 清零）与
+  `FB_DEADTIME8`（抽头链充 u）同理。
 - **demo_main.st 是自包含的**：它内联了所用 10 个 FB 的逐字拷贝（由单 FB
   文件 `cat` 拼装生成，保证逐字一致）。要单独跑 demo，把 `demo_main.st`
   一个文件放进项目即可。与单 FB 文件混放同一项目时，当前 vendored ironplc
@@ -70,13 +79,13 @@
 
 ```text
 $ target/release/cs check library/process-control/pous/*.st
-✓ 27 files clean        # 退出码 0
+✓ 35 files clean        # 退出码 0
 
-# 跨文件 + codegen 全量验证（临时项目：26 个单 FB 文件 + demo_main.st +
-# 实例化全部 26 个 FB 的测试 PROGRAM；fb_test 与 demo_main 两个 PROGRAM
-# 同绑一个 task，重复 FB 声明被容忍——一次性验证整库 + demo）
-$ target/release/cs project check /tmp/fbcheck
-✓ project pc_lib_test compiles cleanly
+# 跨文件 + codegen 全量验证（临时项目：34 个单 FB 文件 + demo_main.st，
+# demo_main 内联实例化 18 个 FB（含 0.2.0 新增的 8 个数学/动态块）；
+# 重复 FB 声明被容忍——一次性验证整库 + demo）
+$ target/release/cs project check /tmp/libcheck-p1
+✓ project libcheck_p1 compiles cleanly
 ```
 
 ## 踩到的方言坑（vendored ironplc / cs）
@@ -103,8 +112,11 @@ $ target/release/cs project check /tmp/fbcheck
    作实参（`c4 := fault_a AND fault_b`、`ff := gas_flow * 0.01`）、把一个
    实例的输出直接作另一个调用的实参（`permissive1 := mot.out_run`）、
    `CASE ... OF 1, 2: ... ELSE ... END_CASE`、
+   `WHILE ... DO ... END_WHILE`（静态检查与项目 codegen 均过，已探针验证；
+   `FB_DEADTIME8` 用作有界补移位循环，≤8 次/拍保持扫描确定性）、
    `enable/reset/auto/direct/total/state/out/q` 等标识符不与保留字冲突、
    一个项目多个 PROGRAM 且 tasks.toml 多条 `[[programs]]` 同绑一个 task。
+   反例：IF/ELSIF 分支体不能只放注释不放语句（空语句列表 P0002 语法错误）。
 6. **通用方言规则**（沿自 IA2 技能文档，本库遵守）：布尔用 `AND/OR/NOT`
    不用 `&&/||/!`；每条语句以 `;` 结尾（含 `END_IF` 前最后一条）；POU 文件里
    不写 CONFIGURATION/TASK（由 tasks.toml 合成）；优先手工 `dt_s` 累加计时
