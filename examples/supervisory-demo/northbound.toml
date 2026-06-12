@@ -1,0 +1,7 @@
+[mqtt]
+enabled = true
+broker_host = "127.0.0.1"
+broker_port = 1883
+publish_interval_ms = 500
+qos = 0
+allow_write = true

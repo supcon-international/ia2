@@ -1,0 +1,9 @@
+[[tasks]]
+name = "plc_task"
+interval_ms = 100
+priority = 1
+
+[[programs]]
+instance = "main_inst"
+program = "main"
+task = "plc_task"

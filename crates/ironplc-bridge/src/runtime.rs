@@ -685,6 +685,36 @@ async fn connect_devices(
                     }
                 }
             }
+            ProtocolConfig::Opcua(cfg) => {
+                match iomap_opcua::OpcuaDevice::connect(spec.name.clone(), cfg).await {
+                    Ok(d) => {
+                        tracing::info!(
+                            name = %spec.name,
+                            endpoint = %cfg.endpoint_url,
+                            tags = cfg.channels.len(),
+                            "opcua connected"
+                        );
+                        devices.push(Box::new(d));
+                        reports.push(DeviceReport {
+                            name: spec.name.clone(),
+                            protocol: "opcua".into(),
+                            connected: true,
+                            error: None,
+                            slaves: Vec::new(),
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(name = %spec.name, %e, "opcua connect failed");
+                        reports.push(DeviceReport {
+                            name: spec.name.clone(),
+                            protocol: "opcua".into(),
+                            connected: false,
+                            error: Some(e.to_string()),
+                            slaves: Vec::new(),
+                        });
+                    }
+                }
+            }
         }
     }
     (devices, reports)
@@ -745,6 +775,9 @@ async fn run_loop_async(
         channel: String,
         var_index: u16,
         type_tag: u8,
+        /// REAL var — channel values cross the VM boundary as IEEE-754
+        /// bits instead of numeric i32 (see `ChannelValue::to_vm_bits`).
+        is_real: bool,
     }
 
     let mut inputs: Vec<ResolvedMapping> = Vec::new();
@@ -762,11 +795,16 @@ async fn run_loop_async(
             .get(&var_index)
             .map(|d| d.iec_type_tag)
             .unwrap_or(0);
+        if type_tag == iec_type_tag::LREAL {
+            tracing::warn!(var = %m.variable, "LREAL iomap binding unsupported (64-bit); skipping");
+            continue;
+        }
         let rm = ResolvedMapping {
             device_index,
             channel: m.channel.clone(),
             var_index,
             type_tag,
+            is_real: type_tag == iec_type_tag::REAL,
         };
         match m.direction {
             Direction::Input => inputs.push(rm),
@@ -929,7 +967,8 @@ async fn run_loop_async(
             };
             match dev.read_channel(&rm.channel).await {
                 Ok(value) => {
-                    let _ = running.write_variable(VarIndex::new(rm.var_index), value.to_i32());
+                    let _ = running
+                        .write_variable(VarIndex::new(rm.var_index), value.to_vm_bits(rm.is_real));
                 }
                 Err(e) => tracing::debug!(channel = %rm.channel, %e, "input read failed"),
             }
@@ -1085,6 +1124,9 @@ fn value_for_type(raw: u64, type_tag: u8) -> ChannelValue {
         iec_type_tag::USINT | iec_type_tag::UINT | iec_type_tag::BYTE | iec_type_tag::WORD => {
             ChannelValue::U16(raw as u16)
         }
+        // REAL vars store IEEE-754 bits in the VM cell — decode to a true
+        // float so analog outputs keep their fraction on the bus.
+        iec_type_tag::REAL => ChannelValue::Real(f32::from_bits(raw as u32)),
         _ => ChannelValue::I32(raw as i32),
     }
 }

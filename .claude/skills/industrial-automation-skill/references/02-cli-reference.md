@@ -155,3 +155,12 @@ curl -sN "$SRV/api/events"     # Server-Sent Events: snapshots, mutations, agent
 ```
 
 For one-shot state, prefer `cs runtime status --json` or `curl -s "$SRV/api/runtime/snapshot"`.
+
+## Northbound (MQTT publishing config)
+
+```bash
+cs northbound get                  # northbound.toml as JSON
+cs northbound set --from nb.json   # replace; --from - for stdin
+```
+
+Shape + topic contract in `06-devices-iomap-tasks.md` § Northbound. The *edge runtime* reads this at startup — `cs deploy` + restart to apply on a box.

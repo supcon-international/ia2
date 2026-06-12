@@ -265,6 +265,12 @@ enum Command {
     #[command(subcommand)]
     Tasks(TasksCmd),
 
+    /// Read or write the project's northbound publishing config
+    /// (northbound.toml — MQTT to supOS/Tier0; applied by the edge
+    /// runtime on its next restart/deploy).
+    #[command(subcommand)]
+    Northbound(NorthboundCmd),
+
     /// Take a long-running agent session around a wrapped command.
     ///
     /// The single most important command for any multi-step agent
@@ -620,6 +626,26 @@ enum IomapCmd {
 }
 
 // =================================================================
+//   cs northbound — read / write northbound.toml (MQTT publishing)
+// =================================================================
+#[derive(Subcommand, Debug)]
+enum NorthboundCmd {
+    /// Print the project's northbound config as JSON.
+    Get {
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+    /// Replace northbound.toml from a JSON file. Shape matches `get`:
+    /// `{ "mqtt": { "broker_host": …, "publish_interval_ms": …, … } }`.
+    Set {
+        #[arg(long)]
+        from: String,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+}
+
+// =================================================================
 //   cs tasks — read / write tasks.toml
 // =================================================================
 #[derive(Subcommand, Debug)]
@@ -787,6 +813,7 @@ fn main() {
         Command::Device(d) => cmd_device(d),
         Command::Edge(e) => cmd_edge(e),
         Command::Iomap(i) => cmd_iomap(i),
+        Command::Northbound(n) => cmd_northbound(n),
         Command::Tasks(t) => cmd_tasks(t),
         Command::Agent(a) => cmd_agent(a),
     };
@@ -1634,6 +1661,22 @@ fn cmd_tasks(cmd: TasksCmd) -> Result<i32> {
     }
 }
 
+fn cmd_northbound(cmd: NorthboundCmd) -> Result<i32> {
+    match cmd {
+        NorthboundCmd::Get { server } => {
+            let resp = get_json(&format!("{server}/api/northbound"))?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+            Ok(0)
+        }
+        NorthboundCmd::Set { from, server } => {
+            let body = read_json_blob(&from)?;
+            let resp = put_json(&format!("{server}/api/northbound"), &body)?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+            Ok(0)
+        }
+    }
+}
+
 // =================================================================
 //   Subcommand: agent — explicit takeover session
 // =================================================================
@@ -2172,6 +2215,8 @@ fn announce_target(cmd: &Command) -> Option<(&str, &'static str)> {
         Command::Iomap(IomapCmd::Get { server, .. }) => Some((server, "iomap get")),
         Command::Iomap(IomapCmd::Set { server, .. }) => Some((server, "iomap set")),
         Command::Tasks(TasksCmd::Get { server, .. }) => Some((server, "tasks get")),
+        Command::Northbound(NorthboundCmd::Get { server, .. }) => Some((server, "northbound get")),
+        Command::Northbound(NorthboundCmd::Set { server, .. }) => Some((server, "northbound set")),
         Command::Tasks(TasksCmd::Set { server, .. }) => Some((server, "tasks set")),
 
         Command::Probe { server, .. } => Some((server, "probe")),

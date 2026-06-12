@@ -26,5 +26,9 @@ tracing-subscriber.workspace = true
 # thin CLI wrapper around the bridge + project loader. No HTTP/LSP/CORS
 # from the IDE-side `server` crate; nothing that wouldn't run on a
 # headless edge box.
+# Northbound MQTT publisher (edge -> supOS/Tier0). Pure-Rust async
+# client; the event loop owns reconnection.
+rumqttc = "0.24"
+
 ironplc-bridge = { path = "../ironplc-bridge" }
 project = { path = "../project" }

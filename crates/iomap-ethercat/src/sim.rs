@@ -167,22 +167,20 @@ fn zero_for(ty: EthercatDataType) -> ChannelValue {
         | EthercatDataType::I8
         | EthercatDataType::U16
         | EthercatDataType::I16 => ChannelValue::U16(0),
-        EthercatDataType::U32 | EthercatDataType::I32 | EthercatDataType::Real => {
-            ChannelValue::I32(0)
-        }
+        EthercatDataType::U32 | EthercatDataType::I32 => ChannelValue::I32(0),
+        EthercatDataType::Real => ChannelValue::Real(0.0),
     }
 }
 
 fn coerce_to_type(value: ChannelValue, ty: EthercatDataType) -> ChannelValue {
-    let raw = value.to_i32();
     match ty {
-        EthercatDataType::Bool => ChannelValue::Bool(raw != 0),
+        EthercatDataType::Bool => ChannelValue::Bool(value.to_i32() != 0),
         EthercatDataType::U8
         | EthercatDataType::I8
         | EthercatDataType::U16
-        | EthercatDataType::I16 => ChannelValue::U16(raw as u16),
-        EthercatDataType::U32 | EthercatDataType::I32 | EthercatDataType::Real => {
-            ChannelValue::I32(raw)
-        }
+        | EthercatDataType::I16 => ChannelValue::U16(value.to_i32() as u16),
+        EthercatDataType::U32 | EthercatDataType::I32 => ChannelValue::I32(value.to_i32()),
+        // Keep the fraction — sim mirrors what a real REAL PDO carries.
+        EthercatDataType::Real => ChannelValue::Real(value.to_f32()),
     }
 }

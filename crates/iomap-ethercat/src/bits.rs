@@ -69,11 +69,11 @@ pub fn read_value(
             ChannelValue::I32(i32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
         }
         EthercatDataType::Real => {
-            // REAL is IEEE-754 f32; quantise to i32 so it fits the same
-            // ChannelValue lane as integer 32-bit. Loses fractional info
-            // but matches how ironplc's VM sees integer-typed PLC vars.
+            // REAL is IEEE-754 f32 on the wire; carry it as a true float
+            // so fractional analog values survive (the bridge encodes to
+            // VM bits per the bound variable's type).
             let f = f32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]);
-            ChannelValue::I32(f as i32)
+            ChannelValue::Real(f)
         }
     })
 }
@@ -137,9 +137,9 @@ pub fn write_value(
             target[..4].copy_from_slice(&bytes);
         }
         EthercatDataType::Real => {
-            // Round-trip via f32 so the wire format is IEEE-754, even
-            // though our ChannelValue lane is i32.
-            let bytes = (raw as f32).to_le_bytes();
+            // IEEE-754 on the wire; numeric view keeps the fraction when
+            // the value is already a Real, converts by value otherwise.
+            let bytes = value.to_f32().to_le_bytes();
             target[..4].copy_from_slice(&bytes);
         }
     }
@@ -299,8 +299,23 @@ mod tests {
     }
 
     #[test]
-    fn real_quantises_through_i32() {
+    fn real_round_trips_with_fraction() {
         let mut pdi = [0u8; 4];
+        // A true float keeps its fraction on the wire and back.
+        write_value(
+            &mut pdi,
+            0,
+            0,
+            32,
+            EthercatDataType::Real,
+            ChannelValue::Real(12.7),
+        )
+        .unwrap();
+        assert_eq!(pdi, 12.7f32.to_le_bytes());
+        let v = read_value(&pdi, 0, 0, 32, EthercatDataType::Real).unwrap();
+        assert_eq!(v, ChannelValue::Real(12.7));
+
+        // An integer-lane value written to a REAL channel converts by value.
         write_value(
             &mut pdi,
             0,
@@ -310,10 +325,7 @@ mod tests {
             ChannelValue::I32(42),
         )
         .unwrap();
-        // 42.0_f32 le bytes
         assert_eq!(pdi, 42.0f32.to_le_bytes());
-        let v = read_value(&pdi, 0, 0, 32, EthercatDataType::Real).unwrap();
-        assert_eq!(v, ChannelValue::I32(42));
     }
 
     #[test]

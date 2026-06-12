@@ -1119,6 +1119,31 @@ pub async fn put_iomap(
 }
 
 // ============================================================
+//  Northbound (edge -> platform publishing config)
+// ============================================================
+
+pub async fn get_northbound(
+    State(state): State<AppState>,
+    project: ProjectName,
+) -> Result<Json<project::NorthboundConfig>, ApiError> {
+    with_project(&state, &project, |store| {
+        store.read_northbound().map_err(Into::into)
+    })
+    .map(Json)
+}
+
+pub async fn put_northbound(
+    State(state): State<AppState>,
+    project: ProjectName,
+    Json(config): Json<project::NorthboundConfig>,
+) -> Result<Json<RunResponse>, ApiError> {
+    with_project(&state, &project, |store| {
+        store.write_northbound(&config).map_err(Into::into)
+    })?;
+    Ok(Json(RunResponse { ok: true }))
+}
+
+// ============================================================
 //  Tasks (project-level scheduling)
 // ============================================================
 

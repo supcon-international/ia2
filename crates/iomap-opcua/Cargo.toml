@@ -1,0 +1,25 @@
+[package]
+name = "iomap-opcua"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+tokio.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+
+# async-opcua — the maintained FreeOpcUa fork of locka99/opcua. Client
+# half only; IA2 is always the UA *client* (the DCS / DA-UA gateway is
+# the server).
+opcua = { package = "async-opcua", version = "0.18", features = ["client"] }
+
+iocore = { path = "../iocore" }
+project = { path = "../project" }
+
+[dev-dependencies]
+# The fake-DCS example doubles as the adapter's test fixture; server
+# feature is dev-only so the shipped adapter stays client-only.
+opcua = { package = "async-opcua", version = "0.18", features = ["client", "server"] }
+tokio = { workspace = true }

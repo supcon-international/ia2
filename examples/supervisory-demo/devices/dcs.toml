@@ -1,0 +1,33 @@
+name = "dcs"
+protocol = "opcua"
+endpoint_url = "opc.tcp://127.0.0.1:4840"
+security = "none"
+poll_interval_ms = 250
+
+[auth]
+kind = "anonymous"
+
+[[channels]]
+name = "ft0202_pv"
+node_id = "ns=2;s=FT0202_PV"
+data_type = "f64"
+access = "read"
+
+[[channels]]
+name = "m0204_amps"
+node_id = "ns=2;s=M0204_AMPS"
+data_type = "f64"
+access = "read"
+
+[[channels]]
+name = "fv0203_cmd"
+node_id = "ns=2;s=FV0203_CMD"
+data_type = "f64"
+access = "write"
+failsafe = 0.0
+
+[[channels]]
+name = "feeder_run"
+node_id = "ns=2;s=FEEDER_RUN"
+data_type = "bool"
+access = "write"

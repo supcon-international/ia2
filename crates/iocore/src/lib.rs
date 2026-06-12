@@ -15,15 +15,46 @@ pub enum ChannelValue {
     Bool(bool),
     U16(u16),
     I32(i32),
+    /// IEEE-754 single — analog values (OPC UA Float tags, EtherCAT REAL
+    /// PDOs, scaled 4-20 mA). Carried as a real float so fractional
+    /// process values (12.7 m³/h) survive the trip to a REAL PLC var.
+    Real(f32),
 }
 
 impl ChannelValue {
-    /// Coerce to the i32 the ironplc VM accepts via `write_variable`.
+    /// Coerce to a *numeric* i32 (Real is truncated). Display/legacy
+    /// lane — for feeding the VM use `to_vm_bits`, which respects the
+    /// target variable's type.
     pub fn to_i32(self) -> i32 {
         match self {
             Self::Bool(b) => b as i32,
             Self::U16(v) => v as i32,
             Self::I32(v) => v,
+            Self::Real(f) => f as i32,
+        }
+    }
+
+    /// Numeric f32 view (integers convert by value).
+    pub fn to_f32(self) -> f32 {
+        match self {
+            Self::Bool(b) => b as i32 as f32,
+            Self::U16(v) => v as f32,
+            Self::I32(v) => v as f32,
+            Self::Real(f) => f,
+        }
+    }
+
+    /// Encode for `write_variable` on the ironplc VM, which takes an i32
+    /// whose meaning depends on the *target variable's* IEC type: REAL
+    /// variables reinterpret the i32 as IEEE-754 bits, integer variables
+    /// take it by value. Mismatched pairs convert numerically first, so
+    /// an integer channel bound to a REAL var (or vice versa) does the
+    /// right thing instead of smuggling a bit pattern.
+    pub fn to_vm_bits(self, var_is_real: bool) -> i32 {
+        if var_is_real {
+            self.to_f32().to_bits() as i32
+        } else {
+            self.to_i32()
         }
     }
 }
@@ -94,5 +125,28 @@ pub trait IoDevice: Send {
     /// sim, or Modbus whose `enter_failsafe` already wrote synchronously).
     async fn shutdown(&mut self) -> Result<(), IoError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vm_bits_for_real_vars_are_ieee754() {
+        // Real → REAL var: bit pattern.
+        assert_eq!(
+            ChannelValue::Real(12.7).to_vm_bits(true),
+            12.7f32.to_bits() as i32
+        );
+        // Integer channel → REAL var: convert by value first.
+        assert_eq!(
+            ChannelValue::U16(42).to_vm_bits(true),
+            42.0f32.to_bits() as i32
+        );
+        // Real → integer var: numeric truncation, not bits.
+        assert_eq!(ChannelValue::Real(12.7).to_vm_bits(false), 12);
+        // Integer → integer: identity.
+        assert_eq!(ChannelValue::I32(-7).to_vm_bits(false), -7);
     }
 }

@@ -63,6 +63,24 @@ The transport is a **tagged union** on `kind`. This is the post-RTU schema; old 
 
 `address` is the 0-based register/coil address. An iomap `direction: output` against a read-only channel (`discrete_input`/`input_register`) is a type error.
 
+### Register data types (direct-to-instrument)
+
+Register channels take two optional fields (default `"u16"` / `"hi_lo"` — old projects load unchanged):
+
+```json
+{ "name": "flow",  "kind": "input_register", "address": 2,  "data_type": "f32", "word_order": "hi_lo" },
+{ "name": "temp",  "kind": "input_register", "address": 20, "data_type": "i16" },
+{ "name": "total", "kind": "input_register", "address": 30, "data_type": "u32", "word_order": "lo_hi" }
+```
+
+- `data_type`: `u16` (default) | `i16` (signed, negatives survive) | `u32` | `i32` | `f32`. 32-bit types span **two consecutive registers** starting at `address` — the norm for instrument floats and totalizers.
+- `word_order` (32-bit only): `hi_lo` = ABCD (Modbus-spec default) | `lo_hi` = CDAB (common on Chinese instruments). If a float reads as garbage (e.g. 1.18e-38), flip this first.
+- Coils/discretes ignore both fields.
+
+### Polling model (scales to hundreds of channels)
+
+The adapter does NOT issue one request per channel. At connect it merges channels into contiguous **read spans** per function code (bridging gaps ≤8 units), and a background task refreshes the whole mirror every `poll_interval_ms` with a handful of bulk reads. `read_channel` serves the mirror; writes go through a command queue so the single connection (mandatory for RTU serial) is never used concurrently. A failed poll keeps last-known values and retries next tick.
+
 ---
 
 ## EtherCAT device
@@ -94,6 +112,7 @@ The transport is a **tagged union** on `kind`. This is the post-RTU schema; old 
 - `data_type`: `bool` `u8` `i8` `u16` `i16` `u32` `i32` `real`.
 - `pdi_byte_offset` / `pdi_bit_offset`: where this entry sits in the slave's process-data image. **Required for real hardware**; you read these off the slave's ESI/datasheet. Sim mode ignores them. `bit_length < 8` channels (digital I/O packed into a byte) use the bit offset.
 - `pdo_index` / `sub_index`: CoE object dictionary coordinates — informational/documentation in this version; the cyclic exchange uses the byte/bit offsets.
+- **Capacity**: the master is sized for plant-scale buses — up to **128 subdevices / 4 KiB process image** per device (a 1000-point AI/AO/DI/DO project uses ~660 B). One device = one NIC = one bus; use multiple devices for multiple NICs.
 
 ---
 
@@ -134,3 +153,58 @@ Bindings that reference an unknown device/variable/channel are skipped at run ti
 - **Keep `programs` length 1.** `cs run` (whole-schedule) errors if 2+ PROGRAMs are scheduled — ironplc emits only one PROGRAM per compilation. Multiple tasks are fine; multiple PROGRAM instances are not (yet).
 
 The scan-loop cadence comes from the bound task's `interval_ms` (the bridge throttles there, because the vendored ironplc doesn't populate the VM task table from CONFIGURATION). So `interval_ms` is the real knob for "how fast does my program scan".
+
+---
+
+## OPC UA device (southbound to an existing DCS)
+
+When the site already runs a DCS/PLC that owns the physical I/O, IA2 sits **above** it as the supervisory layer: read PV tags, write SP/command tags. The DCS keeps base regulatory control and safety.
+
+```json
+{
+  "name": "dcs",
+  "protocol": "opcua",
+  "endpoint_url": "opc.tcp://10.0.0.10:4840",
+  "security": "none",
+  "auth": { "kind": "anonymous" },
+  "poll_interval_ms": 500,
+  "channels": [
+    { "name": "ft0202_pv",  "node_id": "ns=2;s=FT0202.PV",  "data_type": "f64", "access": "read" },
+    { "name": "fv0203_cmd", "node_id": "ns=2;s=FV0203.CMD", "data_type": "f64", "access": "write", "failsafe": 0.0 }
+  ]
+}
+```
+
+- `auth`: `{ "kind": "anonymous" }` or `{ "kind": "user_password", "username": "...", "password": "..." }`. `security` is `"none"` in v1 (typical for trusted control-network segments / DA-gateway hops).
+- `node_id`: the full NodeId string exactly as UaExpert shows it — `ns=2;s=Tag.Path` (string) or `ns=3;i=1042` (numeric).
+- `data_type`: `bool` `i16` `u16` `i32` `u32` `f32` `f64`. Floats land on REAL PLC vars with fractions intact (f64 is narrowed to f32).
+- `access`: `read` tags are polled into a mirror (ONE bulk Read per `poll_interval_ms` for ALL tags — hundreds of tags stay one round-trip); `write` tags get a direct Write service call when the scan loop pushes an output.
+- `failsafe`: optional value written on shutdown/trip. **Leave unset by default** — on a supervisory layer the DCS below keeps authority; only set it for tags that are exclusively IA2's (e.g. a supervisory-enable flag).
+- **OPC DA** (classic, COM/DCOM, Windows-only): IA2 does not speak DA. Route DA servers through a DA→UA gateway (KEPServerEX, Matrikon UA Proxy) and point IA2 at the gateway's UA endpoint — the standard architecture for Linux edges.
+
+---
+
+## Northbound (northbound.toml — MQTT to supOS / Tier0)
+
+How the **edge runtime** publishes live data up to the plant platform. MQTT only by design. Managed via `cs northbound get/set` (JSON shape below) or by editing `northbound.toml`; the edge runtime applies it at startup (redeploy/restart to change).
+
+```json
+{
+  "mqtt": {
+    "enabled": true,
+    "broker_host": "10.0.0.5",
+    "broker_port": 1883,
+    "client_id": "",
+    "username": "",
+    "password": "",
+    "topic_prefix": "",
+    "publish_interval_ms": 1000,
+    "qos": 0,
+    "allow_write": false
+  }
+}
+```
+
+- `topic_prefix` defaults to `ia2/<project>`; `client_id` to `ia2-<project>`.
+- Topics: `<prefix>/status` (retained `online`/`offline` with LWT — the platform sees crashes), `<prefix>/snapshot` (periodic `{"ts_us":…,"scan":…,"values":{"FT0202":12.7,"alarm_h":true}}` — typed JSON values, one JSON-path hop to map into the platform), and `<prefix>/write` (subscribed only when `allow_write`, payload `{"name":"sp_flow","value":12.5}` → one-shot variable write).
+- `allow_write` is **off by default** — turning the northbound link into a control path is an explicit decision. Writes are one-shot (program can overwrite next scan); latch setpoints in program logic.

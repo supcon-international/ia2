@@ -40,6 +40,8 @@ use tokio_stream::StreamExt as _;
 use tower_http::cors::CorsLayer;
 use tracing_subscriber::EnvFilter;
 
+mod northbound;
+
 const DEFAULT_BIND: &str = "127.0.0.1:13001";
 
 /// Upper bound on the graceful bridge drain (stop scan loop -> failsafe ->
@@ -413,6 +415,23 @@ async fn main() -> Result<()> {
         logs: log_capture,
         handle: handle.clone(),
     };
+
+    // ---- Northbound (MQTT -> supOS/Tier0) ----
+    match store.read_northbound() {
+        Ok(nb) => {
+            if let Some(mqtt) = nb.mqtt.filter(|m| m.enabled) {
+                northbound::spawn(northbound::NorthboundCtx {
+                    config: mqtt,
+                    project_name: state.project_name.clone(),
+                    latest: state.latest.clone(),
+                    handle: handle.clone(),
+                });
+            } else {
+                tracing::info!("northbound disabled (no enabled [mqtt] in northbound.toml)");
+            }
+        }
+        Err(e) => tracing::warn!(%e, "northbound.toml unreadable; northbound disabled"),
+    }
 
     // ---- HTTP server ----
     // Permissive CORS: the only path to this socket on a real edge box is

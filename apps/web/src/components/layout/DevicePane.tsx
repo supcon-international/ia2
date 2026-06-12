@@ -23,8 +23,13 @@ import type { EthercatSlave } from "@/types/generated/EthercatSlave"
 import type { IoMap } from "@/types/generated/IoMap"
 import type { Mapping } from "@/types/generated/Mapping"
 import type { ModbusChannel } from "@/types/generated/ModbusChannel"
+import type { OpcuaAccess } from "@/types/generated/OpcuaAccess"
+import type { OpcuaChannel } from "@/types/generated/OpcuaChannel"
+import type { OpcuaDataType } from "@/types/generated/OpcuaDataType"
 import type { ModbusChannelKind } from "@/types/generated/ModbusChannelKind"
 import type { ModbusDataBits } from "@/types/generated/ModbusDataBits"
+import type { ModbusDataType } from "@/types/generated/ModbusDataType"
+import type { ModbusWordOrder } from "@/types/generated/ModbusWordOrder"
 import type { ModbusParity } from "@/types/generated/ModbusParity"
 import type { ModbusStopBits } from "@/types/generated/ModbusStopBits"
 import type { ModbusTransport } from "@/types/generated/ModbusTransport"
@@ -79,6 +84,12 @@ export function DevicePane() {
     <main className="flex h-full min-h-0 min-w-0 flex-col">
       {currentDevice.protocol === "modbus" ? (
         <ModbusDeviceEditor
+          device={currentDevice}
+          onSave={saveDevice}
+          link={linkProps}
+        />
+      ) : currentDevice.protocol === "opcua" ? (
+        <OpcuaDeviceEditor
           device={currentDevice}
           onSave={saveDevice}
           link={linkProps}
@@ -161,6 +172,8 @@ function ModbusDeviceEditor({
           name: `ch_${draft.channels.length}`,
           kind: "coil",
           address: 0,
+          data_type: "u16",
+          word_order: "hi_lo",
         },
       ],
     })
@@ -249,6 +262,18 @@ function ModbusDeviceEditor({
                   <th className="px-2 py-1.5 text-left">Name</th>
                   <th className="px-2 py-1.5 text-left">Kind</th>
                   <th className="px-2 py-1.5 text-left">Address</th>
+                  <th
+                    className="px-2 py-1.5 text-left"
+                    title="Register interpretation. 32-bit types (u32/i32/f32) span TWO consecutive registers — the norm for instrument floats and totalizers. Ignored for coils/discretes."
+                  >
+                    Type
+                  </th>
+                  <th
+                    className="px-2 py-1.5 text-left"
+                    title="Word order for 32-bit types: hi_lo = ABCD (Modbus default), lo_hi = CDAB (common on Chinese instruments)."
+                  >
+                    Words
+                  </th>
                   <th className="px-2 py-1.5 text-left">Linked to</th>
                   <th className="px-2 py-1.5"></th>
                 </tr>
@@ -301,6 +326,55 @@ function ModbusDeviceEditor({
                         }
                         className="h-8 w-24"
                       />
+                    </td>
+                    <td className="px-2 py-1.5">
+                      <Select
+                        value={ch.data_type ?? "u16"}
+                        onValueChange={(v) =>
+                          setChannel(i, { data_type: v as ModbusDataType })
+                        }
+                      >
+                        <SelectTrigger
+                          className="h-8 w-24"
+                          disabled={
+                            ch.kind === "coil" || ch.kind === "discrete_input"
+                          }
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="u16">u16</SelectItem>
+                          <SelectItem value="i16">i16</SelectItem>
+                          <SelectItem value="u32">u32 (2reg)</SelectItem>
+                          <SelectItem value="i32">i32 (2reg)</SelectItem>
+                          <SelectItem value="f32">f32 (2reg)</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </td>
+                    <td className="px-2 py-1.5">
+                      <Select
+                        value={ch.word_order ?? "hi_lo"}
+                        onValueChange={(v) =>
+                          setChannel(i, { word_order: v as ModbusWordOrder })
+                        }
+                      >
+                        <SelectTrigger
+                          className="h-8 w-24"
+                          disabled={
+                            ch.kind === "coil" ||
+                            ch.kind === "discrete_input" ||
+                            ch.data_type === "u16" ||
+                            ch.data_type === "i16" ||
+                            ch.data_type == null
+                          }
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="hi_lo">hi-lo (ABCD)</SelectItem>
+                          <SelectItem value="lo_hi">lo-hi (CDAB)</SelectItem>
+                        </SelectContent>
+                      </Select>
                     </td>
                     <td className="px-2 py-1.5">
                       <LinkedToCell channelName={ch.name} link={link} />
@@ -1063,6 +1137,291 @@ function EthercatDeviceEditor({
                           })
                         }
                         className="h-8 w-14"
+                      />
+                    </td>
+                    <td className="px-2 py-1.5">
+                      <LinkedToCell channelName={ch.name} link={link} />
+                    </td>
+                    <td className="px-2 py-1.5 text-right">
+                      <button
+                        type="button"
+                        onClick={() => removeChannel(i)}
+                        className="rounded p-1 text-muted-foreground hover:bg-accent/40 hover:text-red-600"
+                        title="Remove"
+                      >
+                        <Trash2 className="size-3.5" />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </section>
+      </div>
+    </>
+  )
+}
+
+// ============================================================
+//  OPC UA form — southbound client to an existing DCS / gateway
+// ============================================================
+
+const OPCUA_DATA_TYPES: { value: OpcuaDataType; label: string }[] = [
+  { value: "bool", label: "Boolean" },
+  { value: "i16", label: "Int16" },
+  { value: "u16", label: "UInt16" },
+  { value: "i32", label: "Int32" },
+  { value: "u32", label: "UInt32" },
+  { value: "f32", label: "Float (f32)" },
+  { value: "f64", label: "Double (f64)" },
+]
+
+function OpcuaDeviceEditor({
+  device,
+  onSave,
+  link,
+}: {
+  device: Device
+  onSave: (d: Device) => Promise<void>
+  link: LinkProps
+}) {
+  const [draft, setDraft] = useState<Device>(device)
+  useEffect(() => {
+    setDraft(device)
+  }, [device])
+
+  if (draft.protocol !== "opcua") return null
+  const dirty = JSON.stringify(draft) !== JSON.stringify(device)
+
+  const update = (patch: Partial<typeof draft>) =>
+    setDraft({ ...draft, ...patch } as Device)
+
+  const setChannel = (idx: number, patch: Partial<OpcuaChannel>) => {
+    const next = [...draft.channels]
+    next[idx] = { ...next[idx], ...patch }
+    update({ channels: next })
+  }
+  const addChannel = () => {
+    update({
+      channels: [
+        ...draft.channels,
+        {
+          name: `tag_${draft.channels.length}`,
+          node_id: "ns=2;s=",
+          data_type: "f32",
+          access: "read",
+          failsafe: null,
+        },
+      ],
+    })
+  }
+  const removeChannel = (idx: number) => {
+    update({ channels: draft.channels.filter((_, i) => i !== idx) })
+  }
+
+  const auth = draft.auth ?? { kind: "anonymous" }
+
+  return (
+    <>
+      <div className="flex h-9 items-center justify-between border-b border-border pl-3 pr-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+        <span className="flex items-center gap-2 truncate normal-case tracking-normal text-foreground">
+          <span className="truncate font-mono">{device.name}</span>
+          <span className="rounded border border-border bg-muted/50 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+            opc ua
+          </span>
+          {dirty && (
+            <span className="rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-amber-700 dark:text-amber-400">
+              modified
+            </span>
+          )}
+        </span>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => void onSave(draft)}
+          disabled={!dirty}
+        >
+          <Save className="mr-1.5 size-3" />
+          Save
+        </Button>
+      </div>
+
+      <div className="flex-1 space-y-6 overflow-auto p-5">
+        <section>
+          <div className="mb-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+            Server
+          </div>
+          <div className="grid grid-cols-2 gap-3 max-w-2xl">
+            <Field label="Endpoint URL">
+              <Input
+                value={draft.endpoint_url}
+                onChange={(e) => update({ endpoint_url: e.target.value })}
+                placeholder="opc.tcp://10.0.0.10:4840"
+                className="font-mono"
+              />
+            </Field>
+            <Field label="Poll interval (ms)">
+              <Input
+                type="number"
+                min={50}
+                step={50}
+                value={draft.poll_interval_ms}
+                onChange={(e) =>
+                  update({
+                    poll_interval_ms: Math.max(50, Number(e.target.value) || 0),
+                  })
+                }
+              />
+            </Field>
+            <Field label="Authentication">
+              <Select
+                value={auth.kind}
+                onValueChange={(v) =>
+                  update({
+                    auth:
+                      v === "anonymous"
+                        ? { kind: "anonymous" }
+                        : { kind: "user_password", username: "", password: "" },
+                  })
+                }
+              >
+                <SelectTrigger className="h-9 w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="anonymous">Anonymous</SelectItem>
+                  <SelectItem value="user_password">User / password</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+            {auth.kind === "user_password" && (
+              <>
+                <Field label="Username">
+                  <Input
+                    value={auth.username}
+                    onChange={(e) =>
+                      update({ auth: { ...auth, username: e.target.value } })
+                    }
+                  />
+                </Field>
+                <Field label="Password">
+                  <Input
+                    type="password"
+                    value={auth.password}
+                    onChange={(e) =>
+                      update({ auth: { ...auth, password: e.target.value } })
+                    }
+                  />
+                </Field>
+              </>
+            )}
+          </div>
+        </section>
+
+        <section>
+          <div className="mb-3 flex items-center justify-between">
+            <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+              Tags ({draft.channels.length})
+            </div>
+            <Button size="sm" variant="ghost" onClick={addChannel}>
+              <Plus className="mr-1 size-3" />
+              Add tag
+            </Button>
+          </div>
+          {draft.channels.length === 0 ? (
+            <div className="rounded-md border border-dashed border-border p-4 text-center text-xs text-muted-foreground">
+              No tags. Each tag maps one server NodeId (e.g.{" "}
+              <span className="font-mono">ns=2;s=FT0202.PV</span>) to an iomap
+              channel.
+            </div>
+          ) : (
+            <table className="w-full text-sm">
+              <thead className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                <tr className="border-b border-border">
+                  <th className="px-2 py-1.5 text-left">Name</th>
+                  <th className="px-2 py-1.5 text-left">NodeId</th>
+                  <th className="px-2 py-1.5 text-left">Type</th>
+                  <th className="px-2 py-1.5 text-left">Access</th>
+                  <th
+                    className="px-2 py-1.5 text-left"
+                    title="Optional value written on runtime shutdown/trip. Empty = leave the DCS tag untouched (recommended for a supervisory layer)."
+                  >
+                    Failsafe
+                  </th>
+                  <th className="px-2 py-1.5 text-left">Linked to</th>
+                  <th className="px-2 py-1.5"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {draft.channels.map((ch, i) => (
+                  <tr
+                    key={i}
+                    className="border-b border-border align-top last:border-0"
+                  >
+                    <td className="px-2 py-1.5">
+                      <Input
+                        value={ch.name}
+                        onChange={(e) => setChannel(i, { name: e.target.value })}
+                        className="h-8 w-36"
+                      />
+                    </td>
+                    <td className="px-2 py-1.5">
+                      <Input
+                        value={ch.node_id}
+                        onChange={(e) =>
+                          setChannel(i, { node_id: e.target.value })
+                        }
+                        className="h-8 w-56 font-mono"
+                        placeholder="ns=2;s=FT0202.PV"
+                      />
+                    </td>
+                    <td className="px-2 py-1.5">
+                      <Select
+                        value={ch.data_type}
+                        onValueChange={(v) =>
+                          setChannel(i, { data_type: v as OpcuaDataType })
+                        }
+                      >
+                        <SelectTrigger className="h-8 w-32">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {OPCUA_DATA_TYPES.map((t) => (
+                            <SelectItem key={t.value} value={t.value}>
+                              {t.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </td>
+                    <td className="px-2 py-1.5">
+                      <Select
+                        value={ch.access ?? "read"}
+                        onValueChange={(v) =>
+                          setChannel(i, { access: v as OpcuaAccess })
+                        }
+                      >
+                        <SelectTrigger className="h-8 w-28">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="read">read</SelectItem>
+                          <SelectItem value="write">write</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </td>
+                    <td className="px-2 py-1.5">
+                      <Input
+                        value={ch.failsafe ?? ""}
+                        onChange={(e) => {
+                          const t = e.target.value.trim()
+                          setChannel(i, {
+                            failsafe: t === "" ? null : Number(t),
+                          })
+                        }}
+                        className="h-8 w-20"
+                        placeholder="—"
                       />
                     </td>
                     <td className="px-2 py-1.5">

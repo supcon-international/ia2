@@ -1,0 +1,27 @@
+[[mappings]]
+application = "main"
+variable = "ft0202_pv"
+device = "dcs"
+channel = "ft0202_pv"
+direction = "input"
+
+[[mappings]]
+application = "main"
+variable = "m0204_amps"
+device = "dcs"
+channel = "m0204_amps"
+direction = "input"
+
+[[mappings]]
+application = "main"
+variable = "fv0203_cmd"
+device = "dcs"
+channel = "fv0203_cmd"
+direction = "output"
+
+[[mappings]]
+application = "main"
+variable = "feeder_run"
+device = "dcs"
+channel = "feeder_run"
+direction = "output"

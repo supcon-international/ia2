@@ -50,7 +50,7 @@ Now just ask your agent to build a PLC program — it will author ST / LD / FBD 
 | **`crates/ironplc-bridge/`** | Rust | Wraps vendored [ironplc](https://github.com/ironplc/ironplc) compiler + VM. Adds LD / FBD / SFC → ST transpilers + diagnostics enrichment. |
 | **`crates/runtime/`** | Rust | Headless edge runtime (`ia2-runtime` binary). Same scan loop as the IDE-side bridge, plus a small HTTP monitor (health / status / logs / discover) the server reaches over SSH — no LSP, no CORS, no REST project API. Designed for Linux edge boxes. |
 | **`crates/project/`** | Rust | On-disk project schema (POU files, devices, edges, iomap, tasks). |
-| **`crates/iomap-modbus/` `iomap-ethercat/`** | Rust | I/O adapters: Modbus TCP **and RTU/serial** (tokio-modbus + tokio-serial), EtherCAT (ethercrab). |
+| **`crates/iomap-modbus/` `iomap-ethercat/` `iomap-opcua/`** | Rust | I/O adapters: Modbus TCP **and RTU/serial** (tokio-modbus + tokio-serial), EtherCAT (ethercrab), **OPC UA client** (async-opcua) for supervising an existing DCS. Edge runtime publishes **northbound MQTT** (rumqttc) to supOS/Tier0. |
 | **`vendor/ironplc/`** | git submodule | The compiler + VM. |
 
 ## Two interfaces, one source of truth

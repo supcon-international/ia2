@@ -51,13 +51,19 @@ use crate::bits;
 use crate::SlaveDiscovery;
 
 // Storage sizing — picked to comfortably cover a typical edge configuration
-// (an EK1100-class coupler + ~30 EL modules). MAX_PDU_DATA at ~1100 matches
-// the upstream examples; PDI_LEN at 256 covers most fieldbus surfaces.
-// MAX_SUBDEVICES must be a power of 2 > 1.
-const MAX_SUBDEVICES: usize = 32;
+// (an EK1100-class coupler + EL modules). Sized for plant-scale buses,
+// not just demo benches: a 1000-point project (AI230/AO54/DI480/DO270)
+// needs ~660 B of PDI and tens of modular subdevices, so 128 subdevices
+// / 4096 B PDI leaves comfortable headroom. The cost is static memory
+// only (PduStorage is Box::leaked per connect): 64 frames x ~1100 B is
+// about 70 KB — irrelevant on an edge box — and one 4 KiB PDI cycle
+// splits across ~4 PDUs per direction, which 64 in-flight frames cover
+// several times over. MAX_SUBDEVICES must be a power of 2 > 1;
+// MAX_PDU_DATA at ~1100 tracks the Ethernet frame limit.
+const MAX_SUBDEVICES: usize = 128;
 const MAX_PDU_DATA: usize = PduStorage::element_size(1100);
-const MAX_FRAMES: usize = 16;
-const PDI_LEN: usize = 256;
+const MAX_FRAMES: usize = 64;
+const PDI_LEN: usize = 4096;
 
 type Storage = PduStorage<MAX_FRAMES, MAX_PDU_DATA>;
 

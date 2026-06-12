@@ -37,8 +37,9 @@ pub use store::{MigrationReport, ProjectStore};
 pub use types::{
     Device, Direction, Edge, EthercatChannel, EthercatConfig, EthercatDataType, EthercatDcSync,
     EthercatPdoDirection, EthercatSlave, IoMap, Mapping, ModbusChannel, ModbusChannelKind,
-    ModbusConfig, ModbusDataBits, ModbusParity, ModbusRtuParams, ModbusStopBits, ModbusTcpParams,
-    ModbusTransport, Pou, PouDecl, PouFile, PouFileSource, PouLanguage, PouType, ProgramInstance,
-    ProjectListing, ProjectManifest, ProjectTree, ProjectTreeSkeleton, Protocol, ProtocolConfig,
-    Task, Tasks,
+    ModbusConfig, ModbusDataBits, ModbusDataType, ModbusParity, ModbusRtuParams, ModbusStopBits,
+    ModbusTcpParams, ModbusTransport, ModbusWordOrder, MqttNorthbound, NorthboundConfig,
+    OpcuaAccess, OpcuaAuth, OpcuaChannel, OpcuaConfig, OpcuaDataType, OpcuaSecurity, Pou, PouDecl,
+    PouFile, PouFileSource, PouLanguage, PouType, ProgramInstance, ProjectListing, ProjectManifest,
+    ProjectTree, ProjectTreeSkeleton, Protocol, ProtocolConfig, Task, Tasks,
 };

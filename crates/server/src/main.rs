@@ -233,6 +233,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/iomap", get(routes::get_iomap).put(routes::put_iomap))
         // Tasks (project-level scheduling)
         .route("/api/tasks", get(routes::get_tasks).put(routes::put_tasks))
+        .route(
+            "/api/northbound",
+            get(routes::get_northbound).put(routes::put_northbound),
+        )
         .route("/api/project/migrate-tasks", post(routes::migrate_tasks))
         // Compile / runtime
         .route("/api/check", post(routes::check))

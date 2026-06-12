@@ -552,6 +552,28 @@ impl ProjectStore {
         Ok(())
     }
 
+    // ---------------- Northbound (northbound.toml) ----------------
+
+    /// Read northbound.toml. Missing file = northbound disabled (the
+    /// common case for projects that don't publish to a platform).
+    pub fn read_northbound(&self) -> Result<crate::types::NorthboundConfig, StoreError> {
+        let path = self.root.join("northbound.toml");
+        if !path.exists() {
+            return Ok(crate::types::NorthboundConfig::default());
+        }
+        let text = fs::read_to_string(&path)?;
+        Ok(toml::from_str(&text)?)
+    }
+
+    pub fn write_northbound(
+        &self,
+        config: &crate::types::NorthboundConfig,
+    ) -> Result<(), StoreError> {
+        let path = self.root.join("northbound.toml");
+        fs::write(path, toml::to_string_pretty(config)?)?;
+        Ok(())
+    }
+
     /// Auto-migrate an old project from per-POU inline CONFIGURATION to a
     /// project-level `tasks.toml`. Idempotent — if `tasks.toml` already
     /// exists this returns `Ok(MigrationReport::Skipped)`.
@@ -1181,6 +1203,13 @@ fn default_config_for(protocol: Protocol) -> ProtocolConfig {
             cycle_us: 1_000,
             dc_sync: crate::types::EthercatDcSync::Off,
             slaves: vec![],
+            channels: vec![],
+        }),
+        Protocol::Opcua => ProtocolConfig::Opcua(crate::types::OpcuaConfig {
+            endpoint_url: "opc.tcp://127.0.0.1:4840".into(),
+            security: crate::types::OpcuaSecurity::None,
+            auth: crate::types::OpcuaAuth::Anonymous,
+            poll_interval_ms: 500,
             channels: vec![],
         }),
     }

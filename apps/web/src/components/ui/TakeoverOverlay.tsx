@@ -6,24 +6,20 @@ import { agentActivityStore, useAgentActivity } from "@/state/agent-activity"
 import { cn } from "@/lib/utils"
 
 /**
- * Agent-takeover overlay. Renders three things on top of everything
- * when the server reports an agent is active:
+ * Agent-takeover overlay. Purely informational — it NEVER blocks the
+ * user from interacting; the human and the agent can both drive the app
+ * at the same time. Renders two things on top of everything when the
+ * server reports an agent is active:
  *
- *   1. A pulsing brand-green border around the whole window —
+ *   1. A top-center banner with the session label / current command, a
+ *      recent activity list, and an End-session / Take-over button. The
+ *      primary surface during takeover — far more visible than a corner
+ *      toast.
+ *   2. A pulsing brand-green border around the whole window —
  *      decorative, pointer-events: none, draws over the entire app.
- *   2. A full-screen scrim that intercepts clicks so the user can't
- *      modify state while the agent's in the middle of a multi-step
- *      sequence. Click → micro-shake animation as a "no, take over
- *      first" cue.
- *   3. A top-center banner with the current command + a recent
- *      activity list + a "Take over" button. This replaces the
- *      bottom-right toast as the primary surface during takeover —
- *      agent actions are far more visible at top-center than
- *      tucked in the corner.
  *
  * Layer/z-index plan (from back to front):
- *   500  scrim       (catches clicks, semi-transparent backdrop)
- *   600  banner      (interactive — Take over, expand log)
+ *   600  banner      (interactive — End session / Take over, expand log)
  *   700  glow        (decorative; pointer-events: none)
  *
  * Same React code runs in both the Mac desktop WKWebView and the
@@ -43,32 +39,9 @@ export function TakeoverOverlay() {
 
   return (
     <>
-      <Scrim />
       <Banner agent={agent} />
       <BorderGlow />
     </>
-  )
-}
-
-/**
- * Full-screen click-eater. Clear background so the IDE stays visible;
- * just blocks pointer events on the content beneath the banner.
- *
- * Click triggers a micro-shake to remind the user that input is
- * being held until they click "Take over". The shake is cosmetic —
- * the actual block is `pointer-events: auto` on this layer.
- */
-function Scrim() {
-  const [shake, setShake] = useState(0)
-  return (
-    <div
-      className={cn(
-        "fixed inset-0 z-[500] cursor-not-allowed bg-background/30 backdrop-blur-[0.5px]",
-        shake > 0 && "animate-pulse",
-      )}
-      onPointerDown={() => setShake((n) => n + 1)}
-      role="presentation"
-    />
   )
 }
 

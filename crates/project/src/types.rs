@@ -125,6 +125,7 @@ pub struct ProjectTreeSkeleton {
 pub enum Protocol {
     Modbus,
     Ethercat,
+    Opcua,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -133,6 +134,7 @@ pub enum Protocol {
 pub enum ProtocolConfig {
     Modbus(ModbusConfig),
     Ethercat(EthercatConfig),
+    Opcua(OpcuaConfig),
 }
 
 impl ProtocolConfig {
@@ -140,6 +142,7 @@ impl ProtocolConfig {
         match self {
             ProtocolConfig::Modbus(_) => Protocol::Modbus,
             ProtocolConfig::Ethercat(_) => Protocol::Ethercat,
+            ProtocolConfig::Opcua(_) => Protocol::Opcua,
         }
     }
 
@@ -147,6 +150,7 @@ impl ProtocolConfig {
         match self {
             ProtocolConfig::Modbus(c) => c.channels.iter().map(|c| c.name.clone()).collect(),
             ProtocolConfig::Ethercat(c) => c.channels.iter().map(|c| c.name.clone()).collect(),
+            ProtocolConfig::Opcua(c) => c.channels.iter().map(|c| c.name.clone()).collect(),
         }
     }
 }
@@ -321,6 +325,47 @@ pub struct ModbusChannel {
     pub name: String,
     pub kind: ModbusChannelKind,
     pub address: u16,
+    /// Register interpretation (register kinds only; coils/discretes
+    /// ignore it). 32-bit types span TWO consecutive registers starting
+    /// at `address` — the norm for instrument floats and totalizers.
+    #[serde(default)]
+    pub data_type: ModbusDataType,
+    /// Word order for 32-bit types: which register holds the high word.
+    /// `hi_lo` = big-endian word order ("ABCD", the Modbus-spec default);
+    /// `lo_hi` = swapped ("CDAB", common on Chinese instruments).
+    #[serde(default)]
+    pub word_order: ModbusWordOrder,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum ModbusDataType {
+    #[default]
+    U16,
+    I16,
+    U32,
+    I32,
+    F32,
+}
+
+impl ModbusDataType {
+    /// How many 16-bit registers this type occupies.
+    pub fn register_len(self) -> u16 {
+        match self {
+            ModbusDataType::U16 | ModbusDataType::I16 => 1,
+            ModbusDataType::U32 | ModbusDataType::I32 | ModbusDataType::F32 => 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum ModbusWordOrder {
+    #[default]
+    HiLo,
+    LoHi,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
@@ -530,6 +575,103 @@ pub enum EthercatDataType {
     Real,
 }
 
+/// OPC UA client device — southbound integration with an existing DCS /
+/// PLC / gateway that exposes its tags over OPC UA. IA2 acts as the
+/// supervisory layer: it reads PV tags and writes SP/command tags, while
+/// the underlying DCS keeps base regulatory control and safety.
+///
+/// Classic OPC DA (COM/DCOM, Windows-only) is reached through a DA→UA
+/// gateway (KEPServerEX, Matrikon UA Proxy, …) — IA2 itself speaks UA
+/// only, which is the standard bridge architecture on Linux edges.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct OpcuaConfig {
+    /// `opc.tcp://host:4840/path` endpoint of the UA server.
+    pub endpoint_url: String,
+    /// Security policy. V1 supports `None` only (site networks /
+    /// DA-gateway hops are typically unencrypted segments); Sign/
+    /// SignAndEncrypt are a later iteration.
+    #[serde(default)]
+    pub security: OpcuaSecurity,
+    /// Session authentication.
+    #[serde(default)]
+    pub auth: OpcuaAuth,
+    /// Cyclic read period for the tag mirror, in milliseconds. All
+    /// readable channels are fetched in ONE bulk Read service call per
+    /// cycle, so this scales to hundreds of tags.
+    #[serde(default = "default_opcua_poll_ms")]
+    pub poll_interval_ms: u32,
+    pub channels: Vec<OpcuaChannel>,
+}
+
+fn default_opcua_poll_ms() -> u32 {
+    500
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum OpcuaSecurity {
+    #[default]
+    None,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OpcuaAuth {
+    #[default]
+    Anonymous,
+    UserPassword {
+        username: String,
+        password: String,
+    },
+}
+
+/// One mapped tag. `node_id` is the full OPC UA NodeId string, e.g.
+/// `ns=2;s=Channel1.Device1.FT0202_PV` (string ids) or `ns=3;i=1042`
+/// (numeric ids) — exactly what UaExpert shows.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct OpcuaChannel {
+    pub name: String,
+    pub node_id: String,
+    pub data_type: OpcuaDataType,
+    /// `read` tags feed iomap inputs; `write` tags accept iomap outputs
+    /// (and are also readable for verification).
+    #[serde(default)]
+    pub access: OpcuaAccess,
+    /// Optional failsafe value written when the runtime shuts down or
+    /// trips. Default: leave the tag UNTOUCHED — on a supervisory layer
+    /// the DCS below keeps authority, and blind zero-writes to DCS tags
+    /// are more dangerous than holding last value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failsafe: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum OpcuaAccess {
+    #[default]
+    Read,
+    Write,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum OpcuaDataType {
+    Bool,
+    I16,
+    U16,
+    I32,
+    U32,
+    F32,
+    /// Server-side Double; carried as f32 in the channel lane (PLC REAL).
+    F64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct Device {
@@ -658,6 +800,63 @@ pub struct Tasks {
     pub tasks: Vec<Task>,
     #[serde(default)]
     pub programs: Vec<ProgramInstance>,
+}
+
+// ---------------- Northbound (edge → platform publishing) ----------------
+
+/// `northbound.toml` — how the *edge runtime* publishes live data up to
+/// the plant platform (supOS / Tier0). MQTT only by design: it's the
+/// integration protocol the platform side ingests natively. Southbound
+/// (driving instruments/valves) is the device layer's job (OPC UA /
+/// EtherCAT / Modbus) — never this.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NorthboundConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mqtt: Option<MqttNorthbound>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct MqttNorthbound {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub broker_host: String,
+    #[serde(default = "default_mqtt_port")]
+    pub broker_port: u16,
+    /// Defaults to `ia2-<project>` when empty.
+    #[serde(default)]
+    pub client_id: String,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub password: String,
+    /// Topic root; defaults to `ia2/<project>` when empty. Topics:
+    /// `<prefix>/status` (retained online/offline + LWT),
+    /// `<prefix>/snapshot` (periodic values JSON),
+    /// `<prefix>/write` (subscribed when `allow_write`).
+    #[serde(default)]
+    pub topic_prefix: String,
+    #[serde(default = "default_publish_ms")]
+    pub publish_interval_ms: u32,
+    /// 0 or 1 (QoS 2 is overkill for cyclic data).
+    #[serde(default)]
+    pub qos: u8,
+    /// Accept variable writes from `<prefix>/write` (payload
+    /// `{"name": ..., "value": ...}`). Off by default — turning the
+    /// northbound link into a control path is an explicit decision.
+    #[serde(default)]
+    pub allow_write: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_mqtt_port() -> u16 {
+    1883
+}
+fn default_publish_ms() -> u32 {
+    1000
 }
 
 // ---------------- Project tree (frontend response) ----------------

@@ -408,15 +408,11 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
                 selectPouRef,
               )
               break
-            case "agent_activity":
-              // Feed the agent-takeover store so any subscribing
-              // component (TakeoverOverlay, Banner) re-renders.
-              agentActivityStore.ingest({
-                active: ev.data.active,
-                command: ev.data.command,
-                session: ev.data.session,
-              })
-              break
+            // NOTE: `agent_activity` is intentionally NOT handled here.
+            // It's an app-global concern handled by a dedicated, always-on
+            // /api/events subscription (see the effect below) so the
+            // takeover overlay keeps working even while this stream is
+            // repointed at an edge runtime during Debug/attach.
           }
         }
       } catch {
@@ -428,6 +424,33 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       esRef.current = null
     }
   }, [attached])
+
+  // Dedicated, always-on /api/events subscription for agent-takeover
+  // activity. The main stream above gets repointed at an edge runtime
+  // while attached (Edge → Debug), which would otherwise starve the
+  // takeover overlay of `agent_activity`. This one never switches, so
+  // the overlay reflects reality regardless of edge attach. (The server
+  // replays the current agent_activity on connect, so it self-heals on
+  // reconnect too.)
+  useEffect(() => {
+    const es = new EventSource(eventsUrl())
+    es.onmessage = (msg) => {
+      try {
+        const ev = JSON.parse(msg.data) as AppEvent
+        if (ev.type === "agent_activity") {
+          agentActivityStore.ingest({
+            active: ev.data.active,
+            command: ev.data.command,
+            session: ev.data.session,
+            session_label: ev.data.session_label,
+          })
+        }
+      } catch {
+        /* ignore malformed frames */
+      }
+    }
+    return () => es.close()
+  }, [])
 
   // ---------------- LSP-driven diagnostics ----------------
 
