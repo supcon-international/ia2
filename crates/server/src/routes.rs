@@ -763,6 +763,40 @@ pub async fn import_library(
     }))
 }
 
+/// GET /api/device-catalog — validated device templates from
+/// `<library-dir>/devices/` (see library/devices/README.md).
+pub async fn list_device_catalog(
+    State(state): State<AppState>,
+) -> Json<Vec<crate::catalog::CatalogEntry>> {
+    Json(crate::catalog::scan(state.library_dir.as_deref()))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CatalogMatchQuery {
+    pub vendor_id: u32,
+    pub product_id: u32,
+}
+
+/// GET /api/device-catalog/match?vendor_id=&product_id= — resolve a
+/// discovered slave's identity to a catalog template, so the IDE /
+/// agent can pre-fill a device from a bus scan instead of hand-typing
+/// PDI offsets. 404 when the identity isn't in the catalog.
+pub async fn match_device_catalog(
+    State(state): State<AppState>,
+    Query(q): Query<CatalogMatchQuery>,
+) -> Result<Json<crate::catalog::CatalogEntry>, ApiError> {
+    let entries = crate::catalog::scan(state.library_dir.as_deref());
+    crate::catalog::match_identity(&entries, q.vendor_id, q.product_id)
+        .cloned()
+        .map(Json)
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "no catalog entry for vendor_id={} product_id={}",
+                q.vendor_id, q.product_id
+            ))
+        })
+}
+
 /// DELETE /api/library/{name} — drop `pous/lib/<name>/` and the
 /// project.toml entry. Idempotent on the directory.
 pub async fn remove_library(

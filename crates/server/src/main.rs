@@ -1,3 +1,4 @@
+mod catalog;
 mod edges;
 mod error;
 mod events;
@@ -195,6 +196,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/pous", post(routes::create_pou))
         .route("/api/library", get(routes::list_libraries))
         .route("/api/library/import", post(routes::import_library))
+        .route("/api/device-catalog", get(routes::list_device_catalog))
+        .route(
+            "/api/device-catalog/match",
+            get(routes::match_device_catalog),
+        )
         .route(
             "/api/library/{name}",
             axum::routing::delete(routes::remove_library),
