@@ -319,53 +319,49 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Multi-PROGRAM guard — see the IDE-side `/api/run` handler for
-    // the full explanation. Same reason here on the edge: ironplc's
-    // codegen only honors the first PROGRAM declaration.
+    // ADR-0001 constraint, mirrored from the IDE-side `/api/run`
+    // handler: multi-PROGRAM projects run one container per instance,
+    // so a VAR_GLOBAL would be duplicated per instance instead of
+    // shared — refuse rather than let plant state silently diverge.
     if tasks.programs.len() > 1 {
-        let names = tasks
-            .programs
-            .iter()
-            .map(|p| p.program.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        anyhow::bail!(
-            "tasks.toml schedules {} PROGRAMs ({}) but the runtime can only execute \
-             one PROGRAM per process (ironplc codegen limitation). Reduce tasks.toml \
-             to one PROGRAM and redeploy.",
-            tasks.programs.len(),
-            names,
-        );
+        let globals = ironplc_bridge::extract_project_global_vars(&store);
+        if !globals.is_empty() {
+            let list = globals
+                .iter()
+                .map(|(file, var)| format!("'{var}' in {file}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::bail!(
+                "tasks.toml schedules {} PROGRAMs but the project declares VAR_GLOBAL \
+                 ({list}). Each PROGRAM instance runs in its own isolated container, \
+                 so globals are NOT shared across PROGRAMs. Move the shared state \
+                 behind I/O mappings or FUNCTION_BLOCK parameters, or reduce \
+                 tasks.toml to a single PROGRAM, then redeploy.",
+                tasks.programs.len(),
+            );
+        }
     }
 
-    let (container, metadata) =
-        ironplc_bridge::compile_project_full(&store).context("compiling project")?;
+    // One container + VM per scheduled PROGRAM instance; the bridge's
+    // single scan thread rotates them at their own task intervals.
+    let units =
+        ironplc_bridge::compile_project_units(&store, &tasks).context("compiling project")?;
+    let retain_var_count: usize = units.iter().map(|u| u.retain_vars.len()).sum();
     tracing::info!(
         devices = device_specs.len(),
         mappings = iomap.mappings.len(),
         tasks = tasks.tasks.len(),
-        programs = tasks.programs.len(),
-        retain_vars = metadata.retain_vars.len(),
+        programs = units.len(),
+        retain_vars = retain_var_count,
         "compiled"
     );
 
-    // Source the scan period from the (only) program's bound task,
-    // falling back to the bridge default if the bind chain is
-    // incomplete. See `crates/ironplc-bridge/src/runtime.rs` for why
-    // we throttle in the bridge rather than via the VM scheduler.
-    let scan_interval_ms = tasks
-        .programs
-        .first()
-        .and_then(|p| tasks.tasks.iter().find(|t| t.name == p.task))
-        .map(|t| t.interval_ms as u64)
-        .unwrap_or(ironplc_bridge::DEFAULT_SCAN_INTERVAL_MS);
-
     // RETAIN state file lives under the configured state dir. The
     // bridge handles missing-file / bad-content gracefully, so we
-    // don't pre-create anything here. Skip the path entirely if the
-    // program declares no RETAIN vars — no file means no future
-    // confusion about "what's in this state.json".
-    let state_path = if metadata.retain_vars.is_empty() {
+    // don't pre-create anything here. Skip the path entirely if no
+    // unit declares RETAIN vars — no file means no future confusion
+    // about "what's in this state.json".
+    let state_path = if retain_var_count == 0 {
         None
     } else {
         let p = args.state_dir.join("retain.json");
@@ -374,16 +370,8 @@ async fn main() -> Result<()> {
     };
 
     // ---- Spawn the bridge ----
-    let handle: ProgramHandle = ironplc_bridge::spawn_with_options(
-        container,
-        device_specs,
-        iomap.mappings,
-        ironplc_bridge::SpawnOptions {
-            scan_interval_ms,
-            retain_vars: metadata.retain_vars,
-            state_path,
-        },
-    );
+    let handle: ProgramHandle =
+        ironplc_bridge::spawn_units(units, device_specs, iomap.mappings, state_path);
 
     // Fan out the bridge's snapshots into a runtime-owned broadcast channel,
     // so we can keep the latest snapshot in shared state for /status and so

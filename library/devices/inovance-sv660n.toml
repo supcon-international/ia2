@@ -1,0 +1,52 @@
+# Inovance SV660N 伺服驱动（EtherCAT, CiA 402）。
+# 实测来源：SV660N 台架（servo_ec 项目）——连接、DC SYNC0 进 OP、
+# CSP 位置环数据往返均验证过。PDI 偏移对应下列 4 通道的默认
+# PDO assign（0x1600/0x1A00 默认映射）；现场若改写 PDO 映射需
+# 相应调整 pdi_byte_offset。
+name = "InoSV660N"
+protocol = "ethercat"
+description = "Inovance SV660N servo drive — CiA 402, CSP; requires DC SYNC0 to reach OP"
+vendor_id = 1048576    # 0x00100000 Inovance
+product_id = 786701    # 0x000C020D SV660N
+requires_dc_sync = "sync0"
+recommended_cycle_us = 2000
+
+[[channels]]
+name = "controlword"
+direction = "rx_pdo"
+pdo_index = 24640      # 0x6040
+sub_index = 0
+bit_length = 16
+data_type = "u16"
+pdi_byte_offset = 0
+pdi_bit_offset = 0
+
+[[channels]]
+name = "target_position"
+direction = "rx_pdo"
+pdo_index = 24698      # 0x607A
+sub_index = 0
+bit_length = 32
+data_type = "i32"
+pdi_byte_offset = 2
+pdi_bit_offset = 0
+
+[[channels]]
+name = "statusword"
+direction = "tx_pdo"
+pdo_index = 24641      # 0x6041
+sub_index = 0
+bit_length = 16
+data_type = "u16"
+pdi_byte_offset = 2
+pdi_bit_offset = 0
+
+[[channels]]
+name = "position_actual"
+direction = "tx_pdo"
+pdo_index = 24676      # 0x6064
+sub_index = 0
+bit_length = 32
+data_type = "i32"
+pdi_byte_offset = 4
+pdi_bit_offset = 0

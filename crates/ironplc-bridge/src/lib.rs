@@ -27,12 +27,16 @@ pub use sfc_transpile::{
 
 pub use errors::BridgeError;
 pub use runtime::{
-    spawn, spawn_with_interval, spawn_with_options, DeviceReport, DeviceSpec, DiscoveredSlave,
-    ProgramHandle, RuntimeMode, RuntimeWriteError, SpawnOptions, VarSnapshot, VarValue,
-    DEFAULT_SCAN_INTERVAL_MS, RETAIN_FLUSH_INTERVAL,
+    spawn, spawn_units, spawn_with_interval, spawn_with_options, DeviceReport, DeviceSpec,
+    DiscoveredSlave, ProgramHandle, ProgramUnit, RuntimeMode, RuntimeWriteError, SpawnOptions,
+    VarSnapshot, VarValue, DEFAULT_SCAN_INTERVAL_MS, RETAIN_FLUSH_INTERVAL,
 };
 
-use ironplc_container::Container;
+// Re-exported so downstream crates (server / runtime) can name the
+// bytecode type when constructing `ProgramUnit`s without depending on
+// the vendored ironplc-container crate directly.
+pub use ironplc_container::Container;
+
 use ironplc_dsl::common::{
     DeclarationQualifier, InitialValueAssignmentKind, Library, LibraryElementKind, VarDecl,
     VariableType,
@@ -74,10 +78,7 @@ pub fn compile(source: &str) -> Result<Container, BridgeError> {
 /// the parsed AST (retain vars and anything else the codegen drops).
 pub fn compile_with_metadata(source: &str) -> Result<(Container, ProgramMetadata), BridgeError> {
     let file_id = FileId::default();
-    let options = CompilerOptions {
-        allow_empty_var_blocks: true,
-        ..Default::default()
-    };
+    let options = parser_options();
 
     let library = ironplc_parser::parse_program(source, &file_id, &options)
         .map_err(|d| BridgeError::Parse(format!("{d:?}")))?;
@@ -88,7 +89,26 @@ pub fn compile_with_metadata(source: &str) -> Result<(Container, ProgramMetadata
         retain_vars: extract_retain_vars(&library),
     };
 
-    let (analyzed, context) = ironplc_analyzer::stages::analyze(&[&library], &options)
+    let container = compile_library(&library)?;
+    Ok((container, metadata))
+}
+
+/// The one `CompilerOptions` shape the bridge uses everywhere.
+/// `allow_empty_var_blocks` mirrors the ironplc CLI flag — POU templates
+/// we ship intentionally start with empty VAR blocks.
+fn parser_options() -> CompilerOptions {
+    CompilerOptions {
+        allow_empty_var_blocks: true,
+        ..Default::default()
+    }
+}
+
+/// Analyze + codegen a parsed `Library` into a bytecode container —
+/// the shared tail of `compile_with_metadata` and
+/// `compile_project_units`.
+fn compile_library(library: &Library) -> Result<Container, BridgeError> {
+    let options = parser_options();
+    let (analyzed, context) = ironplc_analyzer::stages::analyze(&[library], &options)
         .map_err(|ds| BridgeError::Analyze(format!("{ds:?}")))?;
 
     if context.has_diagnostics() {
@@ -96,10 +116,8 @@ pub fn compile_with_metadata(source: &str) -> Result<(Container, ProgramMetadata
     }
 
     let codegen_options = ironplc_codegen::CodegenOptions::default();
-    let container = ironplc_codegen::compile(&analyzed, &context, &codegen_options)
-        .map_err(|d| BridgeError::Codegen(format!("{d:?}")))?;
-
-    Ok((container, metadata))
+    ironplc_codegen::compile(&analyzed, &context, &codegen_options)
+        .map_err(|d| BridgeError::Codegen(format!("{d:?}")))
 }
 
 /// Walk a parsed `Library` and collect every variable whose declaration
@@ -247,6 +265,201 @@ fn build_combined_project_source(
     }
     combined.push_str(&synthesize_configuration(tasks));
     Ok(combined)
+}
+
+/// Compile one container per `tasks.toml` PROGRAM instance — the
+/// multi-PROGRAM execution model from ADR-0001 ("每 PROGRAM 实例一个
+/// Container + 一个 VM，单 scan 线程轮转调度").
+///
+/// Each unit's library is assembled at the AST level:
+///   1. the instance's own `ProgramDeclaration`, hoisted to the front —
+///      ironplc's codegen compiles the FIRST PROGRAM it finds, so this
+///      is what makes "which program runs" deterministic even when one
+///      `.st` file declares several PROGRAMs;
+///   2. every non-PROGRAM declaration from every POU file
+///      (FUNCTION_BLOCKs, FUNCTIONs, data types, top-level globals) so
+///      cross-file FB references resolve exactly like the whole-project
+///      compile;
+///   3. a synthesized single-task CONFIGURATION for just this instance.
+///
+/// Other PROGRAM declarations are excluded from each unit: programs are
+/// only instantiable from the CONFIGURATION, and leaving them in would
+/// bleed their variables into this unit's debug section (and could even
+/// shadow the intended entry program).
+///
+/// Per-unit containers mean top-level VAR_GLOBALs are NOT shared across
+/// instances — each unit gets a private copy. Run paths reject
+/// multi-PROGRAM projects that declare globals (see
+/// `extract_project_global_vars`); single-PROGRAM projects keep their
+/// historical globals behaviour.
+pub fn compile_project_units(
+    store: &project::ProjectStore,
+    tasks: &project::Tasks,
+) -> Result<Vec<ProgramUnit>, BridgeError> {
+    if tasks.programs.is_empty() {
+        return Err(BridgeError::Parse(
+            "no PROGRAM instances to run — bind a PROGRAM to a task in the \
+             Tasks pane, or click Run from a POU file's editor (which schedules \
+             that PROGRAM ad-hoc for one run)"
+                .into(),
+        ));
+    }
+    let pou_paths = store
+        .list_pou_paths()
+        .map_err(|e| BridgeError::Parse(format!("listing pous: {e}")))?;
+    let options = parser_options();
+
+    // Parse every POU file once; elements are cloned per unit below.
+    // Each file keeps its own FileId so analyzer diagnostics name the
+    // real source file instead of an offset into a concatenated blob.
+    let mut program_decls: Vec<(String, ironplc_dsl::common::ProgramDeclaration)> = Vec::new();
+    let mut shared_elements: Vec<LibraryElementKind> = Vec::new();
+    for path in &pou_paths {
+        let language = store
+            .pou_file_language(path)
+            .map_err(|e| BridgeError::Parse(format!("language for '{path}': {e}")))?;
+        let source = store
+            .read_pou_source(path)
+            .map_err(|e| BridgeError::Parse(format!("reading pou '{path}': {e}")))?;
+        let st = source_to_st(&source, language)?;
+        let cleaned = strip_any_configuration(&st);
+        let file_id = FileId::from_string(path);
+        let library = ironplc_parser::parse_program(&cleaned, &file_id, &options)
+            .map_err(|d| BridgeError::Parse(format!("parsing '{path}': {d:?}")))?;
+        for element in library.elements {
+            match element {
+                LibraryElementKind::ProgramDeclaration(p) => {
+                    program_decls.push((p.name.to_string().to_lowercase(), p));
+                }
+                other => shared_elements.push(other),
+            }
+        }
+    }
+
+    let mut units = Vec::with_capacity(tasks.programs.len());
+    for p in &tasks.programs {
+        let wanted = sanitise_ident(&p.program).to_lowercase();
+        let program_decl = program_decls
+            .iter()
+            .find(|(name, _)| *name == wanted)
+            .map(|(_, decl)| decl.clone())
+            .ok_or_else(|| {
+                BridgeError::Parse(format!(
+                    "PROGRAM '{}' (instance '{}') is scheduled in tasks.toml but not \
+                     declared in any POU file",
+                    p.program, p.instance
+                ))
+            })?;
+
+        // Resolve the bound task; a dangling task name degrades to the
+        // default cadence with a warning rather than refusing to start
+        // (matches the run paths' historical graceful-degrade).
+        let task = tasks
+            .tasks
+            .iter()
+            .find(|t| t.name == p.task)
+            .cloned()
+            .unwrap_or_else(|| {
+                tracing::warn!(
+                    instance = %p.instance,
+                    task = %p.task,
+                    "instance references a task not declared in tasks.toml; \
+                     defaulting to {DEFAULT_SCAN_INTERVAL_MS} ms / priority 1"
+                );
+                project::Task {
+                    name: p.task.clone(),
+                    interval_ms: DEFAULT_SCAN_INTERVAL_MS as u32,
+                    priority: 1,
+                }
+            });
+
+        // Single-instance CONFIGURATION, via the same synthesizer as
+        // the whole-project path, then parsed back into AST elements.
+        let single = project::Tasks {
+            tasks: vec![task.clone()],
+            programs: vec![p.clone()],
+        };
+        let config_text = synthesize_configuration(&single);
+        let config_lib = ironplc_parser::parse_program(&config_text, &FileId::default(), &options)
+            .map_err(|d| {
+                BridgeError::Parse(format!(
+                    "synthesized CONFIGURATION for instance '{}': {d:?}",
+                    p.instance
+                ))
+            })?;
+
+        let mut elements =
+            Vec::with_capacity(1 + shared_elements.len() + config_lib.elements.len());
+        elements.push(LibraryElementKind::ProgramDeclaration(program_decl));
+        elements.extend(shared_elements.iter().cloned());
+        elements.extend(config_lib.elements);
+        let unit_library = Library { elements };
+
+        let retain_vars = extract_retain_vars(&unit_library);
+        let container = compile_library(&unit_library).map_err(|e| {
+            let tag = |m: String| format!("instance '{}': {m}", p.instance);
+            match e {
+                BridgeError::Parse(m) => BridgeError::Parse(tag(m)),
+                BridgeError::Analyze(m) => BridgeError::Analyze(tag(m)),
+                BridgeError::Codegen(m) => BridgeError::Codegen(tag(m)),
+            }
+        })?;
+
+        units.push(ProgramUnit {
+            instance: sanitise_ident(&p.instance).to_string(),
+            task_name: p.task.clone(),
+            interval_ms: u64::from(task.interval_ms),
+            priority: task.priority,
+            container,
+            retain_vars,
+        });
+    }
+    Ok(units)
+}
+
+/// Scan every POU file for top-level `VAR_GLOBAL` declarations and
+/// return (file_path, variable_name) pairs. Multi-PROGRAM run paths use
+/// this to reject projects that rely on cross-program globals: with one
+/// container per instance (ADR-0001) each PROGRAM gets a private copy
+/// of every global, so shared state would silently diverge.
+///
+/// Tolerant by design — unreadable / unparseable files contribute
+/// nothing here; the compile path is where their real diagnostics
+/// surface. VAR_GLOBAL inside a stray CONFIGURATION block is ignored
+/// for the same reason the compile path ignores it: those blocks are
+/// stripped before compilation.
+pub fn extract_project_global_vars(store: &project::ProjectStore) -> Vec<(String, String)> {
+    let Ok(paths) = store.list_pou_paths() else {
+        return Vec::new();
+    };
+    let options = parser_options();
+    let mut out = Vec::new();
+    for path in &paths {
+        let Ok(language) = store.pou_file_language(path) else {
+            continue;
+        };
+        let Ok(source) = store.read_pou_source(path) else {
+            continue;
+        };
+        let Ok(st) = source_to_st(&source, language) else {
+            continue;
+        };
+        let cleaned = strip_any_configuration(&st);
+        let file_id = FileId::from_string(path);
+        let Ok(library) = ironplc_parser::parse_program(&cleaned, &file_id, &options) else {
+            continue;
+        };
+        for element in &library.elements {
+            if let LibraryElementKind::GlobalVarDeclarations(decls) = element {
+                for v in decls {
+                    if let Some(id) = v.identifier.symbolic_id() {
+                        out.push((path.clone(), id.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Compile a single POU source + synthesized CONFIGURATION. Used by the
@@ -1068,6 +1281,196 @@ fn lookup_locations(
         SourceMapKind::Ld(m) => (m.lookup(line).cloned(), None, None),
         SourceMapKind::Fbd(m) => (None, m.lookup(line).cloned(), None),
         SourceMapKind::Sfc(m) => (None, None, m.lookup(line).cloned()),
+    }
+}
+
+#[cfg(test)]
+mod project_units_tests {
+    use super::{compile_project_units, extract_project_global_vars};
+    use ironplc_container::debug_format::build_var_debug_map;
+    use project::{PouLanguage, PouType, ProgramInstance, ProjectStore, Task, Tasks};
+
+    /// Tempdir-backed project: a cross-file FUNCTION_BLOCK, two
+    /// schedulable PROGRAMs in separate files, and one file declaring
+    /// TWO PROGRAMs (to prove the entry-program hoisting).
+    fn fixture_store(dir: &std::path::Path) -> ProjectStore {
+        let store = ProjectStore::create(dir.to_path_buf(), "fixture").expect("create project");
+        let write = |path: &str, source: &str| {
+            store
+                .create_pou_file(path, PouType::Program, PouLanguage::St)
+                .expect("create pou");
+            store.write_pou_source(path, source).expect("write pou");
+        };
+        write(
+            "fb_util",
+            "FUNCTION_BLOCK fb_double\n\
+                VAR_INPUT inv : INT; END_VAR\n\
+                VAR_OUTPUT outv : INT; END_VAR\n\
+                outv := inv * 2;\n\
+            END_FUNCTION_BLOCK",
+        );
+        write(
+            "alpha",
+            "PROGRAM alpha\n\
+                VAR d : fb_double; a_only : INT; END_VAR\n\
+                d(inv := 2);\n\
+                a_only := d.outv;\n\
+            END_PROGRAM",
+        );
+        write(
+            "beta",
+            "PROGRAM beta\n\
+                VAR b_only : INT; END_VAR\n\
+                b_only := b_only + 1;\n\
+            END_PROGRAM",
+        );
+        write(
+            "pair",
+            "PROGRAM p_first\n\
+                VAR first_var : INT; END_VAR\n\
+                first_var := 1;\n\
+            END_PROGRAM\n\
+            PROGRAM p_second\n\
+                VAR second_var : INT; END_VAR\n\
+                second_var := 2;\n\
+            END_PROGRAM",
+        );
+        store
+    }
+
+    fn two_program_tasks() -> Tasks {
+        Tasks {
+            tasks: vec![
+                Task {
+                    name: "fast".into(),
+                    interval_ms: 10,
+                    priority: 1,
+                },
+                Task {
+                    name: "slow".into(),
+                    interval_ms: 50,
+                    priority: 2,
+                },
+            ],
+            programs: vec![
+                ProgramInstance {
+                    instance: "a_inst".into(),
+                    program: "alpha".into(),
+                    task: "fast".into(),
+                },
+                ProgramInstance {
+                    instance: "b_inst".into(),
+                    program: "beta".into(),
+                    task: "slow".into(),
+                },
+            ],
+        }
+    }
+
+    fn debug_names(container: &super::Container) -> Vec<String> {
+        build_var_debug_map(container)
+            .values()
+            .map(|i| i.name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn one_unit_per_instance_with_isolated_containers_and_cross_file_fbs() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = fixture_store(dir.path());
+
+        let units = compile_project_units(&store, &two_program_tasks()).expect("units compile");
+        assert_eq!(units.len(), 2);
+
+        // Scheduling facts come from each instance's bound task.
+        assert_eq!(units[0].instance, "a_inst");
+        assert_eq!(units[0].interval_ms, 10);
+        assert_eq!(units[0].priority, 1);
+        assert_eq!(units[1].instance, "b_inst");
+        assert_eq!(units[1].interval_ms, 50);
+        assert_eq!(units[1].priority, 2);
+
+        // alpha resolves fb_double from a sibling file (cross-file FB)
+        // and its container knows its own vars but NOT beta's — other
+        // PROGRAM declarations are excluded per unit.
+        let a_names = debug_names(&units[0].container);
+        assert!(a_names.iter().any(|n| n == "a_only"), "{a_names:?}");
+        assert!(!a_names.iter().any(|n| n == "b_only"), "{a_names:?}");
+
+        let b_names = debug_names(&units[1].container);
+        assert!(b_names.iter().any(|n| n == "b_only"), "{b_names:?}");
+        assert!(!b_names.iter().any(|n| n == "a_only"), "{b_names:?}");
+    }
+
+    /// ironplc's codegen compiles the FIRST ProgramDeclaration it sees.
+    /// Scheduling the SECOND program declared in a file must still run
+    /// that program — the unit assembly hoists the target declaration
+    /// to the front and drops the sibling.
+    #[test]
+    fn scheduling_the_second_program_in_a_file_compiles_that_program() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = fixture_store(dir.path());
+
+        let tasks = Tasks {
+            tasks: vec![Task {
+                name: "t".into(),
+                interval_ms: 20,
+                priority: 1,
+            }],
+            programs: vec![ProgramInstance {
+                instance: "second_inst".into(),
+                program: "p_second".into(),
+                task: "t".into(),
+            }],
+        };
+        let units = compile_project_units(&store, &tasks).expect("unit compiles");
+        assert_eq!(units.len(), 1);
+        let names = debug_names(&units[0].container);
+        assert!(names.iter().any(|n| n == "second_var"), "{names:?}");
+        assert!(!names.iter().any(|n| n == "first_var"), "{names:?}");
+    }
+
+    #[test]
+    fn unknown_scheduled_program_errors_loudly() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = fixture_store(dir.path());
+
+        let tasks = Tasks {
+            tasks: vec![Task {
+                name: "t".into(),
+                interval_ms: 20,
+                priority: 1,
+            }],
+            programs: vec![ProgramInstance {
+                instance: "ghost_inst".into(),
+                program: "ghost".into(),
+                task: "t".into(),
+            }],
+        };
+        let err = compile_project_units(&store, &tasks).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("ghost"), "{msg}");
+    }
+
+    #[test]
+    fn top_level_var_global_is_detected_per_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = fixture_store(dir.path());
+        store
+            .create_pou_file("globals", PouType::Program, PouLanguage::St)
+            .unwrap();
+        store
+            .write_pou_source(
+                "globals",
+                "VAR_GLOBAL\n shared_flag : BOOL;\nEND_VAR\n\
+                 PROGRAM gprog\n VAR x : INT; END_VAR\n x := 1;\nEND_PROGRAM",
+            )
+            .unwrap();
+
+        let globals = extract_project_global_vars(&store);
+        assert_eq!(globals.len(), 1, "{globals:?}");
+        assert_eq!(globals[0].0, "globals");
+        assert_eq!(globals[0].1.to_lowercase(), "shared_flag");
     }
 }
 

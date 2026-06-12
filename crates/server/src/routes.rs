@@ -1472,31 +1472,79 @@ pub async fn validate_project(
     project: ProjectName,
 ) -> Result<Json<Vec<CheckDiagnostic>>, ApiError> {
     with_project(&state, &project, |store| {
-        // compile_project returns Ok(Container) when clean, Err on any
-        // problem. Convert the error into a single CheckDiagnostic for
-        // the agent — full per-line diagnostics live in /api/check for
-        // POU-level editing. compile_project's failure surface is one of:
-        //  - missing tasks.toml programs
-        //  - parser / analyzer / codegen diagnostics (synthetic source)
-        //  - file read failures
-        match ironplc_bridge::compile_project(store) {
-            Ok(_) => Ok(vec![]),
-            Err(e) => Ok(vec![CheckDiagnostic {
-                severity: "error".into(),
-                code: "project-validate".into(),
-                message: e.to_string(),
-                start_line: 1,
-                start_column: 1,
-                end_line: 1,
-                end_column: 1,
-                context: vec![],
-                related: vec![],
-                explanation: None,
-                ld_location: None,
-                fbd_location: None,
-                sfc_location: None,
-            }]),
+        let diag = |code: &str, message: String| CheckDiagnostic {
+            severity: "error".into(),
+            code: code.into(),
+            message,
+            start_line: 1,
+            start_column: 1,
+            end_line: 1,
+            end_column: 1,
+            context: vec![],
+            related: vec![],
+            explanation: None,
+            ld_location: None,
+            fbd_location: None,
+            sfc_location: None,
+        };
+        let tasks = store.read_tasks()?.unwrap_or_default();
+        let mut out = Vec::new();
+        // ADR-0001: multi-PROGRAM projects run per-instance containers,
+        // so VAR_GLOBAL can't be shared across PROGRAMs. Same check the
+        // /api/run handler enforces — surfaced here so agents see it at
+        // validate time, before a run attempt.
+        if tasks.programs.len() > 1 {
+            let globals = ironplc_bridge::extract_project_global_vars(store);
+            if !globals.is_empty() {
+                let list = globals
+                    .iter()
+                    .map(|(file, var)| format!("'{var}' in {file}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                out.push(diag(
+                    "project-validate-globals",
+                    format!(
+                        "tasks.toml schedules {} PROGRAMs but the project declares \
+                         VAR_GLOBAL ({list}). Globals are not shared across PROGRAM \
+                         instances (each runs in an isolated container); move shared \
+                         state behind I/O mappings or FUNCTION_BLOCK parameters, or \
+                         schedule a single PROGRAM.",
+                        tasks.programs.len(),
+                    ),
+                ));
+            }
         }
+        // Compile exactly what the run path would execute: one container
+        // per PROGRAM instance. Convert any error into a single
+        // CheckDiagnostic for the agent — full per-line diagnostics live
+        // in /api/check for POU-level editing. The failure surface is:
+        //  - missing tasks.toml programs / unknown PROGRAM names
+        //  - parser / analyzer / codegen diagnostics
+        //  - file read failures
+        if let Err(e) = ironplc_bridge::compile_project_units(store, &tasks) {
+            out.push(diag("project-validate", e.to_string()));
+        }
+        // Static iomap lint: device exists, channel exists, direction
+        // matches, no duplicate writers. Same data the spawn path would
+        // trip over at runtime — surfaced here so a bad mapping fails
+        // validate, not the first scan.
+        let iomap = store.read_iomap()?;
+        let devices = store.list_devices()?;
+        for issue in project::validate_iomap(&iomap, &devices) {
+            let code = match issue.severity {
+                project::IomapIssueSeverity::Error => "iomap-validate",
+                project::IomapIssueSeverity::Warning => "iomap-validate-warning",
+            };
+            let mut d = diag(
+                code,
+                format!("mapping #{}: {}", issue.mapping_index + 1, issue.message),
+            );
+            if issue.severity == project::IomapIssueSeverity::Warning {
+                d.severity = "warning".into();
+            }
+            out.push(d);
+        }
+        Ok(out)
     })
     .map(Json)
 }
@@ -1615,11 +1663,13 @@ pub async fn run(
     let project_name = resolve_project_name(&state, &project)?;
 
     // Two modes (matched in the handler so the bridge stays simple):
-    //  - `program: None`           → compile_project (reads tasks.toml)
-    //  - `program: Some("foo")`    → compile_project_with_tasks (synthetic
+    //  - `program: None`           → compile_project_units (reads tasks.toml;
+    //                                 one container per PROGRAM instance)
+    //  - `program: Some("foo")`    → compile_isolated_source_full /
+    //                                 compile_project_with_tasks (synthetic
     //                                 single-instance schedule; tasks.toml
     //                                 untouched on disk)
-    let (container, scan_interval_ms, device_specs, mappings, retain_vars) = {
+    let (units, device_specs, mappings) = {
         let mut projects_guard = state.projects.lock().expect("projects mutex");
         // Locate the project in the registry; mark it active as a
         // side-effect so subsequent header-less requests follow this
@@ -1639,48 +1689,40 @@ pub async fn run(
             Some(name) => single_program_tasks(name),
         };
 
-        // GUARD: ironplc's current codegen only emits one PROGRAM
-        // per container — `find_program()` picks the first declared
-        // and silently drops the rest. Scheduling more than one means
-        // only one would actually run; the others would just appear
-        // to be running. Refuse loudly so users don't ship broken
-        // schedules. The CLI / IDE should land users on a single
-        // PROGRAM run; multi-program needs upstream codegen work
-        // (track in docs/known-issues).
+        // ADR-0001 constraint: multi-PROGRAM projects run one container
+        // per PROGRAM instance, which isolates the address spaces — a
+        // VAR_GLOBAL would be duplicated into every instance instead of
+        // shared, and the copies would silently diverge. Refuse loudly
+        // with the fix spelled out. Single-PROGRAM projects keep their
+        // historical globals behaviour.
         if effective_tasks.programs.len() > 1 {
-            let names = effective_tasks
-                .programs
-                .iter()
-                .map(|p| p.program.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(ApiError::BadRequest(format!(
-                "tasks.toml schedules {} PROGRAMs ({}) but the current runtime can \
-                 only execute one PROGRAM per run (an upstream ironplc codegen \
-                 limitation: its `find_program` picks the first declared and the \
-                 rest are silently dropped). Reduce tasks.toml to one PROGRAM, or \
-                 use `cs run --program <name>` / the editor's Run button for an \
-                 ad-hoc single-PROGRAM run.",
-                effective_tasks.programs.len(),
-                names,
-            )));
+            let globals = ironplc_bridge::extract_project_global_vars(store);
+            if !globals.is_empty() {
+                let list = globals
+                    .iter()
+                    .map(|(file, var)| format!("'{var}' in {file}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(ApiError::BadRequest(format!(
+                    "tasks.toml schedules {} PROGRAMs but the project declares \
+                     VAR_GLOBAL ({list}). Each PROGRAM instance runs in its own \
+                     isolated container, so globals are NOT shared across PROGRAMs \
+                     — every instance would get a private copy that silently \
+                     diverges. Move the shared state behind I/O mappings or \
+                     FUNCTION_BLOCK parameters, or reduce tasks.toml to a single \
+                     PROGRAM.",
+                    effective_tasks.programs.len(),
+                )));
+            }
         }
 
-        // Scan period: pull the bound task's interval from the
-        // effective Tasks. Falls back to the bridge's default if for
-        // any reason the bind chain is incomplete (no programs, or
-        // task name mismatch — both indicate a malformed tasks.toml
-        // that the editor should catch first, but we degrade
-        // gracefully rather than panic).
-        let scan_interval_ms = effective_tasks
-            .programs
-            .first()
-            .and_then(|p| effective_tasks.tasks.iter().find(|t| t.name == p.task))
-            .map(|t| t.interval_ms as u64)
-            .unwrap_or(ironplc_bridge::DEFAULT_SCAN_INTERVAL_MS);
-
-        let (container, metadata) = match (req.program.as_deref(), req.file_path.as_deref()) {
-            (None, _) => ironplc_bridge::compile_project_full(store)?,
+        let units = match (req.program.as_deref(), req.file_path.as_deref()) {
+            (None, _) => {
+                // Whole-project schedule: one unit per tasks.toml
+                // PROGRAM instance, each with its own container and
+                // its own task's interval/priority.
+                ironplc_bridge::compile_project_units(store, &effective_tasks)?
+            }
             (Some(name), Some(file_path)) => {
                 // Ad-hoc isolated run: compile only the named file's
                 // source + a single-PROGRAM CONFIGURATION. ironplc's
@@ -1690,7 +1732,9 @@ pub async fn run(
                 let language = store.pou_file_language(file_path)?;
                 let source = store.read_pou_source(file_path)?;
                 let tasks = single_program_tasks(name);
-                ironplc_bridge::compile_isolated_source_full(&source, language, &tasks)?
+                let (container, metadata) =
+                    ironplc_bridge::compile_isolated_source_full(&source, language, &tasks)?;
+                vec![adhoc_unit(&tasks, container, metadata.retain_vars)]
             }
             (Some(name), None) => {
                 // Ad-hoc but no file scope — fall back to whole-project
@@ -1699,7 +1743,9 @@ pub async fn run(
                 // (ironplc limitation); document this if a client hits
                 // it.
                 let tasks = single_program_tasks(name);
-                ironplc_bridge::compile_project_with_tasks_full(store, &tasks)?
+                let (container, metadata) =
+                    ironplc_bridge::compile_project_with_tasks_full(store, &tasks)?;
+                vec![adhoc_unit(&tasks, container, metadata.retain_vars)]
             }
         };
         let devices = store.list_devices()?;
@@ -1711,18 +1757,7 @@ pub async fn run(
                 config: d.config,
             })
             .collect::<Vec<_>>();
-        // IDE-side server runs are ephemeral — they're for the user
-        // poking values, not for persisted plant state. We leave
-        // `state_path = None`; only the headless `ia2-runtime` edge
-        // binary points it at a real disk location.
-        let retain_vars = metadata.retain_vars;
-        (
-            container,
-            scan_interval_ms,
-            specs,
-            iomap.mappings,
-            retain_vars,
-        )
+        (units, specs, iomap.mappings)
     };
 
     {
@@ -1732,16 +1767,11 @@ pub async fn run(
         }
     }
 
-    let handle = ironplc_bridge::spawn_with_options(
-        container,
-        device_specs,
-        mappings,
-        ironplc_bridge::SpawnOptions {
-            scan_interval_ms,
-            retain_vars,
-            state_path: None,
-        },
-    );
+    // IDE-side server runs are ephemeral — they're for the user
+    // poking values, not for persisted plant state. We leave
+    // `state_path = None`; only the headless `ia2-runtime` edge
+    // binary points it at a real disk location.
+    let handle = ironplc_bridge::spawn_units(units, device_specs, mappings, None);
     let mut rx = handle.subscribe();
     let event_tx = state.event_tx.clone();
     let last_snapshot_cache = state.last_snapshot.clone();
@@ -2634,6 +2664,27 @@ fn single_program_tasks(program_name: &str) -> Tasks {
             program: program_name.into(),
             task: "plc_task".into(),
         }],
+    }
+}
+
+/// Wrap an ad-hoc single-PROGRAM compile result into the one
+/// `ProgramUnit` the bridge schedules. Instance name and cadence come
+/// from the synthetic `single_program_tasks` schedule (always exactly
+/// one task + one instance).
+fn adhoc_unit(
+    tasks: &Tasks,
+    container: ironplc_bridge::Container,
+    retain_vars: Vec<String>,
+) -> ironplc_bridge::ProgramUnit {
+    let task = &tasks.tasks[0];
+    let instance = &tasks.programs[0];
+    ironplc_bridge::ProgramUnit {
+        instance: instance.instance.clone(),
+        task_name: task.name.clone(),
+        interval_ms: u64::from(task.interval_ms),
+        priority: task.priority,
+        container,
+        retain_vars,
     }
 }
 

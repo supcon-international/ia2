@@ -6,6 +6,14 @@
 //! The scan thread is a dedicated `std::thread` that hosts a single-thread
 //! tokio runtime; everything bus-related runs inside it. ironplc's
 //! `VmRunning::run_round` itself is sync.
+//!
+//! Multi-PROGRAM execution (ADR-0001): the one scan thread hosts N
+//! `VmRunning` instances ("units"), one per scheduled PROGRAM instance,
+//! each compiled into its own `Container`. Every unit keeps its own
+//! cadence anchor from its task's interval; units due on the same tick
+//! run in task-priority order (then tasks.toml declaration order).
+//! Devices stay owned by the thread and are shared across units
+//! sequentially — no concurrency on the bus.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -223,6 +231,11 @@ impl ProgramHandle {
     /// The write is applied between scan rounds, so it's seen by the next
     /// cycle's logic. Returns the value that was written; an error if the
     /// name doesn't resolve to a known variable or the VM traps.
+    ///
+    /// Name resolution (multi-PROGRAM runs): a bare name targets the
+    /// first unit (tasks.toml declaration order) that declares it;
+    /// `instance.variable` targets that PROGRAM instance explicitly
+    /// (instance match is case-insensitive).
     pub async fn write_variable(&self, name: &str, value: i32) -> Result<i32, RuntimeWriteError> {
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
         self.cmd_tx
@@ -241,6 +254,9 @@ impl ProgramHandle {
     /// writes get overridden each round and field inputs can't push
     /// through. Forces survive across scan cycles, unlike one-shot
     /// `write_variable`. Returns the value that was applied.
+    ///
+    /// Names resolve like `write_variable`: bare → first unit that has
+    /// the variable, `instance.variable` → that unit explicitly.
     pub async fn force_variable(&self, name: &str, value: i32) -> Result<i32, RuntimeWriteError> {
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
         self.cmd_tx
@@ -356,6 +372,33 @@ pub struct SpawnOptions {
     pub state_path: Option<PathBuf>,
 }
 
+/// One scheduled PROGRAM instance: its own compiled `Container` plus the
+/// scheduling facts the scan thread needs to run it as an independent
+/// "unit". Built by `ironplc_bridge::compile_project_units` (one per
+/// `tasks.toml` program entry) or hand-rolled for ad-hoc single runs.
+#[derive(Debug)]
+pub struct ProgramUnit {
+    /// PROGRAM instance name from tasks.toml (`PROGRAM <instance> WITH
+    /// <task> : <program>;`). Used to route `Mapping.application`, to
+    /// prefix colliding snapshot/retain names, and for the
+    /// `instance.variable` write/force syntax.
+    pub instance: String,
+    /// Task this instance is bound to — informational (logs).
+    pub task_name: String,
+    /// Cycle period in milliseconds. `0` falls back to
+    /// `DEFAULT_SCAN_INTERVAL_MS`.
+    pub interval_ms: u64,
+    /// IEC task priority — lower runs first when several units are due
+    /// on the same tick.
+    pub priority: i32,
+    /// Bytecode compiled from this instance's PROGRAM + the project's
+    /// FUNCTION_BLOCK / FUNCTION POUs + a synthesized single-task
+    /// CONFIGURATION.
+    pub container: Container,
+    /// `VAR RETAIN` names declared by this unit's source.
+    pub retain_vars: Vec<String>,
+}
+
 pub fn spawn(
     container: Container,
     devices: Vec<DeviceSpec>,
@@ -384,32 +427,63 @@ pub fn spawn_with_interval(
     )
 }
 
-/// Like `spawn`, but throttles the scan loop to
-/// `options.scan_interval_ms` regardless of what (if anything) the
-/// compiled CONFIGURATION requested, AND persists RETAIN variables
-/// across runs when `options.state_path` is set.
-///
-/// Why we throttle in the bridge rather than letting the VM
-/// scheduler do it: as of the currently-vendored ironplc, codegen
-/// does NOT populate `container.task_table`. The VM scheduler
-/// therefore sees zero cyclic tasks → `next_due_us()` returns
-/// `None` → the scan loop falls through to a 1 ms minimum sleep
-/// → ~700 scans/s. That breaks every time-sensitive demo
-/// (PID tunings, SFC transition timings, TON expirations). Until
-/// upstream wires CONFIGURATION → task_table, this bridge-level
-/// throttle is the source of truth for "the scan period the user
-/// asked for in tasks.toml."
+/// Single-unit convenience wrapper over `spawn_units` — the historical
+/// "one container, one interval" entry point. The unit is registered
+/// under instance name `"main"`; with a single unit all snapshot /
+/// retain / write names stay bare, so callers see exactly the
+/// pre-multi-program behaviour.
 pub fn spawn_with_options(
     container: Container,
     device_specs: Vec<DeviceSpec>,
     mappings: Vec<Mapping>,
     options: SpawnOptions,
 ) -> ProgramHandle {
-    spawn_inner(
-        container,
+    let SpawnOptions {
+        scan_interval_ms,
+        retain_vars,
+        state_path,
+    } = options;
+    spawn_units(
+        vec![ProgramUnit {
+            instance: "main".into(),
+            task_name: "plc_task".into(),
+            interval_ms: scan_interval_ms,
+            priority: 1,
+            container,
+            retain_vars,
+        }],
+        device_specs,
+        mappings,
+        state_path,
+    )
+}
+
+/// Start the scan thread hosting one `VmRunning` per unit.
+///
+/// Each unit is throttled to its own `interval_ms` regardless of what
+/// (if anything) its compiled CONFIGURATION requested. Why the bridge
+/// owns the cadence rather than the VM scheduler: as of the currently-
+/// vendored ironplc, codegen does NOT populate `container.task_table`,
+/// so the VM sees zero cyclic tasks and `next_due_us()` returns `None`.
+/// Until upstream wires CONFIGURATION → task_table, the per-unit anchor
+/// here is the source of truth for "the scan period the user asked for
+/// in tasks.toml" (and `run_round` executes the unit's single PROGRAM
+/// unconditionally each call).
+///
+/// RETAIN variables across all units persist into one state file when
+/// `state_path` is set; keys are `instance.variable` when there is more
+/// than one unit, bare names otherwise.
+pub fn spawn_units(
+    units: Vec<ProgramUnit>,
+    device_specs: Vec<DeviceSpec>,
+    mappings: Vec<Mapping>,
+    state_path: Option<PathBuf>,
+) -> ProgramHandle {
+    spawn_units_inner(
+        units,
         DeviceSource::Specs(device_specs),
         mappings,
-        options,
+        state_path,
     )
 }
 
@@ -442,22 +516,12 @@ async fn acquire_devices(source: DeviceSource) -> (Vec<Box<dyn IoDevice>>, Vec<D
     }
 }
 
-fn spawn_inner(
-    container: Container,
+fn spawn_units_inner(
+    units: Vec<ProgramUnit>,
     device_source: DeviceSource,
     mappings: Vec<Mapping>,
-    options: SpawnOptions,
+    state_path: Option<PathBuf>,
 ) -> ProgramHandle {
-    let SpawnOptions {
-        scan_interval_ms,
-        retain_vars,
-        state_path,
-    } = options;
-    let scan_interval_ms = if scan_interval_ms == 0 {
-        DEFAULT_SCAN_INTERVAL_MS
-    } else {
-        scan_interval_ms
-    };
     let stop = Arc::new(AtomicBool::new(false));
     let (snapshot_tx, _) = broadcast::channel(64);
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -470,7 +534,6 @@ fn spawn_inner(
     let mode_clone = mode.clone();
     let forces_clone = forces.clone();
     let device_reports_clone = device_reports.clone();
-    let scan_interval = Duration::from_millis(scan_interval_ms.max(1));
 
     let join_handle = std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
@@ -498,11 +561,11 @@ fn spawn_inner(
             // `AssertUnwindSafe` is needed because `&mut Vec<...>` is
             // not auto-UnwindSafe; we accept that risk because the
             // only failure mode here is "panic in async code", and
-            // we're about to discard `running` anyway.
+            // we're about to discard the VMs anyway.
             use futures_util::FutureExt;
             use std::panic::AssertUnwindSafe;
             let result = AssertUnwindSafe(run_loop_async(
-                container,
+                units,
                 &mut devices,
                 mappings,
                 stop_clone,
@@ -510,8 +573,6 @@ fn spawn_inner(
                 cmd_rx,
                 mode_clone,
                 forces_clone,
-                scan_interval,
-                retain_vars,
                 state_path,
             ))
             .catch_unwind()
@@ -720,17 +781,75 @@ async fn connect_devices(
     (devices, reports)
 }
 
-/// Trip the watchdog after this many consecutive scan deadline overruns.
-/// Each overrun means the scan body didn't finish within `scan_interval`.
-/// 5 in a row → the simulation has lost real-time guarantees; engage
-/// failsafe and don't re-arm until the program is restarted.
+/// Trip the watchdog after this many consecutive scan deadline overruns
+/// on any single unit. Each overrun means that unit's scan body didn't
+/// finish within its interval. 5 in a row → the simulation has lost
+/// real-time guarantees; engage failsafe and don't re-arm until the
+/// program is restarted.
 const WATCHDOG_OVERRUN_THRESHOLD: u32 = 5;
+
+/// Snapshot fan-out cadence (and the cap on idle sleeps, so stop /
+/// command latency stays bounded even when every task interval is long).
+const SNAPSHOT_PERIOD: Duration = Duration::from_millis(100);
+
+/// A bus channel ↔ VM variable pair, resolved to indices and routed to
+/// one unit.
+struct ResolvedMapping {
+    device_index: usize,
+    channel: String,
+    var_index: u16,
+    type_tag: u8,
+    /// REAL var — channel values cross the VM boundary as IEEE-754
+    /// bits instead of numeric i32 (see `ChannelValue::to_vm_bits`).
+    is_real: bool,
+    /// LREAL var — crosses as a full 64-bit double via
+    /// `write_variable_raw` (the i32 lane would truncate).
+    is_lreal: bool,
+}
+
+/// Per-unit scheduling state. Lives in a Vec parallel to `runnings`
+/// (the `VmRunning`s borrow their containers, so unit bookkeeping stays
+/// in plain owned data).
+struct UnitClock {
+    /// When this unit's next scan is due. Anchored, not drifting:
+    /// advances by `interval` after each run; slides to `now +
+    /// interval` on overrun so we don't burn CPU catching up.
+    next_due: Instant,
+    interval: Duration,
+    scan_count: u64,
+    consecutive_overruns: u32,
+    warned_overrun: bool,
+}
+
+/// Resolve a runtime variable reference against all units. A bare name
+/// matches the first unit (tasks.toml declaration order) that declares
+/// it — which is also exactly the pre-multi-program behaviour when
+/// there's one unit. `instance.variable` (instance match case-
+/// insensitive) targets that unit explicitly. Bare lookup runs first so
+/// a literal debug name containing a dot keeps resolving as it did
+/// before multi-program support.
+fn resolve_var(
+    name: &str,
+    instances: &[String],
+    var_index_by_name: &[HashMap<String, u16>],
+) -> Option<(usize, u16)> {
+    for (i, m) in var_index_by_name.iter().enumerate() {
+        if let Some(&idx) = m.get(name) {
+            return Some((i, idx));
+        }
+    }
+    let (prefix, rest) = name.split_once('.')?;
+    let i = instances
+        .iter()
+        .position(|inst| inst.eq_ignore_ascii_case(prefix))?;
+    var_index_by_name[i].get(rest).map(|&idx| (i, idx))
+}
 
 #[allow(clippy::too_many_arguments)]
 async fn run_loop_async(
-    container: Container,
+    units: Vec<ProgramUnit>,
     // Devices are borrowed so the outer wrapper retains ownership for
-    // its always-run failsafe pass (see `spawn_with_interval`'s async
+    // its always-run failsafe pass (see `spawn_units_inner`'s async
     // block).
     devices: &mut Vec<Box<dyn IoDevice>>,
     mappings: Vec<Mapping>,
@@ -739,62 +858,122 @@ async fn run_loop_async(
     mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<RuntimeCommand>,
     mode: Arc<std::sync::Mutex<RuntimeMode>>,
     forces: Arc<std::sync::Mutex<HashMap<String, i32>>>,
-    scan_interval: Duration,
-    // RETAIN persistence — names extracted from VAR RETAIN blocks,
-    // plus the disk path to load/save them from. Both empty / None
-    // disables persistence with no behavioral change vs the
-    // pre-retain code path.
-    retain_vars: Vec<String>,
     state_path: Option<PathBuf>,
 ) {
-    // ---- Start the VM ----
-    let mut bufs = VmBuffers::from_container(&container);
-    let mut running = match Vm::new().load(&container, &mut bufs).start() {
-        Ok(r) => r,
-        Err(ctx) => {
-            tracing::error!(?ctx.trap, "vm failed to start");
-            return;
+    if units.is_empty() {
+        tracing::error!("no program units to run — scan loop not started");
+        return;
+    }
+    let n_units = units.len();
+
+    // ---- Start one VM per unit ----
+    // `VmRunning` borrows its container and its buffers, so both live
+    // in Vecs that outlive `runnings` and are never structurally
+    // touched again (`iter_mut` hands out disjoint element borrows).
+    let mut bufs: Vec<VmBuffers> = units
+        .iter()
+        .map(|u| VmBuffers::from_container(&u.container))
+        .collect();
+    let mut runnings: Vec<VmRunning<'_>> = Vec::with_capacity(n_units);
+    for (unit, buf) in units.iter().zip(bufs.iter_mut()) {
+        match Vm::new().load(&unit.container, buf).start() {
+            Ok(r) => runnings.push(r),
+            Err(ctx) => {
+                tracing::error!(instance = %unit.instance, ?ctx.trap, "vm failed to start");
+                return;
+            }
         }
+    }
+
+    let debug_maps: Vec<HashMap<u16, VarDebugInfo>> = units
+        .iter()
+        .map(|u| build_var_debug_map(&u.container))
+        .collect();
+    let var_index_by_name: Vec<HashMap<String, u16>> = debug_maps
+        .iter()
+        .map(|dm| {
+            dm.iter()
+                .map(|(idx, info)| (info.name.clone(), *idx))
+                .collect()
+        })
+        .collect();
+    let instances: Vec<String> = units.iter().map(|u| u.instance.clone()).collect();
+
+    // Variable names declared by more than one unit get the
+    // `instance.` prefix in snapshots (and retain keys) so they stay
+    // distinguishable; unique names stay bare — zero churn for
+    // single-program projects.
+    let shared_names: std::collections::HashSet<String> = if n_units > 1 {
+        let mut counts: HashMap<&String, u32> = HashMap::new();
+        for m in &var_index_by_name {
+            for name in m.keys() {
+                *counts.entry(name).or_insert(0) += 1;
+            }
+        }
+        counts
+            .into_iter()
+            .filter(|&(_, c)| c > 1)
+            .map(|(n, _)| n.clone())
+            .collect()
+    } else {
+        Default::default()
     };
 
-    let debug_map = build_var_debug_map(&container);
-
-    // ---- Resolve mappings into index pairs ----
-    let var_index_by_name: HashMap<String, u16> = debug_map
-        .iter()
-        .map(|(idx, info)| (info.name.clone(), *idx))
-        .collect();
+    // ---- Resolve mappings into index pairs, routed per unit ----
     let device_index_by_name: HashMap<String, usize> = devices
         .iter()
         .enumerate()
         .map(|(i, d)| (d.name().to_string(), i))
         .collect();
 
-    struct ResolvedMapping {
-        device_index: usize,
-        channel: String,
-        var_index: u16,
-        type_tag: u8,
-        /// REAL var — channel values cross the VM boundary as IEEE-754
-        /// bits instead of numeric i32 (see `ChannelValue::to_vm_bits`).
-        is_real: bool,
-        /// LREAL var — crosses as a full 64-bit double via
-        /// `write_variable_raw` (the i32 lane would truncate).
-        is_lreal: bool,
-    }
-
-    let mut inputs: Vec<ResolvedMapping> = Vec::new();
-    let mut outputs: Vec<ResolvedMapping> = Vec::new();
+    let mut unit_inputs: Vec<Vec<ResolvedMapping>> = (0..n_units).map(|_| Vec::new()).collect();
+    let mut unit_outputs: Vec<Vec<ResolvedMapping>> = (0..n_units).map(|_| Vec::new()).collect();
     for m in mappings {
         let Some(&device_index) = device_index_by_name.get(&m.device) else {
             tracing::warn!(device = %m.device, "mapping references unknown device, skipping");
             continue;
         };
-        let Some(&var_index) = var_index_by_name.get(&m.variable) else {
-            tracing::warn!(var = %m.variable, "mapping references unknown variable, skipping");
-            continue;
+        // Route by PROGRAM instance name (`Mapping.application`,
+        // case-insensitive). An empty/unknown application falls back
+        // to the first unit that declares the variable — that's the
+        // exact pre-multi-program resolution, so legacy iomaps keep
+        // working; warn only when there's real ambiguity (>1 unit).
+        let unit_index = match instances
+            .iter()
+            .position(|i| i.eq_ignore_ascii_case(&m.application))
+        {
+            Some(i) => {
+                if !var_index_by_name[i].contains_key(&m.variable) {
+                    tracing::warn!(
+                        application = %m.application,
+                        var = %m.variable,
+                        "mapping's variable not declared by its routed instance, skipping"
+                    );
+                    continue;
+                }
+                i
+            }
+            None => {
+                let Some(i) =
+                    (0..n_units).find(|&i| var_index_by_name[i].contains_key(&m.variable))
+                else {
+                    tracing::warn!(var = %m.variable, "mapping references unknown variable, skipping");
+                    continue;
+                };
+                if n_units > 1 {
+                    tracing::warn!(
+                        application = %m.application,
+                        var = %m.variable,
+                        routed_to = %instances[i],
+                        "mapping's application doesn't name a PROGRAM instance; \
+                         falling back to the first unit that declares the variable"
+                    );
+                }
+                i
+            }
         };
-        let type_tag = debug_map
+        let var_index = var_index_by_name[unit_index][&m.variable];
+        let type_tag = debug_maps[unit_index]
             .get(&var_index)
             .map(|d| d.iec_type_tag)
             .unwrap_or(0);
@@ -807,60 +986,87 @@ async fn run_loop_async(
             is_lreal: type_tag == iec_type_tag::LREAL,
         };
         match m.direction {
-            Direction::Input => inputs.push(rm),
-            Direction::Output => outputs.push(rm),
+            Direction::Input => unit_inputs[unit_index].push(rm),
+            Direction::Output => unit_outputs[unit_index].push(rm),
         }
     }
+    for (i, unit) in units.iter().enumerate() {
+        tracing::info!(
+            instance = %unit.instance,
+            task = %unit.task_name,
+            interval_ms = unit.interval_ms,
+            priority = unit.priority,
+            inputs = unit_inputs[i].len(),
+            outputs = unit_outputs[i].len(),
+            retain_vars = unit.retain_vars.len(),
+            "unit scheduled"
+        );
+    }
     tracing::info!(
-        inputs = inputs.len(),
-        outputs = outputs.len(),
+        units = n_units,
         devices = devices.len(),
-        retain_vars = retain_vars.len(),
         state_path = ?state_path,
         "scan loop ready"
     );
 
-    // ---- Resolve RETAIN names → var indices (drop unknowns loudly) ----
-    let retain_indices: Vec<(String, u16)> = retain_vars
-        .iter()
-        .filter_map(|name| match var_index_by_name.get(name) {
-            Some(&idx) => Some((name.clone(), idx)),
-            None => {
-                // Possible if the user removed a RETAIN var from
-                // source between runs but the state file still
-                // references it. Skip silently in the loud-warn map
-                // step; the next save will rewrite the file without
-                // the stale entry.
-                tracing::warn!(var = %name, "retain var not in debug map; skipping");
-                None
+    // ---- Resolve RETAIN names → (unit, state-file key, var index) ----
+    // Keys are `instance.variable` when several units run (so same-
+    // named retain vars in different units don't collide on disk) and
+    // bare names for the single-unit case — the historical format.
+    let mut retain_entries: Vec<(usize, String, u16)> = Vec::new();
+    for (i, unit) in units.iter().enumerate() {
+        for name in &unit.retain_vars {
+            match var_index_by_name[i].get(name) {
+                Some(&idx) => {
+                    let key = if n_units > 1 {
+                        format!("{}.{}", unit.instance, name)
+                    } else {
+                        name.clone()
+                    };
+                    retain_entries.push((i, key, idx));
+                }
+                None => {
+                    // Possible if the user removed a RETAIN var from
+                    // source between runs but the state file still
+                    // references it. The next save rewrites the file
+                    // without the stale entry.
+                    tracing::warn!(instance = %unit.instance, var = %name, "retain var not in debug map; skipping");
+                }
             }
-        })
-        .collect();
+        }
+    }
 
     // ---- Restore RETAIN values from disk before scanning starts ----
-    if !retain_indices.is_empty() {
+    if !retain_entries.is_empty() {
         if let Some(path) = state_path.as_ref() {
             match retain::load(path) {
                 Ok(Some(state)) => {
                     let mut restored = 0;
-                    for (name, idx) in &retain_indices {
-                        if let Some(&value) = state.vars.get(name) {
+                    for (i, key, idx) in &retain_entries {
+                        // Prefer the canonical key; accept the bare name
+                        // as migration for state files written before
+                        // the project became multi-PROGRAM.
+                        let value = state.vars.get(key).copied().or_else(|| {
+                            key.split_once('.')
+                                .and_then(|(_, bare)| state.vars.get(bare).copied())
+                        });
+                        if let Some(value) = value {
                             // Raw 64-bit slot write — lossless for all
                             // IEC types (schema 2; v1 files arrive here
                             // pre-widened by retain::load's migration).
-                            if running
+                            if runnings[*i]
                                 .write_variable_raw(VarIndex::new(*idx), value)
                                 .is_ok()
                             {
                                 restored += 1;
                             } else {
-                                tracing::warn!(var = %name, "restore write trapped; skipping");
+                                tracing::warn!(var = %key, "restore write trapped; skipping");
                             }
                         }
                     }
                     tracing::info!(
                         restored,
-                        total = retain_indices.len(),
+                        total = retain_entries.len(),
                         saved_at_us = state.saved_at_us,
                         "restored retain variables from state file"
                     );
@@ -882,28 +1088,39 @@ async fn run_loop_async(
     let start = Instant::now();
     let mut last_snapshot = Instant::now() - Duration::from_secs(1);
     let mut last_retain_flush = Instant::now();
-    let mut scan_count: u64 = 0;
-    // Cadence anchor: when the *next* scan should start. Each cycle
-    // sleeps until this instant, then advances it by one
-    // `scan_interval`. If a scan overruns its budget (the simulation
-    // does heavy work this round), `next_scan_at` slides forward by
-    // `now + scan_interval` so we don't burn CPU catching up; the
-    // overrun is logged via a one-shot warning.
-    let mut next_scan_at = Instant::now() + scan_interval;
-    let mut warned_overrun = false;
-    // Watchdog: counts consecutive overruns. Reset to 0 on any in-
-    // time scan. When it reaches WATCHDOG_OVERRUN_THRESHOLD we fire
-    // failsafe once and disarm — keeps the loop running but never
-    // re-fires; the user has to restart the program after a watchdog
-    // trip (industrial convention).
-    let mut consecutive_overruns: u32 = 0;
+    // Every unit is due immediately on the first tick (matches the old
+    // single-unit loop, which ran its first scan right away).
+    let mut clocks: Vec<UnitClock> = units
+        .iter()
+        .map(|u| UnitClock {
+            next_due: start,
+            interval: Duration::from_millis(
+                if u.interval_ms == 0 {
+                    DEFAULT_SCAN_INTERVAL_MS
+                } else {
+                    u.interval_ms
+                }
+                .max(1),
+            ),
+            scan_count: 0,
+            consecutive_overruns: 0,
+            warned_overrun: false,
+        })
+        .collect();
+    // Same-tick execution order: task priority (lower runs first),
+    // then tasks.toml declaration order.
+    let mut exec_order: Vec<usize> = (0..n_units).collect();
+    exec_order.sort_by_key(|&i| (units[i].priority, i));
+    // Watchdog: any unit accumulating WATCHDOG_OVERRUN_THRESHOLD
+    // consecutive overruns fires failsafe once and disarms — the loop
+    // keeps scanning so operators can see live state, but outputs stay
+    // safe until the program is restarted (industrial convention).
     let mut watchdog_armed = true;
+    let mut prev_paused = false;
+    let mut vm_fault = false;
 
     loop {
         if stop.load(Ordering::Relaxed) {
-            running.request_stop();
-        }
-        if running.stop_requested() {
             break;
         }
 
@@ -914,11 +1131,13 @@ async fn run_loop_async(
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
                 RuntimeCommand::WriteVariable { name, value, ack } => {
-                    let result = match var_index_by_name.get(&name).copied() {
-                        Some(idx) => match running.write_variable(VarIndex::new(idx), value) {
-                            Ok(()) => Ok(value),
-                            Err(trap) => Err(RuntimeWriteError::Vm(format!("{trap:?}"))),
-                        },
+                    let result = match resolve_var(&name, &instances, &var_index_by_name) {
+                        Some((u, idx)) => {
+                            match runnings[u].write_variable(VarIndex::new(idx), value) {
+                                Ok(()) => Ok(value),
+                                Err(trap) => Err(RuntimeWriteError::Vm(format!("{trap:?}"))),
+                            }
+                        }
                         None => Err(RuntimeWriteError::UnknownVariable(name)),
                     };
                     let _ = ack.send(result);
@@ -926,7 +1145,7 @@ async fn run_loop_async(
                 RuntimeCommand::ForceVariable { name, value, ack } => {
                     // Reject unknown names early so the caller gets
                     // immediate feedback instead of a silent no-op.
-                    let result = if var_index_by_name.contains_key(&name) {
+                    let result = if resolve_var(&name, &instances, &var_index_by_name).is_some() {
                         if let Ok(mut f) = forces.lock() {
                             f.insert(name.clone(), value);
                         }
@@ -945,108 +1164,200 @@ async fn run_loop_async(
             }
         }
 
-        // Mode check. Paused → skip the whole cycle (no IO, no run,
-        // no output). Step{remaining} → execute this cycle, decrement
-        // at the bottom; when remaining hits 0 transition to Paused.
-        // Snapshot still gets emitted while paused (at the regular
-        // 10 Hz cadence) so Monitor keeps showing the frozen state.
+        // Mode check. Paused → skip every unit's cycle (no IO, no run,
+        // no output) — the whole plant freezes together. Step{remaining}
+        // → execute this tick, decrement at the bottom; when remaining
+        // hits 0 transition to Paused. Snapshots still go out while
+        // paused (at the regular 10 Hz cadence) so Monitor keeps
+        // showing the frozen state.
         let current_mode = mode.lock().map(|m| *m).unwrap_or(RuntimeMode::Running);
         if matches!(current_mode, RuntimeMode::Paused) {
-            // Still emit periodic snapshots while paused so Monitor
-            // stays alive and operators can see frozen values without
-            // a refresh. Use the elapsed-since-start clock for the
-            // snapshot timestamp (same as the running path).
-            if last_snapshot.elapsed() >= Duration::from_millis(100) {
+            prev_paused = true;
+            if last_snapshot.elapsed() >= SNAPSHOT_PERIOD {
                 let now_us = start.elapsed().as_micros() as u64;
-                let snapshot = build_snapshot(&running, &debug_map, now_us, scan_count);
+                let snapshot = build_snapshot(
+                    &runnings,
+                    &debug_maps,
+                    &instances,
+                    &shared_names,
+                    &clocks,
+                    now_us,
+                );
                 let _ = snapshot_tx.send(snapshot);
                 last_snapshot = Instant::now();
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
             continue;
         }
-
-        // Input phase: bus → VM variables
-        for rm in &inputs {
-            let Some(dev) = devices.get_mut(rm.device_index) else {
-                continue;
-            };
-            match dev.read_channel(&rm.channel).await {
-                Ok(value) => {
-                    let _ = if rm.is_lreal {
-                        // 64-bit lane: any channel value widens to f64
-                        // losslessly; the slot takes the double's bits.
-                        running.write_variable_raw(
-                            VarIndex::new(rm.var_index),
-                            value.to_f64().to_bits(),
-                        )
-                    } else {
-                        running.write_variable(
-                            VarIndex::new(rm.var_index),
-                            value.to_vm_bits(rm.is_real),
-                        )
-                    };
-                }
-                Err(e) => tracing::debug!(channel = %rm.channel, %e, "input read failed"),
+        if prev_paused {
+            // Coming out of a pause (resume or step): re-anchor every
+            // unit so the frozen time isn't booked as overruns, and
+            // every unit runs on this first tick — a step from pause
+            // advances the entire plant by one scan.
+            let now = Instant::now();
+            for c in clocks.iter_mut() {
+                c.next_due = now;
             }
+            prev_paused = false;
         }
 
-        // Force phase: apply each pinned variable AFTER input read so
-        // a forced value beats the bus, and BEFORE run_round so the
-        // program sees the forced value (program-side writes during
-        // the round may transiently differ, but the next cycle re-
-        // applies the force). Clone the snapshot under the lock so
-        // we don't hold the mutex across .write_variable.
-        let snapshot: Vec<(String, i32)> = match forces.lock() {
+        // Forces are cloned once per tick (not per unit) so all units
+        // see a consistent force set; resolution per name picks the
+        // owning unit. Clone under the lock, write outside it.
+        let force_set: Vec<(String, i32)> = match forces.lock() {
             Ok(f) => f.iter().map(|(k, &v)| (k.clone(), v)).collect(),
             Err(_) => Vec::new(),
         };
-        for (name, value) in snapshot {
-            if let Some(&idx) = var_index_by_name.get(&name) {
-                let _ = running.write_variable(VarIndex::new(idx), value);
+
+        let tick_now = Instant::now();
+        let mut ran_any = false;
+
+        for &i in &exec_order {
+            if clocks[i].next_due > tick_now {
+                continue;
+            }
+            ran_any = true;
+
+            // Input phase: bus → this unit's VM variables
+            for rm in &unit_inputs[i] {
+                let Some(dev) = devices.get_mut(rm.device_index) else {
+                    continue;
+                };
+                match dev.read_channel(&rm.channel).await {
+                    Ok(value) => {
+                        let _ = if rm.is_lreal {
+                            // 64-bit lane: any channel value widens to f64
+                            // losslessly; the slot takes the double's bits.
+                            runnings[i].write_variable_raw(
+                                VarIndex::new(rm.var_index),
+                                value.to_f64().to_bits(),
+                            )
+                        } else {
+                            runnings[i].write_variable(
+                                VarIndex::new(rm.var_index),
+                                value.to_vm_bits(rm.is_real),
+                            )
+                        };
+                    }
+                    Err(e) => tracing::debug!(channel = %rm.channel, %e, "input read failed"),
+                }
+            }
+
+            // Force phase: apply pinned variables that resolve to this
+            // unit AFTER its input read (a forced value beats the bus)
+            // and BEFORE its run_round (the program sees the forced
+            // value).
+            for (name, value) in &force_set {
+                if let Some((u, idx)) = resolve_var(name, &instances, &var_index_by_name) {
+                    if u == i {
+                        let _ = runnings[i].write_variable(VarIndex::new(idx), *value);
+                    }
+                }
+            }
+
+            // Run one scan for this unit
+            let now_us = start.elapsed().as_micros() as u64;
+            if let Err(ctx) = runnings[i].run_round(now_us) {
+                tracing::error!(instance = %instances[i], ?ctx.trap, "vm trap during run_round");
+                // One faulted unit stops the whole plant — consistent
+                // with pause semantics ("the plant freezes together")
+                // and the safest default; the wrapper's failsafe pass
+                // then zeroes every output.
+                vm_fault = true;
+                break;
+            }
+            clocks[i].scan_count += 1;
+
+            // Output phase: this unit's VM variables → bus
+            for rm in &unit_outputs[i] {
+                let Ok(raw) = runnings[i].read_variable_raw(VarIndex::new(rm.var_index)) else {
+                    continue;
+                };
+                let value = value_for_type(raw, rm.type_tag);
+                let Some(dev) = devices.get_mut(rm.device_index) else {
+                    continue;
+                };
+                if let Err(e) = dev.write_channel(&rm.channel, value).await {
+                    tracing::debug!(channel = %rm.channel, %e, "output write failed");
+                }
+            }
+
+            // Cadence advance + per-unit watchdog accounting. An
+            // in-time scan clears the unit's overrun streak; an
+            // overrun slides its anchor to `now + interval` so we
+            // don't burn CPU catching up.
+            let interval = clocks[i].interval;
+            clocks[i].next_due += interval;
+            let after = Instant::now();
+            if clocks[i].next_due > after {
+                clocks[i].consecutive_overruns = 0;
+            } else {
+                clocks[i].consecutive_overruns = clocks[i].consecutive_overruns.saturating_add(1);
+                if !clocks[i].warned_overrun {
+                    let overrun = after - clocks[i].next_due;
+                    tracing::warn!(
+                        instance = %instances[i],
+                        overrun_us = overrun.as_micros() as u64,
+                        interval_us = clocks[i].interval.as_micros() as u64,
+                        "scan overran its budget — sliding cadence forward and \
+                         suppressing further overrun warnings (the trace will \
+                         show the drift in scan_count vs wall clock)"
+                    );
+                    clocks[i].warned_overrun = true;
+                }
+                if watchdog_armed && clocks[i].consecutive_overruns >= WATCHDOG_OVERRUN_THRESHOLD {
+                    tracing::error!(
+                        instance = %instances[i],
+                        consecutive = clocks[i].consecutive_overruns,
+                        threshold = WATCHDOG_OVERRUN_THRESHOLD,
+                        interval_us = clocks[i].interval.as_micros() as u64,
+                        "watchdog tripped — engaging failsafe (outputs zeroed; \
+                         restart the program to re-arm)"
+                    );
+                    for dev in devices.iter_mut() {
+                        if let Err(e) = dev.enter_failsafe().await {
+                            tracing::warn!(device = %dev.name(), %e, "watchdog failsafe call failed");
+                        }
+                    }
+                    watchdog_armed = false;
+                }
+                clocks[i].next_due = after + clocks[i].interval;
             }
         }
-
-        // Run one scheduling round
-        let now_us = start.elapsed().as_micros() as u64;
-        if let Err(ctx) = running.run_round(now_us) {
-            tracing::error!(?ctx.trap, "vm trap during run_round");
+        if vm_fault {
             break;
         }
-        scan_count += 1;
 
-        // Output phase: VM variables → bus
-        for rm in &outputs {
-            let Ok(raw) = running.read_variable_raw(VarIndex::new(rm.var_index)) else {
-                continue;
-            };
-            let value = value_for_type(raw, rm.type_tag);
-            let Some(dev) = devices.get_mut(rm.device_index) else {
-                continue;
-            };
-            if let Err(e) = dev.write_channel(&rm.channel, value).await {
-                tracing::debug!(channel = %rm.channel, %e, "output write failed");
+        // If we're stepping, decrement once per tick in which at least
+        // one unit ran, and auto-pause at 0. Done AFTER the tick so
+        // `step(1)` means "advance by exactly one scheduler tick"
+        // (from pause, that's one scan of every unit).
+        if ran_any {
+            if let RuntimeMode::Step { remaining } = current_mode {
+                if let Ok(mut m) = mode.lock() {
+                    *m = if remaining <= 1 {
+                        RuntimeMode::Paused
+                    } else {
+                        RuntimeMode::Step {
+                            remaining: remaining - 1,
+                        }
+                    };
+                }
             }
         }
 
-        // If we're stepping, decrement and auto-pause once we hit 0.
-        // Done AFTER the round so `step(1)` means "advance by exactly
-        // one full cycle".
-        if let RuntimeMode::Step { remaining } = current_mode {
-            if let Ok(mut m) = mode.lock() {
-                *m = if remaining <= 1 {
-                    RuntimeMode::Paused
-                } else {
-                    RuntimeMode::Step {
-                        remaining: remaining - 1,
-                    }
-                };
-            }
-        }
-
-        // Snapshot at ~10 Hz
-        if last_snapshot.elapsed() >= Duration::from_millis(100) {
-            let snapshot = build_snapshot(&running, &debug_map, now_us, scan_count);
+        // Snapshot at ~10 Hz (also when no unit was due this tick —
+        // idle wake-ups are capped at SNAPSHOT_PERIOD below).
+        if last_snapshot.elapsed() >= SNAPSHOT_PERIOD {
+            let now_us = start.elapsed().as_micros() as u64;
+            let snapshot = build_snapshot(
+                &runnings,
+                &debug_maps,
+                &instances,
+                &shared_names,
+                &clocks,
+                now_us,
+            );
             let _ = snapshot_tx.send(snapshot);
             last_snapshot = Instant::now();
         }
@@ -1056,83 +1367,61 @@ async fn run_loop_async(
         // Writes are atomic (tmp + rename) so a crash during flush
         // can't corrupt the file. Skipped entirely when no retain
         // vars are declared or no path was configured.
-        if !retain_indices.is_empty()
+        if !retain_entries.is_empty()
             && state_path.is_some()
             && last_retain_flush.elapsed() >= RETAIN_FLUSH_INTERVAL
         {
+            let now_us = start.elapsed().as_micros() as u64;
             persist_retain_values(
                 state_path.as_deref().unwrap(),
-                &retain_indices,
-                &running,
+                &retain_entries,
+                &runnings,
                 now_us,
-                scan_count,
+                max_scan_count(&clocks),
             );
             last_retain_flush = Instant::now();
         }
 
-        // Sleep until the next scan deadline. The VM's `next_due_us`
-        // would also work in theory, but as of the vendored ironplc
-        // codegen doesn't populate the container's task_table from
-        // the CONFIGURATION block — so `next_due_us` returns None
-        // and the loop free-runs at the underlying tokio scheduler's
-        // resolution (~1 ms). The bridge owns the cadence here,
-        // sourced from `tasks.toml` via spawn_with_interval.
+        // Sleep until the earliest due unit. Capped at SNAPSHOT_PERIOD
+        // so stop requests, commands, and paused-state snapshots stay
+        // responsive even when every task interval is long.
+        let earliest = clocks
+            .iter()
+            .map(|c| c.next_due)
+            .min()
+            .expect("at least one unit");
         let now = Instant::now();
-        if now < next_scan_at {
-            // Reset the watchdog counter on any in-time scan — a single
-            // recovery clears prior near-misses.
-            consecutive_overruns = 0;
-            tokio::time::sleep(next_scan_at - now).await;
-            next_scan_at += scan_interval;
-        } else {
-            consecutive_overruns = consecutive_overruns.saturating_add(1);
-            if !warned_overrun {
-                let overrun = now - next_scan_at;
-                tracing::warn!(
-                    overrun_us = overrun.as_micros() as u64,
-                    interval_us = scan_interval.as_micros() as u64,
-                    "scan overran its budget — sliding cadence forward and \
-                     suppressing further overrun warnings (the trace will \
-                     show the drift in scan_count vs wall clock)"
-                );
-                warned_overrun = true;
-            }
-            // Watchdog trip: N consecutive misses → engage failsafe
-            // exactly once. We keep scanning afterward (don't break)
-            // so the operator can see live state via the snapshot
-            // stream, but outputs stay safe until the program is
-            // restarted.
-            if watchdog_armed && consecutive_overruns >= WATCHDOG_OVERRUN_THRESHOLD {
-                tracing::error!(
-                    consecutive = consecutive_overruns,
-                    threshold = WATCHDOG_OVERRUN_THRESHOLD,
-                    interval_us = scan_interval.as_micros() as u64,
-                    "watchdog tripped — engaging failsafe (outputs zeroed; \
-                     restart the program to re-arm)"
-                );
-                for dev in devices.iter_mut() {
-                    if let Err(e) = dev.enter_failsafe().await {
-                        tracing::warn!(device = %dev.name(), %e, "watchdog failsafe call failed");
-                    }
-                }
-                watchdog_armed = false;
-            }
-            next_scan_at = now + scan_interval;
+        if earliest > now {
+            tokio::time::sleep((earliest - now).min(SNAPSHOT_PERIOD)).await;
         }
     }
 
     // Final RETAIN flush on graceful exit. Captures whatever the
     // last completed scan produced — that's the right "checkpoint"
     // value to reload on next startup.
-    if !retain_indices.is_empty() {
+    if !retain_entries.is_empty() {
         if let Some(path) = state_path.as_deref() {
             let now_us = start.elapsed().as_micros() as u64;
-            persist_retain_values(path, &retain_indices, &running, now_us, scan_count);
+            persist_retain_values(
+                path,
+                &retain_entries,
+                &runnings,
+                now_us,
+                max_scan_count(&clocks),
+            );
             tracing::info!(?path, "final retain flush on stop");
         }
     }
 
-    let _ = running.stop();
+    for running in runnings {
+        let _ = running.stop();
+    }
+}
+
+/// The merged snapshot's scan_count: the max across units (the fastest
+/// unit's count — closest analogue of the old single-unit counter).
+fn max_scan_count(clocks: &[UnitClock]) -> u64 {
+    clocks.iter().map(|c| c.scan_count).max().unwrap_or(0)
 }
 
 fn value_for_type(raw: u64, type_tag: u8) -> ChannelValue {
@@ -1150,26 +1439,25 @@ fn value_for_type(raw: u64, type_tag: u8) -> ChannelValue {
     }
 }
 
-/// Snapshot every RETAIN variable's current VM value and atomically
-/// write the state file. Errors are logged but don't crash the scan
+/// Snapshot every RETAIN variable's current VM value (across all units)
+/// and atomically write the one merged state file. Keys are already
+/// canonical (`instance.variable` when several units run, bare names
+/// otherwise) — see the retain_entries construction. Raw slot values
+/// verbatim (schema 2): lossless for every IEC type including LREAL /
+/// LINT / ULINT / LWORD. Errors are logged but don't crash the scan
 /// loop — losing one flush window is acceptable; halting the program
-/// is not. The VM's `read_variable_raw` yields u64; we down-cast to
-/// i32 because that's what `write_variable` (used at restore) accepts.
-/// LREAL / LINT / LWORD lose their upper 32 bits — documented as a
-/// known limitation pending an ironplc upstream change.
+/// is not.
 fn persist_retain_values(
     state_path: &std::path::Path,
-    retain_indices: &[(String, u16)],
-    running: &VmRunning,
+    retain_entries: &[(usize, String, u16)],
+    runnings: &[VmRunning],
     now_us: u64,
     scan_count: u64,
 ) {
-    let mut vars: HashMap<String, u64> = HashMap::with_capacity(retain_indices.len());
-    for (name, idx) in retain_indices {
-        if let Ok(raw) = running.read_variable_raw(VarIndex::new(*idx)) {
-            // Raw slot verbatim (schema 2): lossless for every IEC
-            // type including LREAL / LINT / ULINT / LWORD.
-            vars.insert(name.clone(), raw);
+    let mut vars: HashMap<String, u64> = HashMap::with_capacity(retain_entries.len());
+    for (unit, key, idx) in retain_entries {
+        if let Ok(raw) = runnings[*unit].read_variable_raw(VarIndex::new(*idx)) {
+            vars.insert(key.clone(), raw);
         }
     }
     let state = crate::retain::build(vars, now_us, scan_count);
@@ -1178,42 +1466,58 @@ fn persist_retain_values(
     }
 }
 
+/// Merge every unit's variables into one snapshot. Names declared by
+/// more than one unit are disambiguated as `instance.variable`
+/// (`shared_names` is precomputed at startup); unique names — and
+/// everything in a single-unit run — stay bare so today's projects see
+/// no UI churn.
 fn build_snapshot(
-    running: &VmRunning,
-    debug_map: &HashMap<u16, VarDebugInfo>,
+    runnings: &[VmRunning],
+    debug_maps: &[HashMap<u16, VarDebugInfo>],
+    instances: &[String],
+    shared_names: &std::collections::HashSet<String>,
+    clocks: &[UnitClock],
     now_us: u64,
-    scan_count: u64,
 ) -> VarSnapshot {
-    let num_vars = running.num_variables();
-    let mut vars = Vec::with_capacity(num_vars as usize);
-    // Skip slots that have no debug-map entry (unnamed VM scratch storage
-    // for FB internals / non-instantiated POUs) and dedup names that
-    // collide across POU types — `compile_project` concatenates every
-    // POU's source, so two POUs declaring the same variable name both
-    // get debug entries with that name. We keep the first-seen slot;
-    // surfacing the same name twice in the Monitor pane is worse than
-    // hiding the inactive duplicate (which is usually idle at zero anyway).
-    let mut seen = std::collections::HashSet::<String>::new();
-    for i in 0..num_vars {
-        let raw = match running.read_variable_raw(VarIndex::new(i)) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        let Some(info) = debug_map.get(&i) else {
-            continue;
-        };
-        if !seen.insert(info.name.clone()) {
-            continue;
+    let mut vars = Vec::new();
+    for (u, running) in runnings.iter().enumerate() {
+        let num_vars = running.num_variables();
+        vars.reserve(num_vars as usize);
+        // Skip slots that have no debug-map entry (unnamed VM scratch
+        // storage for FB internals / non-instantiated POUs) and dedup
+        // names that collide within the unit — a unit's source carries
+        // every FB/FUNCTION POU, so two POUs declaring the same
+        // variable name both get debug entries with that name. We keep
+        // the first-seen slot; surfacing the same name twice in the
+        // Monitor pane is worse than hiding the inactive duplicate
+        // (which is usually idle at zero anyway).
+        let mut seen = std::collections::HashSet::<String>::new();
+        for i in 0..num_vars {
+            let raw = match running.read_variable_raw(VarIndex::new(i)) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let Some(info) = debug_maps[u].get(&i) else {
+                continue;
+            };
+            if !seen.insert(info.name.clone()) {
+                continue;
+            }
+            let name = if shared_names.contains(&info.name) {
+                format!("{}.{}", instances[u], info.name)
+            } else {
+                info.name.clone()
+            };
+            vars.push(VarValue {
+                name,
+                type_name: info.type_name.clone(),
+                value: format_variable_value(raw, info.iec_type_tag),
+            });
         }
-        vars.push(VarValue {
-            name: info.name.clone(),
-            type_name: info.type_name.clone(),
-            value: format_variable_value(raw, info.iec_type_tag),
-        });
     }
     VarSnapshot {
         timestamp_us: now_us,
-        scan_count,
+        scan_count: max_scan_count(clocks),
         vars,
     }
 }
@@ -1273,11 +1577,56 @@ mod tests {
         .expect("trivial program compiles")
     }
 
-    fn fast_options() -> SpawnOptions {
-        SpawnOptions {
-            scan_interval_ms: 10,
-            ..Default::default()
+    /// One unit named the way `spawn_with_options` names its single
+    /// unit — tests that exercise the legacy single-program path use
+    /// this to stay representative of production call sites.
+    fn single_unit(container: Container, interval_ms: u64) -> ProgramUnit {
+        unit("main", container, interval_ms, 1)
+    }
+
+    fn unit(instance: &str, container: Container, interval_ms: u64, priority: i32) -> ProgramUnit {
+        ProgramUnit {
+            instance: instance.into(),
+            task_name: "plc_task".into(),
+            interval_ms,
+            priority,
+            container,
+            retain_vars: Vec::new(),
         }
+    }
+
+    /// Wait for snapshots and return the last one received before
+    /// `deadline` elapses. Panics if no snapshot arrived at all.
+    async fn last_snapshot_within(
+        rx: &mut broadcast::Receiver<VarSnapshot>,
+        deadline: Duration,
+    ) -> VarSnapshot {
+        let until = Instant::now() + deadline;
+        let mut last: Option<VarSnapshot> = None;
+        loop {
+            let now = Instant::now();
+            if now >= until {
+                break;
+            }
+            match tokio::time::timeout(until - now, rx.recv()).await {
+                Ok(Ok(snap)) => last = Some(snap),
+                Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+                Ok(Err(broadcast::error::RecvError::Closed)) | Err(_) => break,
+            }
+        }
+        last.expect("scan loop emitted at least one snapshot")
+    }
+
+    fn var_value(snap: &VarSnapshot, name: &str) -> String {
+        snap.vars
+            .iter()
+            .find(|v| v.name == name)
+            .unwrap_or_else(|| {
+                let names: Vec<&str> = snap.vars.iter().map(|v| v.name.as_str()).collect();
+                panic!("variable '{name}' not in snapshot; have: {names:?}")
+            })
+            .value
+            .clone()
     }
 
     #[tokio::test]
@@ -1293,11 +1642,11 @@ mod tests {
         };
         let devices: Vec<Box<dyn IoDevice>> = vec![Box::new(dev)];
 
-        let handle = spawn_inner(
-            trivial_container(),
+        let handle = spawn_units_inner(
+            vec![single_unit(trivial_container(), 10)],
             DeviceSource::Prebuilt(devices),
             Vec::new(),
-            fast_options(),
+            None,
         );
         // Let a few scans run so we're stopping a live loop, not a cold one.
         tokio::time::sleep(Duration::from_millis(40)).await;
@@ -1393,11 +1742,11 @@ mod tests {
             },
         ];
 
-        let handle = spawn_inner(
-            container,
+        let handle = spawn_units_inner(
+            vec![single_unit(container, 10)],
             DeviceSource::Prebuilt(devices),
             mappings,
-            fast_options(),
+            None,
         );
         tokio::time::sleep(Duration::from_millis(80)).await;
         tokio::time::timeout(Duration::from_secs(5), handle.shutdown())
@@ -1420,11 +1769,11 @@ mod tests {
             failsafe_before_shutdown: Arc::new(AtomicBool::new(false)),
         };
         let devices: Vec<Box<dyn IoDevice>> = vec![Box::new(dev)];
-        let handle = spawn_inner(
-            trivial_container(),
+        let handle = spawn_units_inner(
+            vec![single_unit(trivial_container(), 10)],
             DeviceSource::Prebuilt(devices),
             Vec::new(),
-            fast_options(),
+            None,
         );
 
         handle.shutdown().await;
@@ -1432,5 +1781,139 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), handle.shutdown())
             .await
             .expect("second shutdown returns immediately");
+    }
+
+    /// Two units at different intervals: the 10 ms unit must rack up
+    /// notably more scans than the 50 ms unit over the same window.
+    /// Per-unit scan counts are observed via each program's own
+    /// increment-per-scan counter variable (distinct names → bare names
+    /// in the merged snapshot).
+    #[tokio::test]
+    async fn two_units_scan_at_their_own_intervals() {
+        let fast = crate::compile(
+            "PROGRAM pfast\n\
+                VAR fast_count : DINT; END_VAR\n\
+                fast_count := fast_count + 1;\n\
+            END_PROGRAM",
+        )
+        .expect("fast program compiles");
+        let slow = crate::compile(
+            "PROGRAM pslow\n\
+                VAR slow_count : DINT; END_VAR\n\
+                slow_count := slow_count + 1;\n\
+            END_PROGRAM",
+        )
+        .expect("slow program compiles");
+
+        let handle = spawn_units_inner(
+            vec![
+                unit("fast_inst", fast, 10, 1),
+                unit("slow_inst", slow, 50, 2),
+            ],
+            DeviceSource::Prebuilt(Vec::new()),
+            Vec::new(),
+            None,
+        );
+        let mut rx = handle.subscribe();
+        let snap = last_snapshot_within(&mut rx, Duration::from_millis(250)).await;
+        tokio::time::timeout(Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("shutdown joins");
+
+        let fast_scans: i64 = var_value(&snap, "fast_count")
+            .parse()
+            .expect("fast_count is numeric");
+        let slow_scans: i64 = var_value(&snap, "slow_count")
+            .parse()
+            .expect("slow_count is numeric");
+        assert!(slow_scans >= 1, "slow unit must run at all: {slow_scans}");
+        // Nominal ratio is 5 (10 ms vs 50 ms); CI scheduling jitter
+        // eats some of it, but anything ≤ 2 means per-unit cadence is
+        // broken (both units sharing one clock would give ratio 1).
+        assert!(
+            fast_scans > 2 * slow_scans,
+            "fast unit must scan >2x more often: fast={fast_scans} slow={slow_scans}"
+        );
+    }
+
+    /// Constant-value input device: every `read_channel` yields the same
+    /// i32 so routing tests can tell which unit's variable was fed.
+    struct ConstInputDevice {
+        name: String,
+        value: i32,
+    }
+
+    #[async_trait::async_trait]
+    impl IoDevice for ConstInputDevice {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        async fn read_channel(&mut self, _channel: &str) -> Result<ChannelValue, IoError> {
+            Ok(ChannelValue::I32(self.value))
+        }
+        async fn write_channel(
+            &mut self,
+            _channel: &str,
+            _value: ChannelValue,
+        ) -> Result<(), IoError> {
+            Ok(())
+        }
+    }
+
+    /// `Mapping.application` routes a device channel to ONE unit: both
+    /// units declare a variable `x`, the mapping names instance "a", so
+    /// only a's x sees the bus value while b's stays at its initial 0.
+    /// The colliding name is read back instance-prefixed from the
+    /// merged snapshot.
+    #[tokio::test]
+    async fn mapping_routes_to_the_named_instance_only() {
+        let prog = |name: &str| {
+            crate::compile(&format!(
+                "PROGRAM {name}\n\
+                    VAR x : INT; mirror : INT; END_VAR\n\
+                    mirror := x;\n\
+                END_PROGRAM"
+            ))
+            .expect("program compiles")
+        };
+
+        let dev = ConstInputDevice {
+            name: "mock".into(),
+            value: 42,
+        };
+        let devices: Vec<Box<dyn IoDevice>> = vec![Box::new(dev)];
+        let mappings = vec![project::Mapping {
+            application: "a".into(),
+            variable: "x".into(),
+            direction: project::Direction::Input,
+            device: "mock".into(),
+            channel: "ain".into(),
+        }];
+
+        let handle = spawn_units_inner(
+            vec![unit("a", prog("pa"), 10, 1), unit("b", prog("pb"), 10, 1)],
+            DeviceSource::Prebuilt(devices),
+            mappings,
+            None,
+        );
+        let mut rx = handle.subscribe();
+        let snap = last_snapshot_within(&mut rx, Duration::from_millis(150)).await;
+        tokio::time::timeout(Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("shutdown joins");
+
+        assert_eq!(
+            var_value(&snap, "a.x"),
+            "42",
+            "instance a's x must receive the device input"
+        );
+        assert_eq!(
+            var_value(&snap, "b.x"),
+            "0",
+            "instance b's x must NOT receive the device input"
+        );
+        // The program logic of the routed unit also saw the value.
+        assert_eq!(var_value(&snap, "a.mirror"), "42");
+        assert_eq!(var_value(&snap, "b.mirror"), "0");
     }
 }
