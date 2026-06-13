@@ -53,9 +53,10 @@ export function NewEdgeDialog(props: Props) {
   const submit = async () => {
     if (!trimmedName || !trimmedHost) return
     setSubmitting(true)
-    await createEdge(fullPath, trimmedHost)
+    const ok = await createEdge(fullPath, trimmedHost)
     setSubmitting(false)
-    setOpen(false)
+    // Stay open on failure; the error shows in the global toast.
+    if (ok) setOpen(false)
   }
 
   return (

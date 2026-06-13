@@ -175,9 +175,11 @@ type AppState = {
 
   // Errors
   error: string | null
+  /** Dismiss the current global error (used by the toast). */
+  clearError: () => void
 
   // Project actions
-  createProject: (name: string) => Promise<void>
+  createProject: (name: string) => Promise<boolean>
   openProject: (path: string) => Promise<void>
   closeProject: () => Promise<void>
   refreshProjects: () => Promise<void>
@@ -192,16 +194,17 @@ type AppState = {
 
   // POU / Device mutations
   saveCurrentPou: () => Promise<void>
-  createPou: (path: string, type_: PouType, language?: PouLanguage) => Promise<void>
+  /** Returns true on success; dialogs keep themselves open on false. */
+  createPou: (path: string, type_: PouType, language?: PouLanguage) => Promise<boolean>
   deletePou: (path: string) => Promise<void>
-  createDevice: (name: string, protocol: Protocol) => Promise<void>
+  createDevice: (name: string, protocol: Protocol) => Promise<boolean>
   deleteDevice: (name: string) => Promise<void>
-  createPouFolder: (path: string) => Promise<void>
-  createDeviceFolder: (path: string) => Promise<void>
-  createEdge: (name: string, host: string) => Promise<void>
+  createPouFolder: (path: string) => Promise<boolean>
+  createDeviceFolder: (path: string) => Promise<boolean>
+  createEdge: (name: string, host: string) => Promise<boolean>
   deleteEdge: (name: string) => Promise<void>
   saveEdge: (edge: Edge) => Promise<void>
-  createEdgeFolder: (path: string) => Promise<void>
+  createEdgeFolder: (path: string) => Promise<boolean>
 
   /** Open an SSH tunnel to the edge's runtime port and switch the SSE
    * stream over to it. Updates `attached`. */
@@ -248,6 +251,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   const [connected, setConnected] = useState(false)
   const [lastSnapshot, setLastSnapshot] = useState<VarSnapshot | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const clearError = useCallback(() => setError(null), [])
   // What's actually executing right now. Tracked client-side because
   // the bridge's `started` SSE event doesn't carry program names — the
   // call site (ProgramPane Run vs TasksPane Run) is the source of truth
@@ -665,7 +669,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
 
   // ---------------- Project actions ----------------
 
-  const createProject = useCallback(async (name: string) => {
+  const createProject = useCallback(async (name: string): Promise<boolean> => {
     setError(null)
     try {
       await apiCreateProject(name)
@@ -673,8 +677,10 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       setProject(tree)
       setCurrentPou(null)
       setSource("")
+      return true
     } catch (e) {
       setError(String(e))
+      return false
     }
   }, [])
 
@@ -849,15 +855,21 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   }, [currentPou, source])
 
   const createPou = useCallback(
-    async (path: string, type_: PouType, language: PouLanguage = "st") => {
+    async (
+      path: string,
+      type_: PouType,
+      language: PouLanguage = "st",
+    ): Promise<boolean> => {
       setError(null)
       try {
         const pou = await apiCreatePou(path, type_, language)
         await refreshProject()
         setCurrentPou(pou)
         setSource(pou.source)
+        return true
       } catch (e) {
         setError(String(e))
+        return false
       }
     },
     [refreshProject],
@@ -881,13 +893,15 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   )
 
   const createDevice = useCallback(
-    async (name: string, protocol: Protocol) => {
+    async (name: string, protocol: Protocol): Promise<boolean> => {
       setError(null)
       try {
         await apiCreateDevice(name, protocol)
         await refreshProject()
+        return true
       } catch (e) {
         setError(String(e))
+        return false
       }
     },
     [refreshProject],
@@ -907,26 +921,30 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   )
 
   const createPouFolder = useCallback(
-    async (path: string) => {
+    async (path: string): Promise<boolean> => {
       setError(null)
       try {
         await apiCreatePouFolder(path)
         await refreshProject()
+        return true
       } catch (e) {
         setError(String(e))
+        return false
       }
     },
     [refreshProject],
   )
 
   const createDeviceFolderCb = useCallback(
-    async (path: string) => {
+    async (path: string): Promise<boolean> => {
       setError(null)
       try {
         await apiCreateDeviceFolder(path)
         await refreshProject()
+        return true
       } catch (e) {
         setError(String(e))
+        return false
       }
     },
     [refreshProject],
@@ -935,13 +953,15 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   // ---------------- Edge actions ----------------
 
   const createEdgeAction = useCallback(
-    async (name: string, host: string) => {
+    async (name: string, host: string): Promise<boolean> => {
       setError(null)
       try {
         await apiCreateEdge(name, host)
         await refreshProject()
+        return true
       } catch (e) {
         setError(String(e))
+        return false
       }
     },
     [refreshProject],
@@ -977,13 +997,15 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   )
 
   const createEdgeFolderAction = useCallback(
-    async (path: string) => {
+    async (path: string): Promise<boolean> => {
       setError(null)
       try {
         await apiCreateEdgeFolder(path)
         await refreshProject()
+        return true
       } catch (e) {
         setError(String(e))
+        return false
       }
     },
     [refreshProject],
@@ -1090,6 +1112,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         connected,
         lastSnapshot,
         error,
+        clearError,
         createProject,
         openProject,
         closeProject,

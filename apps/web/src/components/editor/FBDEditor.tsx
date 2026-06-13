@@ -596,7 +596,10 @@ function FbdCanvas({
       // Don't self-loop
       if (wireDrag && block.id === wireDrag.fromBlockId) continue
       const lay = layout.blockById.get(block.id)
-      if (!lay) return null
+      // Skip an unpositioned block, don't abort the whole search — a
+      // missing layout for one block must not make later blocks
+      // un-droppable as wire targets.
+      if (!lay) continue
       for (let i = 0; i < Math.max(block.inputs.length, 1); i++) {
         const input = block.inputs[i]
         if (!input) continue

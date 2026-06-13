@@ -276,11 +276,13 @@ function RunningPill({
           : `${names.slice(0, 2).join(", ")} +${names.length - 2}`
     return (
       <Tag
-        color="highlight"
+        // Empty schedule = the scan loop is up but nothing executes; show it
+        // muted, not highlighted, so it doesn't read as active program work.
+        color={names.length === 0 ? "muted" : "highlight"}
         title={
           names.length > 0
             ? `Running ${names.length} PROGRAM instance${names.length > 1 ? "s" : ""}: ${names.join(", ")}`
-            : "tasks.toml has no PROGRAM bindings"
+            : "tasks.toml has no PROGRAM bindings — nothing is executing"
         }
       >
         <span className="font-mono">{label}</span>
