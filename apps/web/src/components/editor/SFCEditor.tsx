@@ -381,8 +381,8 @@ function Toolbar({
         Transition
       </button>
       <span className="text-[10px] text-muted-foreground">
-        click any element to edit · transitions evaluate top-to-bottom
-        (first match wins)
+        click any element to edit · double frame = initial step ·
+        transitions evaluate top-to-bottom (first match wins)
       </span>
     </div>
   )
