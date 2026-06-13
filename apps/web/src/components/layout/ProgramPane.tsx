@@ -7,6 +7,7 @@ import { SFCEditor } from "@/components/editor/SFCEditor"
 import { STEditor } from "@/components/editor/STEditor"
 import { cn } from "@/lib/utils"
 import { useRuntime } from "@/state/runtime"
+import { DatasheetView } from "./DatasheetView"
 import { VariablesPanel } from "./VariablesPanel"
 
 export function ProgramPane() {
@@ -194,25 +195,15 @@ export function ProgramPane() {
           {error}
         </div>
       )}
-      {isLibrary && (
-        <div className="border-b border-border bg-muted/40 px-3 py-1.5 text-xs text-muted-foreground">
-          Library block from <span className="font-mono">{libraryName}</span> —
-          read-only. To customize it, copy the file out of{" "}
-          <span className="font-mono">lib/</span> as a project POU; to update
-          or remove it, use the Libraries section in the tree.
-        </div>
-      )}
       <div className="flex min-h-0 flex-1">
         <div className="min-h-0 min-w-0 flex-1">
-          {/* Editor dispatch by POU language. All four are full
-              graphical/text editors with a JSON (or text) fallback
-              while the file is mid-edit:
-              - ST  → Monaco editor.
-              - LD  → SVG ladder editor.
-              - FBD → SVG block diagram (drag to reposition, port-to-
-                      port wiring, add/delete blocks, edit pin bindings).
-              - SFC → SVG sequential-function-chart editor. */}
-          {currentPou.declarations[0]?.language === "ld" ? (
+          {/* Library blocks open as a datasheet (interface + docs, with
+              the ST source folded away) — a block is a contract to use,
+              not code to read. Everything else dispatches to its
+              language editor. */}
+          {isLibrary ? (
+            <DatasheetView source={source} libraryName={libraryName ?? ""} />
+          ) : currentPou.declarations[0]?.language === "ld" ? (
             <LDEditor
               value={source}
               onChange={setSource}
@@ -242,7 +233,7 @@ export function ProgramPane() {
             />
           )}
         </div>
-        {varsOpen && (
+        {varsOpen && !isLibrary && (
           <div className="hidden min-h-0 w-[240px] shrink-0 md:block">
             <VariablesPanel />
           </div>
