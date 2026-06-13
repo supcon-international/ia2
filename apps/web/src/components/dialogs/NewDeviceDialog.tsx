@@ -60,9 +60,10 @@ export function NewDeviceDialog(props: Props) {
   const submit = async () => {
     if (!trimmed) return
     setSubmitting(true)
-    await createDevice(fullPath, protocol)
+    const ok = await createDevice(fullPath, protocol)
     setSubmitting(false)
-    setOpen(false)
+    // Stay open on failure; the error shows in the global toast.
+    if (ok) setOpen(false)
   }
 
   return (

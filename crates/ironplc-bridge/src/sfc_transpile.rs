@@ -48,7 +48,7 @@
 //! - No simultaneous branches (parallel divergence/convergence).
 //! - No nested SFC. The step body is `actions[]`, not a sub-chart.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use project::{LdPouType, LdVarSection, LdVariable, SfcProgram, SfcQualifier, SfcStep};
 use serde::Serialize;
@@ -345,15 +345,6 @@ fn emit_action_body(em: &mut StEmitter, body: &str, span: Option<SfcLocation>, i
             em.line(span.clone(), format_args!("{pad}{trimmed}"));
         }
     }
-}
-
-#[allow(dead_code)]
-fn step_index(steps: &[SfcStep]) -> HashMap<&str, usize> {
-    steps
-        .iter()
-        .enumerate()
-        .map(|(i, s)| (s.name.as_str(), i))
-        .collect()
 }
 
 // =================================================================

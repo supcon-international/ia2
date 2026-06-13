@@ -1,3 +1,4 @@
+import { X } from "lucide-react"
 import { useEffect, useState } from "react"
 import { Group, Panel, Separator, type Layout } from "react-resizable-panels"
 
@@ -20,7 +21,47 @@ export function Workbench() {
   return (
     <RuntimeProvider>
       <Shell />
+      <GlobalErrorToast />
     </RuntimeProvider>
+  )
+}
+
+/**
+ * Single app-wide surface for failed actions. Every runtime action funnels
+ * its failure into the context `error` field; without this, a failure in any
+ * pane or dialog that doesn't render `error` itself (Device / IoMap / Tasks /
+ * all create dialogs) would vanish silently. Lives inside RuntimeProvider so
+ * it works in the loading and empty-project states too. Auto-dismisses, and
+ * is manually dismissable.
+ */
+function GlobalErrorToast() {
+  const { error, clearError } = useRuntime()
+  useEffect(() => {
+    if (!error) return
+    const t = window.setTimeout(clearError, 8000)
+    return () => window.clearTimeout(t)
+  }, [error, clearError])
+  if (!error) return null
+  return (
+    <div
+      role="alert"
+      // z-[100] keeps the toast above modal dialog overlays (Radix uses
+      // z-50) — a create dialog stays open on failure, so its error must
+      // float over the dimming overlay, not behind it.
+      className="fixed bottom-4 right-4 z-[100] flex max-w-md items-start gap-2 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-800 shadow-lg dark:border-red-900 dark:bg-red-950/90 dark:text-red-300"
+    >
+      <span className="min-w-0 flex-1 whitespace-pre-wrap break-words">
+        {error}
+      </span>
+      <button
+        type="button"
+        onClick={clearError}
+        aria-label="Dismiss error"
+        className="-mt-0.5 -mr-1 shrink-0 rounded p-0.5 text-red-500 hover:bg-red-100 hover:text-red-700 dark:hover:bg-red-900/50"
+      >
+        <X className="size-3.5" />
+      </button>
+    </div>
   )
 }
 

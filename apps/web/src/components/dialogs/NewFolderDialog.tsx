@@ -41,15 +41,15 @@ export function NewFolderDialog({ open, onOpenChange, section, parent }: Props) 
   const submit = async () => {
     if (!trimmed) return
     setSubmitting(true)
-    if (section === "applications") {
-      await createPouFolder(fullPath)
-    } else if (section === "devices") {
-      await createDeviceFolder(fullPath)
-    } else {
-      await createEdgeFolder(fullPath)
-    }
+    const ok =
+      section === "applications"
+        ? await createPouFolder(fullPath)
+        : section === "devices"
+          ? await createDeviceFolder(fullPath)
+          : await createEdgeFolder(fullPath)
     setSubmitting(false)
-    onOpenChange(false)
+    // Stay open on failure; the error shows in the global toast.
+    if (ok) onOpenChange(false)
   }
 
   return (

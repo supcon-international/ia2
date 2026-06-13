@@ -74,9 +74,11 @@ export function NewPouDialog(props: Props) {
   const submit = async () => {
     if (!trimmed) return
     setSubmitting(true)
-    await createPou(fullPath, kind, language)
+    const ok = await createPou(fullPath, kind, language)
     setSubmitting(false)
-    setOpen(false)
+    // Keep the dialog open on failure (e.g. name collision) so the typed
+    // name isn't lost; the error shows in the global toast.
+    if (ok) setOpen(false)
   }
 
   return (

@@ -28,10 +28,13 @@ export function NewProjectDialog({ trigger }: Props) {
   const submit = async () => {
     if (!trimmed) return
     setSubmitting(true)
-    await createProject(trimmed)
+    const ok = await createProject(trimmed)
     setSubmitting(false)
-    setOpen(false)
-    setName("")
+    // Stay open on failure so the user can correct the name.
+    if (ok) {
+      setOpen(false)
+      setName("")
+    }
   }
 
   return (

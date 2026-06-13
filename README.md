@@ -131,6 +131,7 @@ cs project create my_line               # → ~/Documents/IA2/my_line/
 cs project list                         # open projects; --project NAME targets one
 cs pou create motor --language ld
 cs pou save motor --from motor.ld.json
+cs library import process-control --blocks fb_pid.st  # vendor library blocks; omit --blocks for all
 
 # devices / wiring / scheduling (get → edit → set, JSON shapes)
 cs device create hmi --protocol modbus  # then `cs device set hmi --from -` for TCP/RTU + channels

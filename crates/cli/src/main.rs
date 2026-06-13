@@ -271,6 +271,14 @@ enum Command {
     #[command(subcommand)]
     Northbound(NorthboundCmd),
 
+    /// Manage first-class FB libraries vendored into the project
+    /// (`pous/lib/<name>/`). Mirrors the IDE's "Import library blocks"
+    /// flow so an agent can browse the registry, pull blocks in, and
+    /// drop them again without the GUI. Requires a server with an open
+    /// project.
+    #[command(subcommand)]
+    Library(LibraryCmd),
+
     /// Take a long-running agent session around a wrapped command.
     ///
     /// The single most important command for any multi-step agent
@@ -646,6 +654,42 @@ enum NorthboundCmd {
 }
 
 // =================================================================
+//   cs library — list / import / remove FB libraries
+// =================================================================
+#[derive(Subcommand, Debug)]
+enum LibraryCmd {
+    /// List registry libraries with their version and per-project
+    /// import state. Add `--json` for the raw `LibrarySummary[]`.
+    List {
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+    /// Vendor library blocks into the open project under
+    /// `pous/lib/<name>/`. Omit `--blocks` to import the whole
+    /// library; re-importing overwrites (that's the update path).
+    Import {
+        /// Registry library name, e.g. `process-control`.
+        library: String,
+        /// Comma-separated block file names (`fb_pid.st,fb_ramp.st`).
+        /// Omit to import every block in the library.
+        #[arg(long, value_delimiter = ',')]
+        blocks: Vec<String>,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+    /// Remove an imported library — drops `pous/lib/<name>/` and the
+    /// project.toml entry. Idempotent.
+    Remove {
+        /// Imported library name.
+        name: String,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
+}
+
+// =================================================================
 //   cs tasks — read / write tasks.toml
 // =================================================================
 #[derive(Subcommand, Debug)]
@@ -814,6 +858,7 @@ fn main() {
         Command::Edge(e) => cmd_edge(e),
         Command::Iomap(i) => cmd_iomap(i),
         Command::Northbound(n) => cmd_northbound(n),
+        Command::Library(l) => cmd_library(l),
         Command::Tasks(t) => cmd_tasks(t),
         Command::Agent(a) => cmd_agent(a),
     };
@@ -1677,6 +1722,51 @@ fn cmd_northbound(cmd: NorthboundCmd) -> Result<i32> {
     }
 }
 
+fn cmd_library(cmd: LibraryCmd) -> Result<i32> {
+    match cmd {
+        LibraryCmd::List { json, server } => {
+            let resp = get_json(&format!("{server}/api/library"))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&resp)?);
+            } else if let Some(arr) = resp.as_array() {
+                // Concise table: name · version · import state.
+                for l in arr {
+                    let name = l.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                    let version = l.get("version").and_then(|v| v.as_str()).unwrap_or("?");
+                    let files = l
+                        .get("imported_files")
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.len())
+                        .unwrap_or(0);
+                    match l.get("imported_version").and_then(|v| v.as_str()) {
+                        Some(iv) => println!(
+                            "{name}  v{version}  imported(v{iv}, {files} block{})",
+                            if files == 1 { "" } else { "s" }
+                        ),
+                        None => println!("{name}  v{version}  (not imported)"),
+                    }
+                }
+            }
+            Ok(0)
+        }
+        LibraryCmd::Import {
+            library,
+            blocks,
+            server,
+        } => {
+            let body = serde_json::json!({ "library": library, "blocks": blocks });
+            let resp = post_json(&format!("{server}/api/library/import"), &body)?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+            Ok(0)
+        }
+        LibraryCmd::Remove { name, server } => {
+            let resp = delete_json(&format!("{server}/api/library/{}", url_encode(&name)))?;
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+            Ok(0)
+        }
+    }
+}
+
 // =================================================================
 //   Subcommand: agent — explicit takeover session
 // =================================================================
@@ -2218,6 +2308,10 @@ fn announce_target(cmd: &Command) -> Option<(&str, &'static str)> {
         Command::Northbound(NorthboundCmd::Get { server, .. }) => Some((server, "northbound get")),
         Command::Northbound(NorthboundCmd::Set { server, .. }) => Some((server, "northbound set")),
         Command::Tasks(TasksCmd::Set { server, .. }) => Some((server, "tasks set")),
+
+        Command::Library(LibraryCmd::List { server, .. }) => Some((server, "library list")),
+        Command::Library(LibraryCmd::Import { server, .. }) => Some((server, "library import")),
+        Command::Library(LibraryCmd::Remove { server, .. }) => Some((server, "library remove")),
 
         Command::Probe { server, .. } => Some((server, "probe")),
         Command::Run { server, .. } => Some((server, "run")),
