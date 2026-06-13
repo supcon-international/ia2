@@ -1,33 +1,37 @@
 (*
-  FB_PWM — 时间比例输出（0..100% 指令 → 固定周期占空比通断）。
+  FB_PWM — time-proportioning output (0..100% command -> fixed-period duty-cycle on/off).
 
-  ≈ 时间比例输出（time-proportioning / PWM）：连续量 → 周期通断，固态继电器/电磁阀温控惯用。
+  ~ Time-proportioning (time-proportioning / PWM): continuous quantity -> periodic
+  on/off, the customary form for solid-state-relay / solenoid-valve temperature control.
 
-  用途：PID 输出驱动固态继电器/电磁阀的通断式执行机构：电加热器、
-  蒸汽通断阀、加药泵。
-  行为：
-    相位累加器同 FB_PULSER：phase_s 以 dt_s 累加，到 period_s 减法回卷
-    （长期节拍不漂移）；q := phase_s < on_s。
-    on_s := u/100 * period_s（u 先钳位 0..100）。
-    最小通/断时间（保护接触器/SSR/阀件，按有效占空比钳位实现）：
-      0 < on_s < min_on_s            → on_s 提升至 min_on_s；
-      0 < period_s - on_s < min_off_s → on_s 压缩至 period_s - min_off_s
-      （断侧优先级更高；若 min_on_s + min_off_s > period_s 属参数矛盾，
-      实际向断侧让步，极端时恒断——勿如此整定）。
-    u <= 0 → 整周期断；u >= 100 → 整周期通（满幅不受最小通断钳位影响）。
-    NOT enable 或 period_s/dt_s <= 0 → q := FALSE 且相位清零
-    （重新使能从周期起点开始，先通后断）。
-    u 变化即时生效（周期内比较门限即变，无需等下个周期）。
+  Purpose: a PID output driving an on/off actuator via a solid-state relay / solenoid
+  valve: electric heaters, steam on/off valves, dosing pumps.
+  Behavior:
+    Phase accumulator as in FB_PULSER: phase_s accumulates by dt_s, wraps by subtraction
+    at period_s (so the long-term cadence does not drift); q := phase_s < on_s.
+    on_s := u/100 * period_s (u clamped 0..100 first).
+    Minimum on/off times (protecting the contactor/SSR/valve, implemented by clamping the effective duty):
+      0 < on_s < min_on_s            -> on_s raised to min_on_s;
+      0 < period_s - on_s < min_off_s -> on_s squeezed to period_s - min_off_s
+      (the off side has higher priority; if min_on_s + min_off_s > period_s the
+      parameters are contradictory and the off side wins -- at the extreme it stays
+      permanently off, so do not tune it this way).
+    u <= 0 -> off for the whole period; u >= 100 -> on for the whole period (full scale
+    is unaffected by the minimum on/off clamp).
+    NOT enable or period_s/dt_s <= 0 -> q := FALSE and phase cleared (re-enabling starts
+    from the period start, on first then off).
+    A change in u takes effect immediately (the comparison threshold within the period
+    changes at once, no need to wait for the next period).
 
-  输入：
-    u         REAL  指令 0..100 %
-    period_s  REAL  PWM 周期 s
-    min_on_s  REAL  最小导通时间 s（0 = 不限）
-    min_off_s REAL  最小关断时间 s（0 = 不限）
-    enable    BOOL  使能
-    dt_s      REAL  采样周期 s
-  输出：
-    q         BOOL  时间比例输出
+  Inputs:
+    u         REAL  command 0..100 %
+    period_s  REAL  PWM period s
+    min_on_s  REAL  minimum on time s (0 = no limit)
+    min_off_s REAL  minimum off time s (0 = no limit)
+    enable    BOOL  enable
+    dt_s      REAL  sample period s
+  Outputs:
+    q         BOOL  time-proportioning output
 *)
 FUNCTION_BLOCK FB_PWM
   VAR_INPUT
@@ -42,9 +46,9 @@ FUNCTION_BLOCK FB_PWM
     q : BOOL;
   END_VAR
   VAR
-    phase_s : REAL; (* 周期内相位，手工计时替代 TP/TON *)
+    phase_s : REAL; (* phase within the period, manual timing in place of TP/TON *)
     uc      : REAL;
-    on_s    : REAL; (* 本拍有效导通时长 *)
+    on_s    : REAL; (* effective on-duration this scan *)
     off_s   : REAL;
   END_VAR
 
@@ -63,12 +67,12 @@ FUNCTION_BLOCK FB_PWM
 
   on_s := uc * period_s / 100.0;
 
-  (* 最小导通：有效占空比上调（u=0 不受影响） *)
+  (* Minimum on: raise the effective duty (u=0 unaffected) *)
   IF on_s > 0.0 AND on_s < min_on_s THEN
     on_s := min_on_s;
   END_IF;
 
-  (* 最小关断：有效占空比下调（u=100 时 off=0 不触发，保持恒通） *)
+  (* Minimum off: lower the effective duty (at u=100, off=0 so it does not trigger, stays permanently on) *)
   off_s := period_s - on_s;
   IF off_s > 0.0 AND off_s < min_off_s THEN
     on_s := period_s - min_off_s;
@@ -81,6 +85,6 @@ FUNCTION_BLOCK FB_PWM
 
   phase_s := phase_s + dt_s;
   IF phase_s >= period_s THEN
-    phase_s := phase_s - period_s; (* 减法回卷，保持长期节拍 *)
+    phase_s := phase_s - period_s; (* subtraction wrap, keeps the long-term cadence *)
   END_IF;
 END_FUNCTION_BLOCK

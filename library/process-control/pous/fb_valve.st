@@ -1,33 +1,36 @@
 (*
-  FB_VALVE — 开关阀（两位阀）控制，带行程超时与双限位故障监视。
+  FB_VALVE — on/off valve (two-position valve) control, with travel timeout and dual-limit fault monitoring.
 
-  用途：气动/电动开关阀的标准封装，ZSO/ZSC 双限位回讯。
-  例：进料阀开到位才允许下游启动；行程超时报阀卡。
+  Purpose: standard wrapper for a pneumatic/electric on/off valve, with ZSO/ZSC
+  dual-limit feedback.
+  Example: the feed valve must be fully open before the downstream may start; a travel
+  timeout flags a stuck valve.
 
-  行为：
-    1) 故障监视：
-       - zso 与 zsc 同时为 TRUE → 限位开关故障，立即 fault；
-       - 命令位置与限位回讯不一致（开阀未见 zso / 关阀未见 zsc）持续
-         travel_timeout_s（手工 dt_s 累加计时）→ 行程超时 fault；
-       - 外部故障 fault_in → fault。均锁存，reset 且 fault_in 消除后清除。
-    2) 命令锁存：cmd_open 在 remote 且无故障时置位 out_open；
-       cmd_close 或 fault 复位（故障时故障安全关阀，关阀优先）。
-    3) 状态字 status：0 关到位 / 1 行程中 / 2 开到位 / 3 故障。
+  Behavior:
+    1) Fault monitoring:
+       - zso and zsc TRUE at once -> limit-switch fault, immediate fault;
+       - the commanded position and the limit feedback disagree (open valve without zso /
+         close valve without zsc) for travel_timeout_s (manual dt_s accumulation) ->
+         travel-timeout fault;
+       - external fault fault_in -> fault. All latched; cleared by reset with fault_in cleared.
+    2) Command latch: cmd_open sets out_open when remote and fault-free;
+       cmd_close or fault resets it (fail-safe-close on fault, close takes priority).
+    3) Status word status: 0 closed / 1 traveling / 2 open / 3 faulted.
 
-  输入：
-    cmd_open         BOOL  开阀命令
-    cmd_close        BOOL  关阀命令（优先）
-    remote           BOOL  远程允许（仅闸开阀）
-    zso              BOOL  开到位限位（Zero Switch Open）
-    zsc              BOOL  关到位限位（Zero Switch Closed）
-    fault_in         BOOL  外部故障输入
-    reset            BOOL  故障复位
-    travel_timeout_s REAL  行程超时 s
-    dt_s             REAL  采样周期 s
-  输出：
-    out_open BOOL  开阀输出（TRUE 开 / FALSE 关）
-    fault    BOOL  故障（锁存）
-    status   INT   0 关到位 / 1 行程中 / 2 开到位 / 3 故障
+  Inputs:
+    cmd_open         BOOL  open command
+    cmd_close        BOOL  close command (priority)
+    remote           BOOL  remote permissive (gates open only)
+    zso              BOOL  open limit (Zero Switch Open)
+    zsc              BOOL  close limit (Zero Switch Closed)
+    fault_in         BOOL  external fault input
+    reset            BOOL  fault reset
+    travel_timeout_s REAL  travel timeout s
+    dt_s             REAL  sample period s
+  Outputs:
+    out_open BOOL  open output (TRUE open / FALSE close)
+    fault    BOOL  fault (latched)
+    status   INT   0 closed / 1 traveling / 2 open / 3 faulted
 *)
 FUNCTION_BLOCK FB_VALVE
   VAR_INPUT
@@ -47,13 +50,13 @@ FUNCTION_BLOCK FB_VALVE
     status   : INT;
   END_VAR
   VAR
-    travel_t : REAL; (* 未到位累计时间 s *)
+    travel_t : REAL; (* not-in-position accumulated time s *)
     in_pos   : BOOL;
   END_VAR
 
-  (* 1) 故障监视 *)
+  (* 1) Fault monitoring *)
   IF zso AND zsc THEN
-    fault := TRUE; (* 双限位同时有效：限位开关故障 *)
+    fault := TRUE; (* both limits active at once: limit-switch fault *)
   END_IF;
 
   in_pos := (out_open AND zso) OR (NOT out_open AND zsc);
@@ -63,7 +66,7 @@ FUNCTION_BLOCK FB_VALVE
     travel_t := travel_t + dt_s;
   END_IF;
   IF travel_timeout_s > 0.0 AND travel_t >= travel_timeout_s THEN
-    fault := TRUE; (* 行程超时：阀卡/限位丢失 *)
+    fault := TRUE; (* travel timeout: stuck valve / lost limit *)
   END_IF;
 
   IF fault_in THEN
@@ -74,7 +77,7 @@ FUNCTION_BLOCK FB_VALVE
     travel_t := 0.0;
   END_IF;
 
-  (* 2) 命令锁存（关阀/故障优先，故障安全关阀） *)
+  (* 2) Command latch (close/fault priority, fail-safe-close) *)
   IF cmd_open AND remote AND NOT fault THEN
     out_open := TRUE;
   END_IF;
@@ -82,7 +85,7 @@ FUNCTION_BLOCK FB_VALVE
     out_open := FALSE;
   END_IF;
 
-  (* 3) 状态字 *)
+  (* 3) Status word *)
   IF fault THEN
     status := 3;
   ELSIF out_open AND zso THEN

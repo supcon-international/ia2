@@ -1,38 +1,42 @@
 (*
-  FB_DUTY2 — 双泵值班/备用（duty/standby）轮换控制。
+  FB_DUTY2 — dual-pump duty/standby rotation control.
 
-  ≈ 双泵一用一备（duty/standby）轮换：按启动次序或运行小时均衡选值班泵，故障即时顶替。
+  ~ Dual-pump duty/standby rotation: select the duty pump by start sequence or run-hour
+  balancing, with immediate takeover on fault.
 
-  用途：两台泵一用一备：每次启动轮换或按累计运行小时均衡选值班泵；
-  值班泵故障备用泵立即顶上；双故障全停。
-  行为（扫描确定性：无内部计时，仅沿记忆）：
-    demand 上升沿选定本次值班泵，优先级：
-      1) 恰有一台已在运转（run_fb 单边 TRUE）→ 直接采纳其为值班
-         （无扰接管，避免停转再起备用泵）；
-      2) alt_mode = 1 → 累计小时小者值班（hours_a/b 接两个 FB_RUNTIME）；
-      3) alt_mode = 0（默认）→ 在当前值班位上翻转（含故障顶替后的状态，
-         天然磨损均衡）。
-    demand 保持期间：值班泵故障且另一台健康 → 值班立即切换（顶替）；
-    被命令泵故障即不出指令；双故障 → cmd 双 FALSE（值班选择保持）。
-    demand 撤销 → cmd 双 FALSE。
-    接线建议：fault_x 接 FB_MOTOR 的 fault 或电气综保；run_fb_x 接运行
-    反馈（抖动触点前置 FB_DEBOUNCE）；反馈超时判故障交给 FB_MOTOR，
-    本块不重复计时。
+  Purpose: two pumps in a duty/standby arrangement: select the duty pump by rotating
+  each start or by balancing accumulated run hours; on a duty-pump fault the standby
+  takes over immediately; on a dual fault both stop.
+  Behavior (scan-deterministic: no internal timing, only edge memory):
+    A demand rising edge selects this round's duty pump, by priority:
+      1) exactly one is already running (run_fb TRUE on one side) -> adopt it as duty
+         directly (bumpless takeover, avoiding stopping it to start the standby);
+      2) alt_mode = 1 -> the lower accumulated hours is duty (hours_a/b fed from two FB_RUNTIME);
+      3) alt_mode = 0 (default) -> toggle from the current duty position (including the
+         state after a fault takeover, giving natural wear balancing).
+    While demand persists: a duty-pump fault with the other healthy -> duty switches
+    immediately (takeover); a commanded pump that faults gets no command; a dual fault
+    -> both cmd FALSE (the duty selection is held).
+    demand withdrawn -> both cmd FALSE.
+    Wiring suggestion: feed fault_x from FB_MOTOR's fault or the electrical protection
+    relay; feed run_fb_x from the run feedback (debounce a chattering contact with
+    FB_DEBOUNCE); leave feedback-timeout fault decision to FB_MOTOR, this block does not
+    duplicate the timing.
 
-  输入：
-    demand   BOOL  系统需泵（电平）
-    alt_mode INT   0 = 每次启动轮换 / 1 = 运行小时均衡
-    run_fb_a BOOL  A 泵运行反馈
-    run_fb_b BOOL  B 泵运行反馈
-    fault_a  BOOL  A 泵故障
-    fault_b  BOOL  B 泵故障
-    hours_a  REAL  A 泵累计小时（alt_mode=1 用，接 FB_RUNTIME.hours）
-    hours_b  REAL  B 泵累计小时（alt_mode=1 用）
-    dt_s     REAL  采样周期 s（本块当前不计时，保留以统一库接口）
-  输出：
-    cmd_a     BOOL  A 泵启动指令
-    cmd_b     BOOL  B 泵启动指令
-    duty_is_a BOOL  当前值班泵为 A
+  Inputs:
+    demand   BOOL  system needs a pump (level)
+    alt_mode INT   0 = rotate each start / 1 = run-hour balancing
+    run_fb_a BOOL  pump A run feedback
+    run_fb_b BOOL  pump B run feedback
+    fault_a  BOOL  pump A fault
+    fault_b  BOOL  pump B fault
+    hours_a  REAL  pump A accumulated hours (used by alt_mode=1, fed from FB_RUNTIME.hours)
+    hours_b  REAL  pump B accumulated hours (used by alt_mode=1)
+    dt_s     REAL  sample period s (this block does not currently time; kept for a uniform library interface)
+  Outputs:
+    cmd_a     BOOL  pump A start command
+    cmd_b     BOOL  pump B start command
+    duty_is_a BOOL  the current duty pump is A
 *)
 FUNCTION_BLOCK FB_DUTY2
   VAR_INPUT
@@ -52,7 +56,7 @@ FUNCTION_BLOCK FB_DUTY2
     duty_is_a : BOOL;
   END_VAR
   VAR
-    prev_demand : BOOL; (* 上升沿记忆 *)
+    prev_demand : BOOL; (* rising-edge memory *)
     rising      : BOOL;
   END_VAR
 
@@ -61,18 +65,18 @@ FUNCTION_BLOCK FB_DUTY2
 
   IF rising THEN
     IF run_fb_a AND NOT run_fb_b THEN
-      duty_is_a := TRUE;  (* 已在转的泵直接作值班，无扰接管 *)
+      duty_is_a := TRUE;  (* the already-running pump becomes duty directly, bumpless takeover *)
     ELSIF run_fb_b AND NOT run_fb_a THEN
       duty_is_a := FALSE;
     ELSIF alt_mode = 1 THEN
-      duty_is_a := hours_a <= hours_b; (* 小时均衡：少者值班 *)
+      duty_is_a := hours_a <= hours_b; (* hour balancing: the lower is duty *)
     ELSE
-      duty_is_a := NOT duty_is_a; (* 每次启动轮换（初值 FALSE → 首启选 A） *)
+      duty_is_a := NOT duty_is_a; (* rotate each start (initial FALSE -> first start selects A) *)
     END_IF;
   END_IF;
 
   IF demand THEN
-    (* 故障顶替：值班故障且另一台健康 → 值班立即切换 *)
+    (* Fault takeover: duty faults and the other is healthy -> duty switches immediately *)
     IF duty_is_a AND fault_a AND NOT fault_b THEN
       duty_is_a := FALSE;
     ELSIF NOT duty_is_a AND fault_b AND NOT fault_a THEN

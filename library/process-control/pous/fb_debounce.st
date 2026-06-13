@@ -1,23 +1,25 @@
 (*
-  FB_DEBOUNCE — 开关量去抖（双向独立确认延时）。
+  FB_DEBOUNCE — discrete-input debounce (independent bidirectional confirmation delay).
 
-  ≈ 开关量去抖（on/off 双延时），DI 处理标配。
+  ~ Discrete-input debounce (on/off dual delay), standard for DI processing.
 
-  用途：浮球液位开关、限位开关、继电器/接触器辅助触点等抖动信号确认；
-  亦可给 FB_DUTY2 的 run_fb/fault 输入前置去抖。
-  行为：
-    u 连续为 TRUE 满 t_on_s → q := TRUE；u 连续为 FALSE 满 t_off_s →
-    q := FALSE；其间任何反向跳变将对应方向计时清零（重新计）。
-    t = 0 表示该方向立即生效。实际确认时间按 dt_s 拍向上取整。
-    （手工 dt_s 累加计时，等效 TON 接通确认 + 断开确认，离线可测。）
+  Purpose: confirming chattering signals such as float level switches, limit switches,
+  relay/contactor auxiliary contacts; can also debounce the run_fb/fault inputs of
+  FB_DUTY2.
+  Behavior:
+    u continuously TRUE for t_on_s -> q := TRUE; u continuously FALSE for t_off_s ->
+    q := FALSE; any reverse transition in between clears that direction's timer (restart).
+    t = 0 means that direction takes effect immediately. The actual confirmation time
+    rounds up to a dt_s scan.
+    (Manual dt_s accumulation, equivalent to a TON on-confirm + off-confirm, offline-testable.)
 
-  输入：
-    u       BOOL  原始开关量
-    t_on_s  REAL  置位确认时间 s（0 = 立即）
-    t_off_s REAL  复位确认时间 s（0 = 立即）
-    dt_s    REAL  采样周期 s
-  输出：
-    q       BOOL  去抖后的开关量
+  Inputs:
+    u       BOOL  raw discrete input
+    t_on_s  REAL  set confirmation time s (0 = immediate)
+    t_off_s REAL  reset confirmation time s (0 = immediate)
+    dt_s    REAL  sample period s
+  Outputs:
+    q       BOOL  debounced discrete output
 *)
 FUNCTION_BLOCK FB_DEBOUNCE
   VAR_INPUT
@@ -30,8 +32,8 @@ FUNCTION_BLOCK FB_DEBOUNCE
     q : BOOL;
   END_VAR
   VAR
-    on_t  : REAL; (* 置位方向累计 *)
-    off_t : REAL; (* 复位方向累计 *)
+    on_t  : REAL; (* set-direction accumulator *)
+    off_t : REAL; (* reset-direction accumulator *)
   END_VAR
 
   IF u THEN

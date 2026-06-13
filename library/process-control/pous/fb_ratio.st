@@ -1,24 +1,26 @@
 (*
-  FB_RATIO — 比值站（比值给定器）。
+  FB_RATIO — ratio station (ratio setpoint generator).
 
-  ≈ 比值站（ratio station）：配比/配料回路惯用块，输出接下游 PID 的 sp。
+  ~ Ratio station: the customary block for proportioning/blending loops, output feeds the downstream PID's sp.
 
-  用途：配比控制：从动流量设定值 = 主动（wild）流量 × 比值 + 偏置，
-  sp 输出接下游 FB_PID 的 sp 输入构成比值回路。
-  例：碳化塔石灰乳流量按进气量 0.85 配比跟随。
+  Purpose: ratio control: the follower flow setpoint = wild (leading) flow * ratio +
+  bias, and the sp output feeds the sp input of a downstream FB_PID to form the ratio
+  loop.
+  Example: a follower stream tracks the leading flow at a 0.85 proportion.
 
-  公式：sp := clamp(ratio, ratio_min, ratio_max) * wild_flow + bias。
-  说明：仅对 ratio 钳位（操作员可调比值的安全限幅），不对 sp 钳位——
-  sp 量纲随 wild_flow，下游 PID 自有输出钳位。
+  Formula: sp := clamp(ratio, ratio_min, ratio_max) * wild_flow + bias.
+  Note: only ratio is clamped (a safety limit on the operator-adjustable ratio), sp is
+  not clamped -- sp's dimension follows wild_flow, and the downstream PID has its own
+  output clamp.
 
-  输入：
-    wild_flow REAL  主动流量（不受本回路控制的"野"流量）
-    ratio     REAL  比值
-    ratio_min REAL  比值下限
-    ratio_max REAL  比值上限
-    bias      REAL  偏置（工程单位）
-  输出：
-    sp        REAL  从动回路设定值
+  Inputs:
+    wild_flow REAL  leading flow (the "wild" flow not controlled by this loop)
+    ratio     REAL  ratio
+    ratio_min REAL  ratio low limit
+    ratio_max REAL  ratio high limit
+    bias      REAL  bias (engineering units)
+  Outputs:
+    sp        REAL  follower-loop setpoint
 *)
 FUNCTION_BLOCK FB_RATIO
   VAR_INPUT

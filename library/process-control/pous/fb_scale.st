@@ -1,23 +1,24 @@
 (*
-  FB_SCALE — 线性量程变换：原始计数值 → 工程单位，含 NE43 风格断线提示。
+  FB_SCALE — linear span conversion: raw counts -> engineering units, with NE43-style open-circuit flag.
 
-  用途：模拟量输入标定。例如 4-20 mA 采样为原始计数（S7 风格 5530..27648），
-  变换为 0..100 % 或 0..5 m 等工程值。
+  Purpose: analog input scaling. For example, a 4-20 mA signal sampled as raw
+  counts (S7-style 5530..27648) is converted to an engineering value such as
+  0..100 % or 0..5 m.
 
-  公式：out := out_min + (raw - raw_min) * (out_max - out_min) / span
-        其中 span = MAX(raw_max - raw_min, 1e-6)（内联 IF 实现，防除零）。
-  假定 raw_max > raw_min（正向量程）。
+  Formula: out := out_min + (raw - raw_min) * (out_max - out_min) / span
+           where span = MAX(raw_max - raw_min, 1e-6) (inline IF, divide-by-zero guard).
+  Assumes raw_max > raw_min (forward span).
 
-  输入：
-    raw      REAL  原始计数值（如 AI 通道原值）
-    raw_min  REAL  量程下限对应的原始值（4 mA 点）
-    raw_max  REAL  量程上限对应的原始值（20 mA 点）
-    out_min  REAL  工程量程下限
-    out_max  REAL  工程量程上限
-    clamp    BOOL  TRUE 时输出钳位在 [out_min, out_max]（支持反向工程量程）
-  输出：
-    out      REAL  工程值
-    fault    BOOL  原始值越界 >5% 量程（NE43 风格断线/超限提示，不锁存）
+  Inputs:
+    raw      REAL  raw count value (e.g. AI channel raw value)
+    raw_min  REAL  raw value at span low (4 mA point)
+    raw_max  REAL  raw value at span high (20 mA point)
+    out_min  REAL  engineering span low
+    out_max  REAL  engineering span high
+    clamp    BOOL  TRUE clamps output to [out_min, out_max] (reverse engineering span supported)
+  Outputs:
+    out      REAL  engineering value
+    fault    BOOL  raw value out of range >5% of span (NE43-style open-circuit/over-range flag, not latched)
 *)
 FUNCTION_BLOCK FB_SCALE
   VAR_INPUT
@@ -39,13 +40,13 @@ FUNCTION_BLOCK FB_SCALE
     hi     : REAL;
   END_VAR
 
-  (* span = MAX(raw_max - raw_min, 1e-6) — 内联 IF 防除零 *)
+  (* span = MAX(raw_max - raw_min, 1e-6) — inline IF, divide-by-zero guard *)
   span := raw_max - raw_min;
   IF span < 0.000001 THEN
     span := 0.000001;
   END_IF;
 
-  (* NE43 风格越界判定：超出原始量程 5% 以上视为断线/故障 *)
+  (* NE43-style out-of-range test: more than 5% beyond raw span = open-circuit/fault *)
   margin := 0.05 * span;
   fault := (raw < raw_min - margin) OR (raw > raw_max + margin);
 

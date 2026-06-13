@@ -1,32 +1,35 @@
 (*
-  FB_MID3 — 三取中表决（median select / 2oo3 模拟量表决）。
+  FB_MID3 — median select / 2oo3 analog voting.
 
-  ≈ 标准三取中/冗余测量表决块（median selector，2oo3 voting），
-  冗余变送器信号选择的惯用块。
+  ~ Standard median-select / redundant-measurement voting block (median selector,
+  2oo3 voting), the customary block for redundant-transmitter signal selection.
 
-  用途：三冗余变送器取中（剔除单点漂移/跳变）、双冗余取均、
-  关键测量的坏值降级处理（配 FB_SCALE 的 fault 作 good_x）。
-  行为（按好通道数 n_good 降级）：
-    3 好 → 取中值（天然剔除单通道漂移）；
-    2 好 → 取两好通道均值；
-    1 好 → 直通该通道；
-    0 好 → out 保持上一拍值，q_fail = TRUE（电平，非锁存）。
-    偏差监视：dev_max > 0 时，任意两个好通道之差 > dev_max → q_dev
-    （提示冗余通道间漂移拉大，该校验变送器了；dev_max <= 0 关闭监视）。
-    good_x 接坏值判定（变送器断线/超量程，如 FB_SCALE.fault 取反），
-    默认 TRUE = 全好。
-    注意：首拍即 0 好时 out 为初值 0（无历史可保持）；q_fail 期间的
-    保持值是"最后一次有好通道时的表决值"。
+  Purpose: median of three redundant transmitters (rejects single-point drift/jump),
+  average of dual redundancy, bad-value degradation of critical measurements (pair
+  with the inverse of FB_SCALE fault as good_x).
+  Behavior (degrades by the number of good channels n_good):
+    3 good -> take the median (naturally rejects single-channel drift);
+    2 good -> take the average of the two good channels;
+    1 good -> pass that channel through;
+    0 good -> out holds the previous scan's value, q_fail = TRUE (level, not latched).
+    Deviation monitor: when dev_max > 0, the difference between any two good channels
+    > dev_max -> q_dev (signals that drift between redundant channels has widened and
+    a transmitter check is due; dev_max <= 0 disables the monitor).
+    good_x takes the bad-value decision (transmitter open-circuit/over-range, e.g. the
+    inverse of FB_SCALE.fault), defaulting to TRUE = all good.
+    Note: when there are 0 good on the very first scan, out is its initial value 0 (no
+    history to hold); the held value during q_fail is "the voted value from the last
+    time a good channel existed".
 
-  输入：
-    a, b, c                REAL  三路冗余测量
-    good_a, good_b, good_c BOOL  各路有效（默认 TRUE；FALSE = 剔除）
-    dev_max                REAL  好通道间偏差监视限值（<= 0 = 关闭）
-  输出：
-    out    REAL  表决输出（0 好时保持）
-    n_good REAL  当前好通道数 0..3
-    q_dev  BOOL  好通道间偏差超限
-    q_fail BOOL  全部通道失效（输出处于保持）
+  Inputs:
+    a, b, c                REAL  three redundant measurements
+    good_a, good_b, good_c BOOL  per-channel validity (default TRUE; FALSE = excluded)
+    dev_max                REAL  deviation-monitor limit between good channels (<= 0 = disabled)
+  Outputs:
+    out    REAL  voted output (held when 0 good)
+    n_good REAL  current number of good channels 0..3
+    q_dev  BOOL  deviation between good channels over limit
+    q_fail BOOL  all channels failed (output is in hold)
 *)
 FUNCTION_BLOCK FB_MID3
   VAR_INPUT
@@ -58,7 +61,7 @@ FUNCTION_BLOCK FB_MID3
 
   q_fail := n_good <= 0.0;
 
-  (* 偏差监视：任意两个好通道差超 dev_max（内联 IF 替代 ABS，库惯例） *)
+  (* Deviation monitor: any two good channels differ by more than dev_max (inline IF instead of ABS, library convention) *)
   q_dev := FALSE;
   IF dev_max > 0.0 THEN
     IF good_a AND good_b THEN
@@ -79,7 +82,7 @@ FUNCTION_BLOCK FB_MID3
   END_IF;
 
   IF n_good >= 3.0 THEN
-    (* 三好：取中值 *)
+    (* 3 good: take the median *)
     IF (a >= b AND a <= c) OR (a <= b AND a >= c) THEN
       out := a;
     ELSIF (b >= a AND b <= c) OR (b <= a AND b >= c) THEN
@@ -88,7 +91,7 @@ FUNCTION_BLOCK FB_MID3
       out := c;
     END_IF;
   ELSIF n_good >= 2.0 THEN
-    (* 两好：取均值 *)
+    (* 2 good: take the average *)
     IF NOT good_a THEN
       out := (b + c) / 2.0;
     ELSIF NOT good_b THEN
@@ -97,7 +100,7 @@ FUNCTION_BLOCK FB_MID3
       out := (a + b) / 2.0;
     END_IF;
   ELSIF n_good >= 1.0 THEN
-    (* 一好：直通 *)
+    (* 1 good: pass-through *)
     IF good_a THEN
       out := a;
     ELSIF good_b THEN
@@ -106,5 +109,5 @@ FUNCTION_BLOCK FB_MID3
       out := c;
     END_IF;
   END_IF;
-  (* 0 好：out 保持上一拍值，q_fail 提示 *)
+  (* 0 good: out holds the previous scan's value, q_fail signals it *)
 END_FUNCTION_BLOCK

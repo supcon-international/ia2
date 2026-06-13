@@ -1,27 +1,29 @@
 (*
-  FB_ALT2 — 双阀（双设备）定时轮换器，带双外部联锁。
+  FB_ALT2 — dual-valve (dual-device) timed rotator, with two external permissives.
 
-  用途：两路分料阀/双泵按固定周期轮换运行，磨损均衡。
-  例：除铁器 + 包装秤 双联锁分料：permissive1（除铁器运行）与
-  permissive2（包装秤就绪）任一失去 → 两阀同时关；联锁恢复后按
-  轮换计时继续（轮换选择保持，计时清零重计）。
+  Purpose: two diverter valves / two pumps rotating on a fixed period for wear balancing.
+  Example: dual-permissive diverting with an iron remover + a packing scale:
+  permissive1 (iron remover running) or permissive2 (packing scale ready) lost ->
+  both valves close at once; after the permissives recover, rotation continues by its
+  timer (the rotation selection is held, the timer is cleared and restarts).
 
-  行为：
-    ok := enable AND permissive1 AND permissive2。
-    NOT ok：q1 := FALSE，q2 := FALSE，轮换计时清零（选择位保持，
-    恢复后从上次选中的一路继续）。
-    ok：计时 dt_s 手工累加，到 swap_period_s 切换选择并清零计时；
-    q1/q2 互斥输出当前选中一路。swap_period_s <= 0 时不轮换（保持当前路）。
+  Behavior:
+    ok := enable AND permissive1 AND permissive2.
+    NOT ok: q1 := FALSE, q2 := FALSE, rotation timer cleared (the selection bit is held,
+    and after recovery continues from the last selected channel).
+    ok: the timer accumulates by dt_s manually, and at swap_period_s the selection
+    switches and the timer clears; q1/q2 output the currently selected channel mutually
+    exclusively. swap_period_s <= 0 means no rotation (hold the current channel).
 
-  输入：
-    enable        BOOL  使能
-    swap_period_s REAL  轮换周期 s
-    dt_s          REAL  采样周期 s
-    permissive1   BOOL  外部联锁 1（如除铁器运行）
-    permissive2   BOOL  外部联锁 2（如包装秤就绪）
-  输出：
-    q1 BOOL  一号阀输出
-    q2 BOOL  二号阀输出（与 q1 互斥；联锁失去时两者均 FALSE）
+  Inputs:
+    enable        BOOL  enable
+    swap_period_s REAL  rotation period s
+    dt_s          REAL  sample period s
+    permissive1   BOOL  external permissive 1 (e.g. iron remover running)
+    permissive2   BOOL  external permissive 2 (e.g. packing scale ready)
+  Outputs:
+    q1 BOOL  valve 1 output
+    q2 BOOL  valve 2 output (mutually exclusive with q1; both FALSE when a permissive is lost)
 *)
 FUNCTION_BLOCK FB_ALT2
   VAR_INPUT
@@ -37,14 +39,14 @@ FUNCTION_BLOCK FB_ALT2
   END_VAR
   VAR
     ok    : BOOL;
-    sel2  : BOOL; (* FALSE 选一号 / TRUE 选二号，停用期间保持 *)
-    run_t : REAL; (* 本路已运行时间 s，手工计时 *)
+    sel2  : BOOL; (* FALSE selects valve 1 / TRUE selects valve 2, held while disabled *)
+    run_t : REAL; (* this channel's elapsed run time s, manual timing *)
   END_VAR
 
   ok := enable AND permissive1 AND permissive2;
 
   IF NOT ok THEN
-    (* 任一联锁失去：两阀同关，计时清零，选择保持 *)
+    (* Any permissive lost: both valves close, timer cleared, selection held *)
     q1    := FALSE;
     q2    := FALSE;
     run_t := 0.0;

@@ -1,23 +1,25 @@
 (*
-  FB_LAG — 一阶惯性滤波（PT1 / 一阶滞后）。
+  FB_LAG — first-order lag filter (PT1 / first-order lag).
 
-  ≈ 标准一阶惯性滤波（PT1 / LAG），各主流平台标准库必备。
+  ~ Standard first-order lag filter (PT1 / LAG), a staple of every major platform's standard library.
 
-  用途：模拟量去噪、测量平滑、微分/变化率运算的前置滤波。
-  算法（后向欧拉离散，无条件稳定）：
+  Purpose: analog noise rejection, measurement smoothing, pre-filtering ahead of
+  derivative / rate-of-change computation.
+  Algorithm (backward-Euler discretization, unconditionally stable):
     out := out + dt_s / (t_s + dt_s) * (u - out)
-  说明：
-    t_s <= 0 → 直通（out := u）；dt_s <= 0 → 保持不动作；
-    reset 电平有效 → out := u（滤波器对中，无扰投运）；
-    首个扫描周期自动对中（out := u），避免从 0 缓慢爬升的投运冲击。
+  Notes:
+    t_s <= 0 -> pass-through (out := u); dt_s <= 0 -> hold (no action);
+    reset level-active -> out := u (filter alignment, bumpless startup);
+    the first scan auto-aligns (out := u) to avoid a startup transient
+    crawling up from 0.
 
-  输入：
-    u     REAL  输入
-    t_s   REAL  滤波时间常数 s（0 = 直通）
-    dt_s  REAL  采样周期 s
-    reset BOOL  复位/对中（电平有效：out 跟随 u）
-  输出：
-    out   REAL  滤波输出
+  Inputs:
+    u     REAL  input
+    t_s   REAL  filter time constant s (0 = pass-through)
+    dt_s  REAL  sample period s
+    reset BOOL  reset/align (level-active: out follows u)
+  Outputs:
+    out   REAL  filtered output
 *)
 FUNCTION_BLOCK FB_LAG
   VAR_INPUT
@@ -30,7 +32,7 @@ FUNCTION_BLOCK FB_LAG
     out : REAL;
   END_VAR
   VAR
-    init_done : BOOL; (* 首扫描对中标志 *)
+    init_done : BOOL; (* first-scan alignment flag *)
   END_VAR
 
   IF reset OR NOT init_done THEN
@@ -40,12 +42,12 @@ FUNCTION_BLOCK FB_LAG
   END_IF;
 
   IF t_s <= 0.0 THEN
-    out := u; (* 直通 *)
+    out := u; (* pass-through *)
     RETURN;
   END_IF;
 
   IF dt_s <= 0.0 THEN
-    RETURN; (* 采样周期非法：保持 *)
+    RETURN; (* invalid sample period: hold *)
   END_IF;
 
   out := out + dt_s / (t_s + dt_s) * (u - out);

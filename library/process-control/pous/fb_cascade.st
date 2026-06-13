@@ -1,27 +1,30 @@
 (*
-  FB_CASCADE — 级联耦合胶水（主回路输出 → 副回路 SP 映射 + 非级联跟踪回算）。
+  FB_CASCADE — cascade coupling glue (master output -> slave SP mapping + non-cascade tracking back-calculation).
 
-  ≈ 标准级联耦合块（cascade SP coupling / 主回路跟踪回算），
-  串级回路组态的惯用胶水：两台 PID 之间只差这一块。
+  ~ Standard cascade-coupling block (cascade SP coupling / master tracking
+  back-calculation), the customary glue for cascade-loop configuration: only this one
+  block sits between the two PIDs.
 
-  用途：串级回路组态（温度主回路 → 流量副回路之类），把主调输出
-  0..100% 映射到副回路 SP 工程量程，并在非级联时给主调供跟踪值，
-  保证 CAS 投/切无扰。
-  行为：
-    CAS（cas_on = TRUE）：
+  Purpose: cascade-loop configuration (temperature master -> flow slave, and the like),
+  mapping the master output 0..100% to the slave SP engineering span, and supplying the
+  master a tracking value when not in cascade so that putting CAS into/out of service is
+  bumpless.
+  Behavior:
+    CAS (cas_on = TRUE):
       slave_sp := sp_min + master_out / 100 * (sp_max - sp_min)
-      master_track := FALSE（主调正常调节）。
-    非 CAS：
-      slave_sp := slave_sp_local（操作员直接给副回路的本地 SP）；
-      master_track := TRUE，master_track_value :=
-        (slave_sp_now - sp_min) / (sp_max - sp_min) * 100，钳位 0..100
-      ——主调输出被强制为"当前副 SP 的等效百分比"，切回 CAS 的那一拍
-      slave_sp 不跳变（无扰切换）。
-      量程未组态（|sp_max - sp_min| < 1E-6）→ 跟踪值取 0（防除零）。
-    跟踪值每拍都计算（与模式无关），CAS 切除瞬间即有效。
-    纯组合逻辑，无内部状态。
+      master_track := FALSE (the master controls normally).
+    Non-CAS:
+      slave_sp := slave_sp_local (the operator's local SP given directly to the slave loop);
+      master_track := TRUE, master_track_value :=
+        (slave_sp_now - sp_min) / (sp_max - sp_min) * 100, clamped 0..100
+      -- the master output is forced to "the equivalent percentage of the current slave
+      SP", so on the scan that switches back to CAS slave_sp does not jump (bumpless transfer).
+      Span not configured (|sp_max - sp_min| < 1E-6) -> tracking value takes 0 (divide-by-zero guard).
+    The tracking value is computed every scan (independent of mode), so it is valid the
+    instant CAS is removed.
+    Pure combinational logic, no internal state.
 
-  接线（与两台 FB_PID 组级联；slave_sp_now 喂上一拍工作 SP）：
+  Wiring (cascading two FB_PID instances; slave_sp_now is fed the previous scan's working SP):
     casc(master_out := pid_master.out, cas_on := cas_enable,
          sp_min := 0.0, sp_max := 2000.0,
          slave_sp_local := op_sp, slave_sp_now := slave_sp_used);
@@ -31,17 +34,17 @@
                track_value := casc.master_track_value);
     pid_slave(pv := flow_pv, sp := slave_sp_used, ..., dt_s := scan_s);
 
-  输入：
-    master_out     REAL  主调输出 0..100 %
-    cas_on         BOOL  级联投入（FALSE = 副回路用本地 SP，主调跟踪）
-    sp_min         REAL  副回路 SP 量程下限（工程单位）
-    sp_max         REAL  副回路 SP 量程上限
-    slave_sp_local REAL  非级联时的副回路本地 SP
-    slave_sp_now   REAL  副回路当前工作 SP（喂上一拍 slave_sp，跟踪回算用）
-  输出：
-    slave_sp           REAL  副回路设定值（接 pid_slave.sp）
-    master_track       BOOL  主调跟踪命令（接 pid_master.track）
-    master_track_value REAL  主调跟踪值 0..100 %（接 pid_master.track_value）
+  Inputs:
+    master_out     REAL  master output 0..100 %
+    cas_on         BOOL  cascade enabled (FALSE = slave uses local SP, master tracks)
+    sp_min         REAL  slave SP span low (engineering units)
+    sp_max         REAL  slave SP span high
+    slave_sp_local REAL  slave-loop local SP when not in cascade
+    slave_sp_now   REAL  slave-loop current working SP (feed the previous scan's slave_sp, for the tracking back-calculation)
+  Outputs:
+    slave_sp           REAL  slave-loop setpoint (to pid_slave.sp)
+    master_track       BOOL  master tracking command (to pid_master.track)
+    master_track_value REAL  master tracking value 0..100 % (to pid_master.track_value)
 *)
 FUNCTION_BLOCK FB_CASCADE
   VAR_INPUT
@@ -58,12 +61,12 @@ FUNCTION_BLOCK FB_CASCADE
     master_track_value : REAL;
   END_VAR
   VAR
-    span : REAL; (* 副回路 SP 量程跨度 *)
+    span : REAL; (* slave-loop SP span width *)
   END_VAR
 
   span := sp_max - sp_min;
 
-  (* 跟踪值每拍计算：当前副 SP 的等效百分比（量程未组态取 0，防除零） *)
+  (* Tracking value computed every scan: the equivalent percentage of the current slave SP (span not configured -> 0, divide-by-zero guard) *)
   IF (span < 0.000001) AND (span > -0.000001) THEN
     master_track_value := 0.0;
   ELSE

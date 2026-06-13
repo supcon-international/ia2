@@ -1,39 +1,40 @@
 (*
-  FB_PV_HOLD — 坏值保持/替代（bad-PV hold / substitute）。
+  FB_PV_HOLD — bad-PV hold / substitute.
 
-  ≈ 标准坏值处理块（last-good hold / substitute value，含坏值
-  超时降级），测量信号进控制回路前的标准防线，各主流 DCS/PLC
-  的输入处理均有同类机制。
+  ~ Standard bad-value handling block (last-good hold / substitute value, including
+  bad-value timeout degradation), the standard line of defense before a measurement
+  enters a control loop; every major DCS/PLC input-processing chain has an equivalent
+  mechanism.
 
-  用途：变送器断线/超量程（如 FB_SCALE.fault、FB_MID3.q_fail 取反
-  作 good）时给下游回路一个可控的 PV：先保持最后好值渡过抖动，
-  超时后按组态保持/替代/跟随，并出 q_bad/q_timeout 供报警与
-  回路切手动逻辑使用。
+  Purpose: on transmitter open-circuit/over-range (e.g. FB_SCALE.fault, or the inverse
+  of FB_MID3.q_fail used as good), give the downstream loop a controlled PV: hold the
+  last good value first to ride out chatter, then on timeout hold/substitute/follow as
+  configured, while emitting q_bad/q_timeout for alarming and loop-to-manual logic.
 
-  行为：
-    good = TRUE：out := u，记忆最后好值，q_bad/q_timeout 清零，
-    坏值计时清零。
-    good = FALSE：q_bad := TRUE，坏值计时累加（手工 dt_s）：
-      未到 timeout_s：out := 最后好值（短时抖动按保持渡过）；
-      到 timeout_s（timeout_s = 0 立即）：q_timeout := TRUE，按 mode：
-        mode = 0：继续保持最后好值；
-        mode = 1：out := sub_value（替代值，如安全侧设定）；
-        mode = 2：out := u（跟随原值——只挂报警牌不干预，
-                  下游自行处置）。
-    首扫描即坏值时最后好值取当前 u（无更好历史）。
-    dt_s <= 0 → 坏值计时不推进（timeout_s > 0 时维持保持段）。
+  Behavior:
+    good = TRUE: out := u, remember the last good value, clear q_bad/q_timeout, clear
+    the bad-value timer.
+    good = FALSE: q_bad := TRUE, accumulate the bad-value timer (manual dt_s):
+      before timeout_s: out := last good value (short chatter rides through on hold);
+      at timeout_s (timeout_s = 0 immediately): q_timeout := TRUE, then by mode:
+        mode = 0: keep holding the last good value;
+        mode = 1: out := sub_value (substitute value, e.g. a safe-side setting);
+        mode = 2: out := u (follow the raw value -- just raise the alarm flag without
+                  intervening, downstream handles it).
+    When bad on the very first scan, the last good value takes the current u (no better history).
+    dt_s <= 0 -> the bad-value timer does not advance (when timeout_s > 0, the hold segment is maintained).
 
-  输入：
-    u         REAL  输入（原始 PV）
-    good      BOOL  输入有效（FALSE = 坏值；接质量位/断线判定取反）
-    mode      REAL  0 = 保持最后好值 / 1 = 替代值 / 2 = 跟随原值
-    sub_value REAL  替代值（mode = 1 用）
-    timeout_s REAL  坏值持续超时 s（0 = 立即按 mode 动作；> 0 先保持）
-    dt_s      REAL  采样周期 s
-  输出：
-    out       REAL  处理后的 PV
-    q_bad     BOOL  坏值中（电平）
-    q_timeout BOOL  坏值已超时（mode 已生效）
+  Inputs:
+    u         REAL  input (raw PV)
+    good      BOOL  input valid (FALSE = bad value; feed the inverse of a quality bit / open-circuit decision)
+    mode      REAL  0 = hold last good value / 1 = substitute value / 2 = follow raw value
+    sub_value REAL  substitute value (used by mode = 1)
+    timeout_s REAL  bad-value persistence timeout s (0 = act by mode immediately; > 0 hold first)
+    dt_s      REAL  sample period s
+  Outputs:
+    out       REAL  processed PV
+    q_bad     BOOL  in bad value (level)
+    q_timeout BOOL  bad value has timed out (mode in effect)
 *)
 FUNCTION_BLOCK FB_PV_HOLD
   VAR_INPUT
@@ -50,13 +51,13 @@ FUNCTION_BLOCK FB_PV_HOLD
     q_timeout : BOOL;
   END_VAR
   VAR
-    last_good : REAL; (* 最后好值 *)
-    bad_t     : REAL; (* 坏值持续累计时间 s *)
-    init_done : BOOL; (* 首扫描播种标志 *)
+    last_good : REAL; (* last good value *)
+    bad_t     : REAL; (* bad-value accumulated persistence time s *)
+    init_done : BOOL; (* first-scan seeding flag *)
   END_VAR
 
   IF NOT init_done THEN
-    last_good := u; (* 首扫描即坏值时也以当前 u 作保持值 *)
+    last_good := u; (* even when bad on the first scan, take the current u as the held value *)
     init_done := TRUE;
   END_IF;
 
@@ -71,7 +72,7 @@ FUNCTION_BLOCK FB_PV_HOLD
 
   q_bad := TRUE;
 
-  (* 超时前：保持最后好值（短时抖动渡过段） *)
+  (* Before timeout: hold the last good value (the segment that rides out short chatter) *)
   IF timeout_s > 0.0 THEN
     IF dt_s > 0.0 THEN
       bad_t := bad_t + dt_s;
@@ -83,13 +84,13 @@ FUNCTION_BLOCK FB_PV_HOLD
     END_IF;
   END_IF;
 
-  (* 超时（或 timeout_s = 0 立即）：按 mode 动作 *)
+  (* On timeout (or immediately when timeout_s = 0): act by mode *)
   q_timeout := TRUE;
   IF mode >= 1.5 THEN
-    out := u;         (* 2 = 跟随原值 *)
+    out := u;         (* 2 = follow raw value *)
   ELSIF mode >= 0.5 THEN
-    out := sub_value; (* 1 = 替代值 *)
+    out := sub_value; (* 1 = substitute value *)
   ELSE
-    out := last_good; (* 0 = 保持最后好值 *)
+    out := last_good; (* 0 = hold last good value *)
   END_IF;
 END_FUNCTION_BLOCK

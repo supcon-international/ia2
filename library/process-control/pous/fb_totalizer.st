@@ -1,19 +1,19 @@
 (*
-  FB_TOTALIZER — 流量累积器：m3/h 瞬时流量 → m3 累积量。
+  FB_TOTALIZER — flow totalizer: m3/h instantaneous flow -> m3 accumulated quantity.
 
-  用途：进水/进料流量累计、班产/批量计量。
-  实例可由调用方放在 VAR RETAIN 块下，使 total 随实例一起断电保持
-  （IA2 将 RETAIN 变量快照到 state/retain.json）。
+  Purpose: feed-water / feed-flow totalizing, shift/batch metering.
+  The caller may place the instance under VAR RETAIN so that total is retained with the
+  instance across power loss (IA2 snapshots RETAIN variables to state/retain.json).
 
-  公式：total := total + flow * dt_s / 3600.0（reset 优先，复位周期不累加）。
-  说明：flow 为负时照常累加（允许双向计量）；dt_s <= 0 时不累加。
+  Formula: total := total + flow * dt_s / 3600.0 (reset takes priority, no accumulation during a reset scan).
+  Note: a negative flow accumulates as usual (bidirectional metering allowed); dt_s <= 0 does not accumulate.
 
-  输入：
-    flow  REAL  瞬时流量 m3/h
-    dt_s  REAL  采样周期 s
-    reset BOOL  累积清零（电平有效，优先于累加）
-  输出：
-    total REAL  累积量 m3
+  Inputs:
+    flow  REAL  instantaneous flow m3/h
+    dt_s  REAL  sample period s
+    reset BOOL  clear the total (level-active, takes priority over accumulation)
+  Outputs:
+    total REAL  accumulated quantity m3
 *)
 FUNCTION_BLOCK FB_TOTALIZER
   VAR_INPUT

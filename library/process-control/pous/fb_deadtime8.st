@@ -1,34 +1,38 @@
 (*
-  FB_DEADTIME8 — 纯滞后（dead time / transport delay），8 标量抽头 + 线性插值。
+  FB_DEADTIME8 — dead time / transport delay, 8 scalar taps + linear interpolation.
 
-  ≈ 标准纯滞后块（dead time / PTt / transport delay），对象仿真与
-  前馈动态补偿（Smith 预估类结构）的惯用块。
+  ~ Standard dead-time block (dead time / PTt / transport delay), the customary block
+  for plant simulation and feedforward dynamic compensation (Smith-predictor-type structures).
 
-  用途：对象仿真（与 FB_LAG 串联即组成一阶惯性+纯滞后 FOPDT 对象）、
-  前馈通路的传输延迟匹配、皮带/管道输送类测量的时间对齐。
-  行为：
-    抽头链 z1..z8（z1 最新、z8 最老），抽样周期 = t_delay_s / 8：
-    相位 phase_s 以 dt_s 手工累加，每经过一个抽样周期整链移位一次
-    （z8←z7←…←z1←u）；一拍最多移 8 次（8 次后整链已被 u 充满，
-    WHILE 有界、扫描确定性）。
-    输出在最老两个抽头间按相位分数线性插值：
+  Purpose: plant simulation (in series with FB_LAG it forms a first-order-lag-plus-dead-time
+  FOPDT plant), transport-delay matching in a feedforward path, time alignment of
+  belt/pipe-conveying measurements.
+  Behavior:
+    Tap chain z1..z8 (z1 newest, z8 oldest), sampling interval = t_delay_s / 8:
+    the phase phase_s accumulates by dt_s manually, and each time a sampling interval
+    elapses the whole chain shifts once (z8<-z7<-...<-z1<-u); at most 8 shifts per scan
+    (after 8 the whole chain has been filled by u, so the WHILE is bounded and
+    scan-deterministic).
+    The output interpolates linearly between the two oldest taps by the phase fraction:
       out := z8 + (z7 - z8) * phase_s / period_s
-    ——阶跃输入以一个抽样周期的斜坡渡过，输出连续无台阶。
-    分辨率 = t_delay_s / 8：8 抽头是无数组方言下的折衷，延迟时间的
-    阶梯/插值误差约为延迟的 1/8——回路整定够用；要更细分辨率请串联
-    两级本块（各承担一半延迟）。
-    t_delay_s <= 0 → 直通（out := u），抽头随 u 充满——延迟在线投用
-    的那一刻从当前值平滑起步（无扰）。
-    reset / 首扫描：全部抽头充 u，out := u，相位清零。
-    dt_s <= 0 → 保持不动作。
+    -- a step input is traversed as a ramp over one sampling interval, so the output is
+       continuous with no steps.
+    Resolution = t_delay_s / 8: 8 taps is the compromise in an array-free dialect; the
+    staircase/interpolation error of the delay time is about 1/8 of the delay --
+    adequate for loop tuning; for finer resolution, put two of these blocks in series
+    (each carrying half the delay).
+    t_delay_s <= 0 -> pass-through (out := u), and the taps fill with u -- when the
+    delay is put into service online it starts smoothly from the current value (bumpless).
+    reset / first scan: all taps filled with u, out := u, phase cleared.
+    dt_s <= 0 -> hold (no action).
 
-  输入：
-    u         REAL  输入
-    t_delay_s REAL  纯滞后时间 s（<= 0 直通；在线可改，按新周期推进）
-    dt_s      REAL  采样周期 s
-    reset     BOOL  复位（电平有效：抽头充 u，输出跟随 u）
-  输出：
-    out REAL  延迟后的输出（线性插值，连续）
+  Inputs:
+    u         REAL  input
+    t_delay_s REAL  dead time s (<= 0 pass-through; changeable online, advances at the new interval)
+    dt_s      REAL  sample period s
+    reset     BOOL  reset (level-active: taps filled with u, output follows u)
+  Outputs:
+    out REAL  delayed output (linearly interpolated, continuous)
 *)
 FUNCTION_BLOCK FB_DEADTIME8
   VAR_INPUT
@@ -41,7 +45,7 @@ FUNCTION_BLOCK FB_DEADTIME8
     out : REAL;
   END_VAR
   VAR
-    z1        : REAL; (* 抽头链：z1 最新 … z8 最老（无数组方言的标量形式） *)
+    z1        : REAL; (* tap chain: z1 newest ... z8 oldest (scalar form for the array-free dialect) *)
     z2        : REAL;
     z3        : REAL;
     z4        : REAL;
@@ -49,10 +53,10 @@ FUNCTION_BLOCK FB_DEADTIME8
     z6        : REAL;
     z7        : REAL;
     z8        : REAL;
-    phase_s   : REAL; (* 当前抽样周期内相位，手工计时 *)
-    period_s  : REAL; (* 抽样周期 = t_delay_s / 8 *)
-    shifts    : REAL; (* 本拍移位计数（封顶 8：整链已饱和） *)
-    init_done : BOOL; (* 首扫描对中标志 *)
+    phase_s   : REAL; (* phase within the current sampling interval, manual timing *)
+    period_s  : REAL; (* sampling interval = t_delay_s / 8 *)
+    shifts    : REAL; (* shift count this scan (capped at 8: chain already saturated) *)
+    init_done : BOOL; (* first-scan alignment flag *)
   END_VAR
 
   IF reset OR NOT init_done THEN
@@ -71,7 +75,7 @@ FUNCTION_BLOCK FB_DEADTIME8
   END_IF;
 
   IF t_delay_s <= 0.0 THEN
-    (* 直通；抽头随 u 充满，延迟在线投用时从当前值无扰起步 *)
+    (* Pass-through; taps fill with u, so when the delay is put into service online it starts bumplessly from the current value *)
     z1 := u;
     z2 := u;
     z3 := u;
@@ -86,14 +90,15 @@ FUNCTION_BLOCK FB_DEADTIME8
   END_IF;
 
   IF dt_s <= 0.0 THEN
-    RETURN; (* 采样周期非法：保持 *)
+    RETURN; (* invalid sample period: hold *)
   END_IF;
 
   period_s := t_delay_s / 8.0;
   phase_s := phase_s + dt_s;
 
-  (* 每经过一个抽样周期整链移位一次；封顶 8 次/拍（dt_s 跨多个周期时
-     补移，8 次后整链已被 u 充满，再移无意义）——WHILE 有界 *)
+  (* Shift the whole chain once per elapsed sampling interval; capped at 8/scan (when
+     dt_s spans several intervals, catch up; after 8 the chain is full of u and further
+     shifts are meaningless) -- the WHILE is bounded *)
   shifts := 0.0;
   WHILE (phase_s >= period_s) AND (shifts < 8.0) DO
     z8 := z7;
@@ -108,9 +113,9 @@ FUNCTION_BLOCK FB_DEADTIME8
     shifts := shifts + 1.0;
   END_WHILE;
   IF phase_s >= period_s THEN
-    phase_s := 0.0; (* 退化情形 dt_s >= t_delay_s：整链已是 u，相位清零防积累 *)
+    phase_s := 0.0; (* degenerate case dt_s >= t_delay_s: chain is already u, clear phase to prevent accumulation *)
   END_IF;
 
-  (* 最老两抽头间按相位分数插值：移位瞬间 frac=0 → out=z8(旧 z7)，连续 *)
+  (* Interpolate between the two oldest taps by phase fraction: at the shift instant frac=0 -> out=z8(old z7), continuous *)
   out := z8 + (z7 - z8) * phase_s / period_s;
 END_FUNCTION_BLOCK

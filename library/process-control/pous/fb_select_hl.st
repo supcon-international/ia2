@@ -1,21 +1,23 @@
 (*
-  FB_SELECT_HL — 高/低选择器（超驰选择）。
+  FB_SELECT_HL — high/low selector (override selection).
 
-  ≈ 高/低选择器（override selector），超驰控制惯用块。
+  ~ High/low selector (override selector), the customary block for override control.
 
-  用途：超驰（override）控制——两个控制器输出取高/取低共用一个执行机构
-  （如压缩机防喘振超驰、压力超驰温度回路）；亦可做双变送器取高/取低。
+  Purpose: override control -- two controller outputs taking the higher/lower for a
+  shared actuator (e.g. compressor anti-surge override, a pressure-override-temperature
+  loop); can also take the higher/lower of dual transmitters.
 
-  行为：select_high = TRUE 取大者，FALSE 取小者；
-  a_selected 指示当前输出取自 a（相等时判 a 选中，指示不抖动）。
+  Behavior: select_high = TRUE takes the greater, FALSE takes the lesser;
+  a_selected indicates the output currently comes from a (on a tie, a is deemed
+  selected so the indication does not chatter).
 
-  输入：
-    a           REAL  通道 a（常接主控制器输出）
-    b           REAL  通道 b（常接超驰控制器输出）
-    select_high BOOL  TRUE = 高选 / FALSE = 低选
-  输出：
-    out        REAL  选中值
-    a_selected BOOL  TRUE = 当前输出取自 a
+  Inputs:
+    a           REAL  channel a (typically the primary controller output)
+    b           REAL  channel b (typically the override controller output)
+    select_high BOOL  TRUE = high select / FALSE = low select
+  Outputs:
+    out        REAL  selected value
+    a_selected BOOL  TRUE = the output currently comes from a
 *)
 FUNCTION_BLOCK FB_SELECT_HL
   VAR_INPUT

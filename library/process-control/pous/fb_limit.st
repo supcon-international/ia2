@@ -1,24 +1,24 @@
 (*
-  FB_LIMIT — 值限幅器（高低钳位 + 越限指示）。
+  FB_LIMIT — value limiter (high-low clamp + limit indication).
 
-  ≈ 标准限幅器（limiter / high-low clamp），各主流平台标准库必备。
+  ~ Standard limiter (limiter / high-low clamp), a staple of every major platform's standard library.
 
-  用途：设定值/输出值安全钳位、串级外环输出限制、操作员输入合法化、
-  下游裸执行器的最后一道保护。
-  行为（纯组合逻辑，无内部状态）：
-    out := u 钳位到 [lo, hi]；q_hi / q_lo 指示正在钳位（u 越上/下限）。
-    组态错误 lo > hi → out := (lo + hi) / 2，且 q_hi 与 q_lo 同时为 TRUE
-    ——双越限位同亮在物理上不可能出现，专作组态错误信号，便于上位
-    报警捕捉。
+  Purpose: safe clamping of setpoint/output values, cascade outer-loop output limiting,
+  operator-input validation, the last line of protection for a bare downstream actuator.
+  Behavior (pure combinational logic, no internal state):
+    out := u clamped to [lo, hi]; q_hi / q_lo indicate clamping in progress (u over the high/low limit).
+    Configuration error lo > hi -> out := (lo + hi) / 2, with q_hi and q_lo both TRUE
+    -- both limit flags lit at once cannot occur physically and serves purely as a
+    configuration-error signal, easy for a supervisory alarm to catch.
 
-  输入：
-    u  REAL  输入
-    lo REAL  下限
-    hi REAL  上限（假定 lo <= hi；设反触发组态错误信号）
-  输出：
-    out  REAL  钳位输出
-    q_hi BOOL  越上限（正在按 hi 钳位）
-    q_lo BOOL  越下限（正在按 lo 钳位；与 q_hi 同时 TRUE = lo > hi 组态错误）
+  Inputs:
+    u  REAL  input
+    lo REAL  low limit
+    hi REAL  high limit (assumes lo <= hi; reversed triggers the configuration-error signal)
+  Outputs:
+    out  REAL  clamped output
+    q_hi BOOL  over high limit (clamping at hi)
+    q_lo BOOL  over low limit (clamping at lo; TRUE together with q_hi = lo > hi configuration error)
 *)
 FUNCTION_BLOCK FB_LIMIT
   VAR_INPUT
@@ -33,7 +33,7 @@ FUNCTION_BLOCK FB_LIMIT
   END_VAR
 
   IF lo > hi THEN
-    (* 组态错误：取中值输出，双越限位同亮作错误信号 *)
+    (* Configuration error: output the midpoint, both limit flags lit as the error signal *)
     out := (lo + hi) / 2.0;
     q_hi := TRUE;
     q_lo := TRUE;

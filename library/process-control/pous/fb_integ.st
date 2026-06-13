@@ -1,34 +1,36 @@
 (*
-  FB_INTEG — 通用积分器（带保持/复位/置数与输出钳位）。
+  FB_INTEG — general-purpose integrator (with hold/reset/preset and output clamp).
 
-  ≈ 标准积分块（integrator），各主流平台标准库必备。
+  ~ Standard integrator block, a staple of every major platform's standard library.
 
-  用途：偏差积分（℃·s 之类的累计量监视）、简单物料/能量累计、
-  对象仿真中的积分环节、自定义控制算法的积分通路。
-  与 FB_TOTALIZER 的区别：TOTALIZER 是固定 /3600 的流量累积专用块；
-  本块为通用积分 out := out + k * u * dt_s，带 hold/preset/钳位。
-  行为（命令优先级 reset > preset > hold > 积分）：
-    reset  电平有效：out := 0，越限位清零；
-    preset 电平有效：out := preset_value（随后照常钳位）；
-    hold   电平有效：暂停积分，输出保持（钳位与越限位照常刷新）；
-    其余：out := out + k * u * dt_s，钳位到 [out_min, out_max]。
-    q_hi / q_lo 指示输出贴上/下限（抗饱和：贴限后反向输入立即退出）。
-    dt_s <= 0 → 本拍保持不动作（reset/preset 为电平命令，不受此限）。
+  Purpose: deviation integration (monitoring accumulated quantities such as degC*s),
+  simple material/energy totals, the integral element in plant simulation, the
+  integral path of a custom control algorithm.
+  Difference from FB_TOTALIZER: TOTALIZER is a flow-totalizing block fixed at /3600;
+  this block is general integration out := out + k * u * dt_s, with hold/preset/clamp.
+  Behavior (command priority reset > preset > hold > integrate):
+    reset  level-active: out := 0, limit flags cleared;
+    preset level-active: out := preset_value (then clamped as usual);
+    hold   level-active: integration paused, output held (clamp and limit flags still refresh);
+    otherwise: out := out + k * u * dt_s, clamped to [out_min, out_max].
+    q_hi / q_lo indicate the output at the high/low limit (anti-windup: at a limit, a
+    reverse input exits immediately).
+    dt_s <= 0 -> hold this scan (reset/preset are level commands, not subject to this).
 
-  输入：
-    u            REAL  被积输入
-    k            REAL  积分增益（1/s 量纲由调用方定义）
-    dt_s         REAL  采样周期 s
-    hold         BOOL  暂停积分（电平有效）
-    reset        BOOL  复位到 0（电平有效，最高优先）
-    preset       BOOL  置数（电平有效，优先于 hold）
-    preset_value REAL  置数值
-    out_min      REAL  输出下限（默认 -1.0E38 ≈ 不限）
-    out_max      REAL  输出上限（默认 +1.0E38 ≈ 不限）
-  输出：
-    out  REAL  积分输出（钳位）
-    q_hi BOOL  贴上限
-    q_lo BOOL  贴下限
+  Inputs:
+    u            REAL  integrand input
+    k            REAL  integral gain (1/s; dimension defined by the caller)
+    dt_s         REAL  sample period s
+    hold         BOOL  pause integration (level-active)
+    reset        BOOL  reset to 0 (level-active, highest priority)
+    preset       BOOL  preset (level-active, takes priority over hold)
+    preset_value REAL  preset value
+    out_min      REAL  output low limit (default -1.0E38 ~ unlimited)
+    out_max      REAL  output high limit (default +1.0E38 ~ unlimited)
+  Outputs:
+    out  REAL  integral output (clamped)
+    q_hi BOOL  at high limit
+    q_lo BOOL  at low limit
 *)
 FUNCTION_BLOCK FB_INTEG
   VAR_INPUT
@@ -56,14 +58,14 @@ FUNCTION_BLOCK FB_INTEG
   END_IF;
 
   IF preset THEN
-    out := preset_value; (* 置数后照常走下方钳位 *)
+    out := preset_value; (* after preset, fall through to the clamp below as usual *)
   ELSIF NOT hold THEN
     IF dt_s <= 0.0 THEN
-      RETURN; (* 采样周期非法：保持 *)
+      RETURN; (* invalid sample period: hold *)
     END_IF;
     out := out + k * u * dt_s;
   END_IF;
-  (* hold 电平期间：不积分，仅照常刷新钳位与越限位 *)
+  (* While hold is active: no integration, just refresh the clamp and limit flags as usual *)
 
   q_hi := FALSE;
   q_lo := FALSE;

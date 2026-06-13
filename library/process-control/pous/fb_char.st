@@ -1,25 +1,28 @@
 (*
-  FB_CHAR — 折线信号特性化（分段线性插值，最多 8 点）。
+  FB_CHAR — piecewise-linear signal characterization (linear interpolation, up to 8 points).
 
-  ≈ 折线信号特性化（piecewise-linear characterizer），阀特性线性化/非线性传感器惯用块。
+  ~ Piecewise-linear characterizer, the customary block for valve-characteristic linearization / nonlinear sensors.
 
-  用途：阀特性线性化（等百分比阀开度补偿）、非线性传感器标定、
-  料位-体积换算等任意单调折线变换。
+  Purpose: valve-characteristic linearization (equal-percentage valve-opening
+  compensation), nonlinear sensor calibration, level-to-volume conversion, and any
+  monotonic piecewise-linear transform.
 
-  行为：
-    取前 n 个点 (x1,y1)..(xn,yn)（n 钳位到 2..8），u 落在段 (xk, xk+1] 内
-    线性插值；u <= x1 → out := y1；u >= xn → out := yn（两端钳位）。
-    约定：x 必须升序（本块不做硬校验；遇到非升序退化段取右端点 y）。
-    本方言 ARRAY 在 FUNCTION_BLOCK 作用域不能 codegen（见 README 方言坑），
-    故采用标量点对 x1..x8 / y1..y8 + n 的形式。
+  Behavior:
+    Take the first n points (x1,y1)..(xn,yn) (n clamped to 2..8); interpolate
+    linearly when u falls in segment (xk, xk+1]; u <= x1 -> out := y1; u >= xn ->
+    out := yn (clamped at both ends).
+    Convention: x must be ascending (no hard check here; a degenerate non-ascending
+    segment yields the right-end y).
+    In this dialect an ARRAY in FUNCTION_BLOCK scope cannot be codegen'd (see the
+    README dialect gotchas), so scalar point pairs x1..x8 / y1..y8 + n are used.
 
-  输入：
-    u          REAL  输入
-    n          INT   使用点数 2..8（自动钳位）
-    x1..x8     REAL  折线 x 坐标（升序）
-    y1..y8     REAL  折线 y 坐标
-  输出：
-    out        REAL  特性化输出（两端钳位）
+  Inputs:
+    u          REAL  input
+    n          INT   number of points in use 2..8 (auto-clamped)
+    x1..x8     REAL  breakpoint x coordinates (ascending)
+    y1..y8     REAL  breakpoint y coordinates
+  Outputs:
+    out        REAL  characterized output (clamped at both ends)
 *)
 FUNCTION_BLOCK FB_CHAR
   VAR_INPUT
@@ -46,10 +49,10 @@ FUNCTION_BLOCK FB_CHAR
     out : REAL;
   END_VAR
   VAR
-    nn    : INT;  (* 钳位后的点数 *)
-    xa    : REAL; (* 选中段左端 *)
+    nn    : INT;  (* clamped point count *)
+    xa    : REAL; (* selected segment left end *)
     ya    : REAL;
-    xb    : REAL; (* 选中段右端 *)
+    xb    : REAL; (* selected segment right end *)
     yb    : REAL;
     span  : REAL;
     found : BOOL;
@@ -62,13 +65,13 @@ FUNCTION_BLOCK FB_CHAR
     nn := 8;
   END_IF;
 
-  (* 低端钳位 *)
+  (* Low-end clamp *)
   IF u <= x1 THEN
     out := y1;
     RETURN;
   END_IF;
 
-  (* 段查找：u 落入 (xk, xk+1] 取该段；只看前 nn 个点 *)
+  (* Segment search: take the segment u falls into, (xk, xk+1]; only the first nn points are considered *)
   found := FALSE;
   IF u <= x2 THEN
     xa := x1; ya := y1; xb := x2; yb := y2; found := TRUE;
@@ -91,12 +94,12 @@ FUNCTION_BLOCK FB_CHAR
     IF span > 0.0 THEN
       out := ya + (u - xa) * (yb - ya) / span;
     ELSE
-      out := yb; (* 退化段（x 未升序）：取右端点 *)
+      out := yb; (* degenerate segment (x not ascending): take the right end *)
     END_IF;
     RETURN;
   END_IF;
 
-  (* 高端钳位：u 大于第 nn 点 *)
+  (* High-end clamp: u greater than the nn-th point *)
   CASE nn OF
     3:
       out := y3;

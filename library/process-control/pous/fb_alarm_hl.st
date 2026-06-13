@@ -1,32 +1,34 @@
 (*
-  FB_ALARM_HL — 四级高低报警（H/L/HH/LL），带死区、延时与简化 ISA-18.2 确认锁存。
+  FB_ALARM_HL — four-level high/low alarm (H/L/HH/LL) with deadband, delay and simplified ISA-18.2 acknowledge latch.
 
-  用途：液位/温度/压力等模拟量的 高/低/高高/低低 报警。
-  例：碳化塔液位 LT 报警，HH 联锁停进料。
+  Purpose: high/low/high-high/low-low alarms for analog values such as level/temperature/pressure.
+  Example: a vessel level LT alarm, with HH interlocking the feed shutdown.
 
-  行为（每级相同，独立计时）：
-    1) 原始越限判定（带死区回差）：
-       高类：pv > sp 置位；pv < sp - deadband 复位。
-       低类：pv < sp 置位；pv > sp + deadband 复位。
-    2) 延时：越限条件连续保持 delay_s 后才触发（内部用 dt_s 手工累加计时，
-       不使用 TON 实例，便于离线测试与移植）。
-    3) 锁存（简化 ISA-18.2）：报警输出 = 触发条件 OR (已锁存 AND NOT ack)。
-       即条件存在时报警常在；条件消失后仍保持，直到 ack 确认才清除。
+  Behavior (same for each level, independently timed):
+    1) Raw limit decision (with deadband hysteresis):
+       High type: pv > sp sets; pv < sp - deadband resets.
+       Low type:  pv < sp sets; pv > sp + deadband resets.
+    2) Delay: the limit condition must persist for delay_s before tripping (internally
+       timed by manual dt_s accumulation, not a TON instance, for easy offline testing
+       and portability).
+    3) Latch (simplified ISA-18.2): alarm output = trip condition OR (latched AND NOT ack).
+       That is, while the condition exists the alarm stays on; after the condition
+       clears it is held until ack acknowledges and clears it.
 
-  输入：
-    pv        REAL  过程值
-    h_sp      REAL  高报设定
-    l_sp      REAL  低报设定
-    hh_sp     REAL  高高报设定
-    ll_sp     REAL  低低报设定
-    deadband  REAL  死区（回差，工程单位）
-    delay_s   REAL  报警延时 s（0 = 立即）
-    dt_s      REAL  采样周期 s
-    ack       BOOL  确认（电平有效）
-  输出：
-    h_alm / l_alm / hh_alm / ll_alm  BOOL  锁存后的报警输出
-    any_alm                          BOOL  任一报警
-    h_cond / l_cond / hh_cond / ll_cond BOOL 原始越限位（含死区，未延时未锁存）
+  Inputs:
+    pv        REAL  process value
+    h_sp      REAL  high alarm setpoint
+    l_sp      REAL  low alarm setpoint
+    hh_sp     REAL  high-high alarm setpoint
+    ll_sp     REAL  low-low alarm setpoint
+    deadband  REAL  deadband (hysteresis, engineering units)
+    delay_s   REAL  alarm delay s (0 = immediate)
+    dt_s      REAL  sample period s
+    ack       BOOL  acknowledge (level-active)
+  Outputs:
+    h_alm / l_alm / hh_alm / ll_alm  BOOL  latched alarm outputs
+    any_alm                          BOOL  any alarm
+    h_cond / l_cond / hh_cond / ll_cond BOOL raw limit flags (with deadband, undelayed, unlatched)
 *)
 FUNCTION_BLOCK FB_ALARM_HL
   VAR_INPUT
@@ -52,7 +54,7 @@ FUNCTION_BLOCK FB_ALARM_HL
     ll_cond : BOOL;
   END_VAR
   VAR
-    h_t     : REAL; (* 各级延时累加器，手工计时替代 TON *)
+    h_t     : REAL; (* per-level delay accumulator, manual timing in place of TON *)
     l_t     : REAL;
     hh_t    : REAL;
     ll_t    : REAL;
@@ -62,7 +64,7 @@ FUNCTION_BLOCK FB_ALARM_HL
     ll_trip : BOOL;
   END_VAR
 
-  (* ---- 高报 H ---- *)
+  (* ---- High alarm H ---- *)
   IF pv > h_sp THEN
     h_cond := TRUE;
   ELSIF pv < h_sp - deadband THEN
@@ -76,7 +78,7 @@ FUNCTION_BLOCK FB_ALARM_HL
   h_trip := h_cond AND (h_t >= delay_s);
   h_alm  := h_trip OR (h_alm AND NOT ack);
 
-  (* ---- 低报 L ---- *)
+  (* ---- Low alarm L ---- *)
   IF pv < l_sp THEN
     l_cond := TRUE;
   ELSIF pv > l_sp + deadband THEN
@@ -90,7 +92,7 @@ FUNCTION_BLOCK FB_ALARM_HL
   l_trip := l_cond AND (l_t >= delay_s);
   l_alm  := l_trip OR (l_alm AND NOT ack);
 
-  (* ---- 高高报 HH ---- *)
+  (* ---- High-high alarm HH ---- *)
   IF pv > hh_sp THEN
     hh_cond := TRUE;
   ELSIF pv < hh_sp - deadband THEN
@@ -104,7 +106,7 @@ FUNCTION_BLOCK FB_ALARM_HL
   hh_trip := hh_cond AND (hh_t >= delay_s);
   hh_alm  := hh_trip OR (hh_alm AND NOT ack);
 
-  (* ---- 低低报 LL ---- *)
+  (* ---- Low-low alarm LL ---- *)
   IF pv < ll_sp THEN
     ll_cond := TRUE;
   ELSIF pv > ll_sp + deadband THEN

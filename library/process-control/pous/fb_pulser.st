@@ -1,23 +1,24 @@
 (*
-  FB_PULSER — 周期脉冲发生器。
+  FB_PULSER — periodic pulse generator.
 
-  用途：料仓空气炮/气锤周期吹扫、周期润滑、心跳输出。
-  例：使能后每 period_s 秒输出一个 pulse_len_s 秒宽的脉冲（周期起点先出脉冲）。
+  Purpose: periodic air-cannon / air-hammer silo purging, periodic lubrication, heartbeat output.
+  Example: once enabled, output a pulse_len_s-wide pulse every period_s seconds (the pulse comes at the period start).
 
-  行为：
-    enable 时相位 phase_s 以 dt_s 手工累加；phase_s < pulse_len_s 期间 q := TRUE，
-    到 period_s 回卷（减法回卷，长期节拍不漂移）。
-    NOT enable 或参数非法（period_s/dt_s <= 0）时 q := FALSE 且相位清零
-    （重新使能从脉冲开始）。
-    pulse_len_s >= period_s 时 q 恒为 TRUE（按定义连续输出）。
+  Behavior:
+    while enabled, the phase phase_s accumulates by dt_s manually; q := TRUE while
+    phase_s < pulse_len_s, wrapping at period_s (subtraction wrap, so the long-term
+    cadence does not drift).
+    NOT enable or invalid parameters (period_s/dt_s <= 0) -> q := FALSE and phase cleared
+    (re-enabling starts from the pulse).
+    pulse_len_s >= period_s -> q is always TRUE (continuous output by definition).
 
-  输入：
-    enable      BOOL  使能
-    period_s    REAL  脉冲周期 s
-    pulse_len_s REAL  脉冲宽度 s
-    dt_s        REAL  采样周期 s
-  输出：
-    q BOOL  脉冲输出
+  Inputs:
+    enable      BOOL  enable
+    period_s    REAL  pulse period s
+    pulse_len_s REAL  pulse width s
+    dt_s        REAL  sample period s
+  Outputs:
+    q BOOL  pulse output
 *)
 FUNCTION_BLOCK FB_PULSER
   VAR_INPUT
@@ -30,7 +31,7 @@ FUNCTION_BLOCK FB_PULSER
     q : BOOL;
   END_VAR
   VAR
-    phase_s : REAL; (* 周期内相位 0..period_s，手工计时替代 TP/TON *)
+    phase_s : REAL; (* phase within the period 0..period_s, manual timing in place of TP/TON *)
   END_VAR
 
   IF NOT enable OR period_s <= 0.0 OR dt_s <= 0.0 THEN
@@ -39,11 +40,11 @@ FUNCTION_BLOCK FB_PULSER
     RETURN;
   END_IF;
 
-  (* 先按当前相位出脉冲（使能首周期立即为 TRUE），再推进相位 *)
+  (* Emit the pulse by the current phase first (TRUE immediately on the first enabled period), then advance the phase *)
   q := phase_s < pulse_len_s;
 
   phase_s := phase_s + dt_s;
   IF phase_s >= period_s THEN
-    phase_s := phase_s - period_s; (* 减法回卷，保持长期节拍 *)
+    phase_s := phase_s - period_s; (* subtraction wrap, keeps the long-term cadence *)
   END_IF;
 END_FUNCTION_BLOCK

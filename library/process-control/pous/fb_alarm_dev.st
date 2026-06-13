@@ -1,31 +1,31 @@
 (*
-  FB_ALARM_DEV — 偏差报警（pv 对 sp 的上/下偏差），死区 + 延时 + 确认锁存。
+  FB_ALARM_DEV — deviation alarm (pv over/under deviation from sp), deadband + delay + acknowledge latch.
 
-  ≈ 偏差报警（deviation alarm，上/下偏差），回路监视标配。
+  ~ Deviation alarm (over/under deviation), standard for loop monitoring.
 
-  用途：回路性能监视：控制偏差持续超限报警（阀卡死、负荷骤变、
-  整定失效、执行机构失灵）。
-  行为（沿用 FB_ALARM_HL 的死区+延时+锁存范式）：
-    dev := pv - sp。
-    上偏差：dev > dev_h 置位；dev < dev_h - deadband 复位。
-    下偏差：dev < -dev_l 置位；dev > -dev_l + deadband 复位（dev_l 传正数）。
-    各自连续保持 delay_s 后触发；输出 = 触发 OR (已锁存 AND NOT ack)
-    ——条件在则常报，条件消失后保持到确认。
+  Purpose: loop-performance monitoring: alarm on a control deviation that persistently
+  exceeds its limit (a stuck valve, an abrupt load change, lost tuning, a failed actuator).
+  Behavior (follows the FB_ALARM_HL deadband+delay+latch pattern):
+    dev := pv - sp.
+    Over deviation:  dev > dev_h sets; dev < dev_h - deadband resets.
+    Under deviation: dev < -dev_l sets; dev > -dev_l + deadband resets (dev_l supplied positive).
+    Each trips after persisting for delay_s; output = trip OR (latched AND NOT ack)
+    -- while the condition exists the alarm stays on, after it clears it is held until acknowledged.
 
-  输入：
-    pv       REAL  过程值
-    sp       REAL  设定值（接 FB_PID 同源 sp；若 PID 用了 sp_rate，
-                   建议接经斜坡后的实际工作 sp）
-    dev_h    REAL  上偏差限（pv 高出 sp 的允许量）
-    dev_l    REAL  下偏差限（pv 低于 sp 的允许量，传正数）
-    deadband REAL  死区（回差，工程单位）
-    delay_s  REAL  报警延时 s（0 = 立即）
-    dt_s     REAL  采样周期 s
-    ack      BOOL  确认（电平有效）
-  输出：
-    h_alm   BOOL  上偏差报警（锁存）
-    l_alm   BOOL  下偏差报警（锁存）
-    any_alm BOOL  任一偏差报警
+  Inputs:
+    pv       REAL  process value
+    sp       REAL  setpoint (feed the same sp source as FB_PID; if the PID uses sp_rate,
+                   prefer feeding the actual working sp after the ramp)
+    dev_h    REAL  over-deviation limit (allowed amount pv may exceed sp)
+    dev_l    REAL  under-deviation limit (allowed amount pv may fall below sp, supplied positive)
+    deadband REAL  deadband (hysteresis, engineering units)
+    delay_s  REAL  alarm delay s (0 = immediate)
+    dt_s     REAL  sample period s
+    ack      BOOL  acknowledge (level-active)
+  Outputs:
+    h_alm   BOOL  over-deviation alarm (latched)
+    l_alm   BOOL  under-deviation alarm (latched)
+    any_alm BOOL  any deviation alarm
 *)
 FUNCTION_BLOCK FB_ALARM_DEV
   VAR_INPUT
@@ -47,7 +47,7 @@ FUNCTION_BLOCK FB_ALARM_DEV
     dv     : REAL; (* pv - sp *)
     h_cond : BOOL;
     l_cond : BOOL;
-    h_t    : REAL; (* 延时累加器，手工计时替代 TON *)
+    h_t    : REAL; (* delay accumulator, manual timing in place of TON *)
     l_t    : REAL;
     h_trip : BOOL;
     l_trip : BOOL;
@@ -55,7 +55,7 @@ FUNCTION_BLOCK FB_ALARM_DEV
 
   dv := pv - sp;
 
-  (* ---- 上偏差 ---- *)
+  (* ---- Over deviation ---- *)
   IF dv > dev_h THEN
     h_cond := TRUE;
   ELSIF dv < dev_h - deadband THEN
@@ -69,7 +69,7 @@ FUNCTION_BLOCK FB_ALARM_DEV
   h_trip := h_cond AND (h_t >= delay_s);
   h_alm  := h_trip OR (h_alm AND NOT ack);
 
-  (* ---- 下偏差 ---- *)
+  (* ---- Under deviation ---- *)
   IF dv < 0.0 - dev_l THEN
     l_cond := TRUE;
   ELSIF dv > 0.0 - dev_l + deadband THEN

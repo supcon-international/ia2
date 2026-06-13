@@ -1,49 +1,55 @@
 (*
-  FB_PID — 增量式（速度型）PID 调节器，带抗积分饱和、无扰切换、前馈、
-  输出跟踪与设定值斜坡。
+  FB_PID — incremental (velocity-form) PID controller with anti-windup,
+  bumpless transfer, feedforward, output tracking and setpoint ramp.
 
-  ≈ 通用 PID 必备形态：SP 斜坡 / 输出跟踪 / 前馈 / 手自动无扰（各主流 DCS/PLC 标准库均有同类块）。
+  ~ Universal PID essentials: SP ramp / output tracking / feedforward / auto-manual
+    bumpless transfer (every major DCS/PLC standard library has an equivalent block).
 
-  典型用法：流量 PID 驱动变频泵，正作用，输出限幅即变频上下限（如 10~45Hz
-  ——流量作 pv，变频器频率给定作 out：out_min:=10.0, out_max:=45.0,
-    direct := TRUE 正作用——pv 升高输出升高）。
+  Typical use: a flow PID driving a variable-speed pump, direct-acting, where the
+  output limits are the drive min/max frequency (e.g. 10..45 Hz — flow is pv, the
+  drive frequency reference is out: out_min:=10.0, out_max:=45.0, direct := TRUE
+  direct-acting — rising pv raises output).
 
-  算法（增量式 + 前馈）：
-    sp_int := sp 经 sp_rate 限速斜坡（sp_rate <= 0 直接取 sp；首扫描对中）
-    e      := sp_int - pv（反作用，默认）；direct=TRUE 时 e := pv - sp_int
-    Δpid   := kp*(e - e_prev)                          —— 比例增量
-            + kp*dt_s/ti_s * e（ti_s>0 时）            —— 积分增量
-            + kp*td_s/dt_s * (e - 2*e_prev + e_prev2)（td_s>0 时）—— 微分增量
-    acc    := acc + Δpid；out := acc + ff，钳位到 [out_min, out_max]
-    收尾    acc := out - ff（回算）
-  抗积分饱和：输出钳位 + 回算 + 条件积分（输出已贴限且积分增量继续推向
-  限幅时丢弃积分项）。
-  模式优先级：track（输出跟踪，联锁强制/外部接管用）> NOT auto（手动）>
-  自动。track/手动时 out 跟踪给定值（钳位），误差历史照常更新，回到自动
-  无跳变。ff 直接叠加在钳位前输出上（前馈即时生效；回算保证 ff 增减、
-  钳位、模式切换全程无扰）。
-  向后兼容：新增输入（ff/track/track_value/sp_rate）均带默认值，取默认值
-  时行为与旧版逐拍一致，既有调用无需改动；新增输出 dev 不影响旧接线。
+  Algorithm (incremental + feedforward):
+    sp_int := sp through an sp_rate-limited ramp (sp_rate <= 0 takes sp directly; first-scan alignment)
+    e      := sp_int - pv (reverse-acting, default); direct=TRUE gives e := pv - sp_int
+    dpid   := kp*(e - e_prev)                            -- proportional increment
+            + kp*dt_s/ti_s * e (when ti_s>0)             -- integral increment
+            + kp*td_s/dt_s * (e - 2*e_prev + e_prev2) (when td_s>0) -- derivative increment
+    acc    := acc + dpid; out := acc + ff, clamped to [out_min, out_max]
+    wrap-up  acc := out - ff (back-calculation)
+  Anti-windup: output clamp + back-calculation + conditional integration (when the
+  output is already at a limit and the integral increment keeps pushing toward that
+  limit, the integral term is dropped).
+  Mode priority: track (output tracking, for interlock forcing / external takeover)
+  > NOT auto (manual) > auto. In track/manual the output follows the supplied value
+  (clamped), the error history keeps updating, and returning to auto is bumpless.
+  ff adds directly onto the pre-clamp output (feedforward takes effect immediately;
+  back-calculation keeps ff changes, clamping and mode switching all bumpless).
+  Backward compatible: the added inputs (ff/track/track_value/sp_rate) all have
+  defaults, and at their defaults behavior is scan-for-scan identical to the old
+  version, so existing calls need no changes; the added output dev does not affect
+  legacy wiring.
 
-  输入：
-    pv          REAL  过程值
-    sp          REAL  设定值
-    kp          REAL  比例增益
-    ti_s        REAL  积分时间 s（0 = 积分关）
-    td_s        REAL  微分时间 s（0 = 微分关，微分项不滤波）
-    dt_s        REAL  采样周期 s（<=0 时本周期保持不动作）
-    direct      BOOL  TRUE = 正作用（pv↑→out↑），FALSE = 反作用
-    auto        BOOL  TRUE 自动 / FALSE 手动
-    manual_out  REAL  手动给定值
-    out_min     REAL  输出下限（假定 out_min < out_max）
-    out_max     REAL  输出上限
-    ff          REAL  前馈量（钳位前叠加到输出；接 FB_LEADLAG 可加动态补偿）
-    track       BOOL  输出跟踪使能（优先级最高，盖过 auto/手动）
-    track_value REAL  跟踪值
-    sp_rate     REAL  设定值斜坡限速 单位/s（0 = 不限速）
-  输出：
-    out         REAL  调节输出（各模式均钳位）
-    dev         REAL  偏差 pv - sp_int（经 SP 斜坡后的实际工作偏差）
+  Inputs:
+    pv          REAL  process value
+    sp          REAL  setpoint
+    kp          REAL  proportional gain
+    ti_s        REAL  integral time s (0 = integral off)
+    td_s        REAL  derivative time s (0 = derivative off, derivative term unfiltered)
+    dt_s        REAL  sample period s (<=0 holds this scan, no action)
+    direct      BOOL  TRUE = direct-acting (pv up -> out up), FALSE = reverse-acting
+    auto        BOOL  TRUE auto / FALSE manual
+    manual_out  REAL  manual output value
+    out_min     REAL  output low limit (assumes out_min < out_max)
+    out_max     REAL  output high limit
+    ff          REAL  feedforward (added to output before clamp; feed via FB_LEADLAG for dynamic shaping)
+    track       BOOL  output-tracking enable (highest priority, overrides auto/manual)
+    track_value REAL  tracking value
+    sp_rate     REAL  setpoint ramp rate limit units/s (0 = no rate limit)
+  Outputs:
+    out         REAL  control output (clamped in every mode)
+    dev         REAL  deviation pv - sp_int (actual working deviation after the SP ramp)
 *)
 FUNCTION_BLOCK FB_PID
   VAR_INPUT
@@ -68,8 +74,8 @@ FUNCTION_BLOCK FB_PID
     dev : REAL;
   END_VAR
   VAR
-    sp_int    : REAL; (* 斜坡后的内部工作设定值 *)
-    acc       : REAL; (* PID 累加器（不含 ff） *)
+    sp_int    : REAL; (* internal working setpoint after the ramp *)
+    acc       : REAL; (* PID accumulator (excludes ff) *)
     e         : REAL;
     e_prev    : REAL;
     e_prev2   : REAL;
@@ -78,14 +84,14 @@ FUNCTION_BLOCK FB_PID
     d_term    : REAL;
     sp_step   : REAL;
     sp_delta  : REAL;
-    init_done : BOOL; (* sp_int 首扫描对中标志 *)
+    init_done : BOOL; (* sp_int first-scan alignment flag *)
   END_VAR
 
   IF dt_s <= 0.0 THEN
-    RETURN; (* 采样周期非法：保持输出与历史不变 *)
+    RETURN; (* invalid sample period: hold output and history unchanged *)
   END_IF;
 
-  (* 设定值斜坡：sp_rate > 0 时 sp_int 限速逼近 sp；首扫描直接对中 *)
+  (* Setpoint ramp: when sp_rate > 0, sp_int approaches sp at the rate limit; first scan aligns directly *)
   IF NOT init_done THEN
     sp_int := sp;
     init_done := TRUE;
@@ -105,7 +111,7 @@ FUNCTION_BLOCK FB_PID
 
   dev := pv - sp_int;
 
-  (* 控制偏差；正作用取反号 *)
+  (* Control deviation; direct-acting flips the sign *)
   IF direct THEN
     e := pv - sp_int;
   ELSE
@@ -113,10 +119,10 @@ FUNCTION_BLOCK FB_PID
   END_IF;
 
   IF track THEN
-    (* 输出跟踪：无条件跟随 track_value（联锁强制/超驰接管），优先级最高 *)
+    (* Output tracking: follows track_value unconditionally (interlock forcing / override takeover), highest priority *)
     out := track_value;
   ELSIF NOT auto THEN
-    (* 手动：跟踪 manual_out，切回自动时增量式自然无扰 *)
+    (* Manual: follows manual_out; the incremental form makes the return to auto naturally bumpless *)
     out := manual_out;
   ELSE
     p_term := kp * (e - e_prev);
@@ -124,7 +130,7 @@ FUNCTION_BLOCK FB_PID
     i_term := 0.0;
     IF ti_s > 0.0 THEN
       i_term := kp * dt_s / ti_s * e;
-      (* 条件积分：输出已饱和且积分仍推向限幅方向时，本周期丢弃积分项 *)
+      (* Conditional integration: when the output is saturated and the integral still pushes toward the limit, drop the integral term this scan *)
       IF (out >= out_max AND i_term > 0.0) OR (out <= out_min AND i_term < 0.0) THEN
         i_term := 0.0;
       END_IF;
@@ -136,17 +142,17 @@ FUNCTION_BLOCK FB_PID
     END_IF;
 
     acc := acc + p_term + i_term + d_term;
-    out := acc + ff; (* 前馈钳位前叠加 *)
+    out := acc + ff; (* feedforward added before clamp *)
   END_IF;
 
-  (* 输出钳位（增量式下同时起抗积分饱和作用） *)
+  (* Output clamp (in the incremental form this also provides anti-windup) *)
   IF out > out_max THEN
     out := out_max;
   ELSIF out < out_min THEN
     out := out_min;
   END_IF;
 
-  (* 回算：acc 恒 = 钳位后输出 - 前馈 → 钳位/ff 变化/手动/跟踪全程无扰 *)
+  (* Back-calculation: acc always = clamped output - feedforward -> clamping / ff changes / manual / tracking all bumpless *)
   acc := out - ff;
 
   e_prev2 := e_prev;

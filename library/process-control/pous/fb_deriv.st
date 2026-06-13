@@ -1,28 +1,30 @@
 (*
-  FB_DERIV — 滤波微分器（du/dt，先滤波后差分）。
+  FB_DERIV — filtered derivative (du/dt, filter first then difference).
 
-  ≈ 标准微分块（filtered derivative），各主流平台标准库必备。
+  ~ Standard filtered-derivative block, a staple of every major platform's standard library.
 
-  用途：变化趋势量化（℃/s、%/s 供显示/前馈/自定义逻辑用）、
-  前馈通路的微分整形。只要"超限即报警"请直接用 FB_ALARM_ROC
-  （同一滤波-差分内核 + 延时/锁存）。
-  行为：
-    u 先经内部 PT1 滤波（时间常数 t_filt_s；<= 0 时自动取 3*dt_s，
-    约 4 拍收敛），再对滤波值做后向差分：
+  Purpose: quantifying trend (degC/s, %/s for display/feedforward/custom logic),
+  derivative shaping in a feedforward path. Whenever you want "alarm on limit", use
+  FB_ALARM_ROC directly (the same filter-difference core + delay/latch).
+  Behavior:
+    u first passes through an internal PT1 filter (time constant t_filt_s; <= 0 takes
+    3*dt_s automatically, settling in about 4 scans), then a backward difference of
+    the filtered value:
       u_f := u_f + dt_s / (t_f + dt_s) * (u - u_f)
       out := (u_f - u_f_prev) / dt_s
-    单拍差分对量化/噪声极敏感，必须滤波否则输出全是毛刺——需要更强
-    去噪时加大 t_filt_s 或给 u 前置 FB_LAG。
-    reset / 首扫描：滤波状态对中到 u，out := 0（不出投运假导数）。
-    dt_s <= 0 → 保持不动作。
+    A single-scan difference is extremely sensitive to quantization/noise and must be
+    filtered, or the output is all spikes -- for stronger noise rejection, increase
+    t_filt_s or put FB_LAG ahead of u.
+    reset / first scan: the filter state aligns to u, out := 0 (no spurious startup derivative).
+    dt_s <= 0 -> hold (no action).
 
-  输入：
-    u        REAL  输入
-    t_filt_s REAL  微分前置滤波时间常数 s（<= 0 = 自动 3*dt_s）
-    dt_s     REAL  采样周期 s
-    reset    BOOL  复位/对中（电平有效：滤波态跟随 u，out 清零）
-  输出：
-    out REAL  滤波后的变化率 单位/s（带符号）
+  Inputs:
+    u        REAL  input
+    t_filt_s REAL  derivative pre-filter time constant s (<= 0 = auto 3*dt_s)
+    dt_s     REAL  sample period s
+    reset    BOOL  reset/align (level-active: filter state follows u, out cleared)
+  Outputs:
+    out REAL  filtered rate of change units/s (signed)
 *)
 FUNCTION_BLOCK FB_DERIV
   VAR_INPUT
@@ -35,18 +37,18 @@ FUNCTION_BLOCK FB_DERIV
     out : REAL;
   END_VAR
   VAR
-    u_f       : REAL; (* PT1 滤波后的输入 *)
-    u_f_prev  : REAL; (* 上一拍滤波值，后向差分用 *)
-    t_f       : REAL; (* 实际使用的滤波时间常数 *)
-    init_done : BOOL; (* 首扫描对中标志 *)
+    u_f       : REAL; (* PT1-filtered input *)
+    u_f_prev  : REAL; (* previous-scan filtered value, for the backward difference *)
+    t_f       : REAL; (* filter time constant actually used *)
+    init_done : BOOL; (* first-scan alignment flag *)
   END_VAR
 
   IF dt_s <= 0.0 THEN
-    RETURN; (* 采样周期非法：保持 *)
+    RETURN; (* invalid sample period: hold *)
   END_IF;
 
   IF reset OR NOT init_done THEN
-    u_f := u; (* 滤波态对中，不出投运假导数 *)
+    u_f := u; (* align the filter state, no spurious startup derivative *)
     u_f_prev := u;
     out := 0.0;
     init_done := TRUE;
@@ -55,7 +57,7 @@ FUNCTION_BLOCK FB_DERIV
 
   t_f := t_filt_s;
   IF t_f <= 0.0 THEN
-    t_f := 3.0 * dt_s; (* 自动：约 4 拍收敛的最低限度去噪 *)
+    t_f := 3.0 * dt_s; (* auto: the minimum noise rejection that settles in about 4 scans *)
   END_IF;
 
   u_f := u_f + dt_s / (t_f + dt_s) * (u - u_f);

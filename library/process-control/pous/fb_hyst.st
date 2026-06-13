@@ -1,21 +1,22 @@
 (*
-  FB_HYST — 双向迟滞（滞环）开关。
+  FB_HYST — bidirectional hysteresis (deadband) switch.
 
-  用途：模拟量带回差的通断控制，避免临界点抖动。
-  例：分级机电流控制给料机——电流高于 on_sp 停给料、低于 off_sp 恢复
-  （低位接通方向）；或温度高于 on_sp 开风机、低于 off_sp 停（高位接通方向）。
+  Purpose: on/off control of an analog value with hysteresis, avoiding chatter at the threshold.
+  Example: current control of a feeder -- current above on_sp stops feeding, below
+  off_sp resumes (low-side-on direction); or temperature above on_sp starts a fan, below
+  off_sp stops it (high-side-on direction).
 
-  行为（按设定点自动判向）：
-    on_sp > off_sp（高位接通）：pv >= on_sp 置位；pv <= off_sp 复位；之间保持。
-    on_sp < off_sp（低位接通）：pv <= on_sp 置位；pv >= off_sp 复位；之间保持。
-    on_sp = off_sp（退化）   ：out := pv >= on_sp（普通比较器，无回差）。
+  Behavior (direction decided automatically from the setpoints):
+    on_sp > off_sp (high-side-on): pv >= on_sp sets; pv <= off_sp resets; holds in between.
+    on_sp < off_sp (low-side-on):  pv <= on_sp sets; pv >= off_sp resets; holds in between.
+    on_sp = off_sp (degenerate):   out := pv >= on_sp (plain comparator, no hysteresis).
 
-  输入：
-    pv     REAL  过程值
-    on_sp  REAL  接通设定点
-    off_sp REAL  断开设定点
-  输出：
-    out    BOOL  开关输出
+  Inputs:
+    pv     REAL  process value
+    on_sp  REAL  switch-on setpoint
+    off_sp REAL  switch-off setpoint
+  Outputs:
+    out    BOOL  switch output
 *)
 FUNCTION_BLOCK FB_HYST
   VAR_INPUT
@@ -28,21 +29,21 @@ FUNCTION_BLOCK FB_HYST
   END_VAR
 
   IF on_sp > off_sp THEN
-    (* 高位接通 *)
+    (* High-side-on *)
     IF pv >= on_sp THEN
       out := TRUE;
     ELSIF pv <= off_sp THEN
       out := FALSE;
     END_IF;
   ELSIF on_sp < off_sp THEN
-    (* 低位接通 *)
+    (* Low-side-on *)
     IF pv <= on_sp THEN
       out := TRUE;
     ELSIF pv >= off_sp THEN
       out := FALSE;
     END_IF;
   ELSE
-    (* 设定点相等：退化为普通比较器 *)
+    (* Setpoints equal: degenerate to a plain comparator *)
     out := pv >= on_sp;
   END_IF;
 END_FUNCTION_BLOCK

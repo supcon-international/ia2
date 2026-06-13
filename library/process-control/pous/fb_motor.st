@@ -1,31 +1,35 @@
 (*
-  FB_MOTOR — 电机启停控制，带运行反馈监视与故障锁存。
+  FB_MOTOR — motor start/stop control, with run-feedback monitoring and fault latch.
 
-  用途：皮带机、风机、泵等单速电机的标准启停封装。
-  例：远程模式下 HMI/上位启停命令 → 接触器输出，运行反馈（接触器辅点/
-  电流继电器）超时不一致则故障停机。
+  Purpose: standard start/stop wrapper for single-speed motors such as belt conveyors,
+  fans and pumps.
+  Example: in remote mode an HMI/supervisory start/stop command -> contactor output,
+  and a timed mismatch of the run feedback (contactor aux contact / current relay)
+  faults the motor to stop.
 
-  行为：
-    1) 故障监视：out_run 与 run_fb 不一致持续 fb_timeout_s（手工 dt_s 累加
-       计时）→ fault 锁存；外部故障 fault_in（热继/变频器故障等）→ fault。
-       reset 且 fault_in 已消除时清除锁存。
-    2) 命令锁存：cmd_start（电平/点动均可）在 remote 且无故障时置位 out_run；
-       cmd_stop 或 fault 复位（停车优先）。
-    3) 状态字 status：0 停止，1 启动中（已输出未见反馈），2 运行，3 故障。
+  Behavior:
+    1) Fault monitoring: a mismatch between out_run and run_fb persisting for
+       fb_timeout_s (manual dt_s accumulation) -> fault latched; an external fault
+       fault_in (thermal overload / drive fault, etc.) -> fault. reset with fault_in
+       already cleared clears the latch.
+    2) Command latch: cmd_start (level or momentary) sets out_run when remote and
+       fault-free; cmd_stop or fault resets it (stop takes priority).
+    3) Status word status: 0 stopped, 1 starting (output on, feedback not yet seen),
+       2 running, 3 faulted.
 
-  输入：
-    cmd_start    BOOL  启动命令
-    cmd_stop     BOOL  停止命令（优先）
-    remote       BOOL  远程允许（仅闸启动；不强制停车）
-    run_fb       BOOL  运行反馈
-    fault_in     BOOL  外部故障输入
-    reset        BOOL  故障复位
-    fb_timeout_s REAL  反馈不一致容忍时间 s
-    dt_s         REAL  采样周期 s
-  输出：
-    out_run BOOL  运行输出（接触器/变频器启动）
-    fault   BOOL  故障（锁存）
-    status  INT   0 停止 / 1 启动中 / 2 运行 / 3 故障
+  Inputs:
+    cmd_start    BOOL  start command
+    cmd_stop     BOOL  stop command (priority)
+    remote       BOOL  remote permissive (gates start only; does not force a stop)
+    run_fb       BOOL  run feedback
+    fault_in     BOOL  external fault input
+    reset        BOOL  fault reset
+    fb_timeout_s REAL  feedback-mismatch tolerance time s
+    dt_s         REAL  sample period s
+  Outputs:
+    out_run BOOL  run output (contactor / drive start)
+    fault   BOOL  fault (latched)
+    status  INT   0 stopped / 1 starting / 2 running / 3 faulted
 *)
 FUNCTION_BLOCK FB_MOTOR
   VAR_INPUT
@@ -44,10 +48,10 @@ FUNCTION_BLOCK FB_MOTOR
     status  : INT;
   END_VAR
   VAR
-    mism_t : REAL; (* 反馈不一致累计时间 s *)
+    mism_t : REAL; (* feedback-mismatch accumulated time s *)
   END_VAR
 
-  (* 1) 故障监视 *)
+  (* 1) Fault monitoring *)
   IF out_run <> run_fb THEN
     mism_t := mism_t + dt_s;
   ELSE
@@ -64,7 +68,7 @@ FUNCTION_BLOCK FB_MOTOR
     mism_t := 0.0;
   END_IF;
 
-  (* 2) 命令锁存（停车/故障优先） *)
+  (* 2) Command latch (stop/fault priority) *)
   IF cmd_start AND remote AND NOT fault THEN
     out_run := TRUE;
   END_IF;
@@ -72,7 +76,7 @@ FUNCTION_BLOCK FB_MOTOR
     out_run := FALSE;
   END_IF;
 
-  (* 3) 状态字 *)
+  (* 3) Status word *)
   IF fault THEN
     status := 3;
   ELSIF out_run AND run_fb THEN

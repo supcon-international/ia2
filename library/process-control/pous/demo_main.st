@@ -1,76 +1,79 @@
 (* ============================================================================
-  demo_main — 迷你碳化塔回路演示 PROGRAM（自包含文件）。
+  demo_main — mini carbonation-tower loop demonstration PROGRAM (self-contained file).
 
-  注意：本文件内联了它实例化的 28 个 FB 声明的逐字拷贝（FB_SCALE / FB_PID /
-  FB_ALARM_HL / FB_PULSER / FB_HILO_FILL / FB_RATIO / FB_SPLIT_RANGE /
-  FB_RUNTIME / FB_DUTY2 / FB_INTERLOCK8 / FB_LIMIT / FB_STATS / FB_AVG_TIME /
-  FB_INTEG / FB_DERIV / FB_DEADTIME8 / FB_MID3 / FB_CASCADE / FB_PV_HOLD /
-  FB_RAMPSOAK8 / FB_GAIN_SCHED3 / FB_PID_POS / FB_MANSTATION / FB_PID_3STEP /
-  FB_MOTOR_REV / FB_MOV / FB_DOSE / FB_FLOW_COMP）。原因：`cs check` 对每个文件独立
-  做静态检查，不做跨文件类型解析；只有项目级编译（cs project check /
-  tasks.toml 调度编译）才会把 pous/ 下所有文件合并解析。自包含使
-  `cs check pous/*.st` 整组通过。
-  因此：把本文件导入真实项目时，不要与同目录的 fb_scale.st 等单 FB 文件
-  共存（虽然实测项目编译容忍逐字相同的重复声明，但拷贝漂移无人兜底）
-  ——二选一。
+  Note: this file inlines verbatim copies of the 28 FB declarations it instantiates
+  (FB_SCALE / FB_PID / FB_ALARM_HL / FB_PULSER / FB_HILO_FILL / FB_RATIO /
+  FB_SPLIT_RANGE / FB_RUNTIME / FB_DUTY2 / FB_INTERLOCK8 / FB_LIMIT / FB_STATS /
+  FB_AVG_TIME / FB_INTEG / FB_DERIV / FB_DEADTIME8 / FB_MID3 / FB_CASCADE /
+  FB_PV_HOLD / FB_RAMPSOAK8 / FB_GAIN_SCHED3 / FB_PID_POS / FB_MANSTATION /
+  FB_PID_3STEP / FB_MOTOR_REV / FB_MOV / FB_DOSE / FB_FLOW_COMP). Reason: `cs check`
+  checks each file independently and does no cross-file type resolution; only a
+  project-level compile (cs project check / tasks.toml-scheduled compile) merges and
+  resolves all files under pous/. Being self-contained lets `cs check pous/*.st` pass
+  as a group.
+  Therefore: when importing this file into a real project, do not let it coexist with
+  the individual FB files such as fb_scale.st in the same directory (although a project
+  compile is observed to tolerate verbatim-duplicate declarations, nothing guards
+  against copy drift) -- pick one.
 
-  回路接线（演示，变量可经 iomap.toml 绑定到实际通道）：
-    lt0101_raw（AI 原始计数）→ FB_SCALE → level_pct（塔液位 %）
-    level_pct / level_sp     → FB_PID（反作用，旧签名调用，验证向后兼容）
-                               → valve_pct（进料调节阀开度）
-    level_pct                → FB_ALARM_HL → 四级液位报警 + any_alm
-    hammer_enable            → FB_PULSER → hammer_q（空气炮周期吹扫）
-    level_pct                → FB_HILO_FILL → fill_open（高位关低位开补水）
-    —— 以下为扩展回路 ——
-    液位HH/断线/塔温HH/双泵故障 → FB_INTERLOCK8 → ilk_trip + 首出号
-    pump_run_fb_a/b          → FB_RUNTIME ×2 → 双泵小时/启动次数
-    fill_open AND NOT ilk    → FB_DUTY2（小时均衡）→ 双补水泵一用一备
-    gas_flow（主动量）       → FB_RATIO → milk_sp（石灰乳配比设定）
-    milk_flow / milk_sp      → FB_PID（前馈 ff + SP 斜坡 + 联锁 track 强制）
-                               → FB_SPLIT_RANGE（顺序分程）→ 小阀/大阀
-    —— 以下为数学/动态块演示（蒸汽加热级联 + FOPDT 对象仿真） ——
-    steam_valve → FB_DEADTIME8(20 s) → 手工 PT1(30 s) → 塔温 temp_a
-                               （纯滞后+一阶惯性 = FOPDT 对象仿真）
-    temp_a / temp_b / 坏点    → FB_MID3（两好一坏取均值）→ FB_LIMIT → 表决塔温
-    表决塔温                  → FB_DERIV → 变化率 ℃/s；
-                               → FB_STATS（全程统计）+ FB_AVG_TIME（60 s 翻转窗）
-    塔温主 FB_PID → FB_CASCADE → 蒸汽流量副 FB_PID → steam_valve
-                               （非级联时主调经 track 跟踪，CAS 投切无扰）
-    主 PID 偏差 dev           → FB_INTEG（联锁 hold，钳 ±1000）→ 偏差积分 ℃·s
-    —— 以下为 0.3.0 回路/设备/信号扩展块演示（第 17~26 节） ——
-    表决塔温 + q_fail        → FB_PV_HOLD（坏值先保持 5 s 再保持/替代）→ temp_held
-    升温-保温 4 段曲线        → FB_RAMPSOAK8 → rs_sp（程序设定值）
-    temp_held                → FB_GAIN_SCHED3（三区参数 + 区界过渡）
-                               → FB_PID_POS（程序 SP + 调度参数，p/i/d 可观测）
-                               → FB_MANSTATION（手操站，balance 无扰）→ heat_out
-    temp_held / rs_sp        → FB_PID_3STEP（电动执行机构脉冲调节，观察用）
-    搅拌正/反按钮             → FB_MOTOR_REV（换向闭锁 2 s，反馈回送仿真）
-    fill_open                → FB_MOV（电动补水阀，30 s 仿真行程双限位）
-    下料启动                  → FB_DOSE（粗 8 / 精 1.5 单位/s 仿真流量）
-    gas_flow + 工况 p/t       → FB_FLOW_COMP（DP 开方式温压补偿）→ gas_flow_std
-  scan_s 必须与 tasks.toml 的 interval_ms 一致（默认 100 ms = 0.1 s）。
+  Loop wiring (demonstration; variables can be bound to real channels via iomap.toml):
+    lt0101_raw (AI raw counts) -> FB_SCALE -> level_pct (tower level %)
+    level_pct / level_sp     -> FB_PID (reverse-acting, legacy-signature call, verifies backward compatibility)
+                               -> valve_pct (feed control-valve opening)
+    level_pct                -> FB_ALARM_HL -> four-level level alarms + any_alm
+    hammer_enable            -> FB_PULSER -> hammer_q (periodic air-cannon purge)
+    level_pct                -> FB_HILO_FILL -> fill_open (high-close low-open make-up)
+    -- the following are extension loops --
+    level HH / open-circuit / tower-temp HH / dual-pump fault -> FB_INTERLOCK8 -> ilk_trip + first-out number
+    pump_run_fb_a/b          -> FB_RUNTIME x2 -> dual-pump hours / start counts
+    fill_open AND NOT ilk    -> FB_DUTY2 (hour balancing) -> dual make-up pumps duty/standby
+    gas_flow (leading flow)  -> FB_RATIO -> milk_sp (lime-milk ratio setpoint)
+    milk_flow / milk_sp      -> FB_PID (feedforward ff + SP ramp + interlock track forcing)
+                               -> FB_SPLIT_RANGE (sequential split range) -> small/large valve
+    -- the following demonstrate the math/dynamics blocks (steam-heating cascade + FOPDT plant simulation) --
+    steam_valve -> FB_DEADTIME8(20 s) -> manual PT1(30 s) -> tower temp temp_a
+                               (dead time + first-order lag = FOPDT plant simulation)
+    temp_a / temp_b / bad point -> FB_MID3 (two good one bad, take the average) -> FB_LIMIT -> voted tower temp
+    voted tower temp          -> FB_DERIV -> rate of change degC/s;
+                               -> FB_STATS (full-run statistics) + FB_AVG_TIME (60 s tumbling window)
+    tower-temp master FB_PID -> FB_CASCADE -> steam-flow slave FB_PID -> steam_valve
+                               (when not cascaded the master tracks via track, CAS transfer bumpless)
+    master PID deviation dev  -> FB_INTEG (interlock hold, clamped +/-1000) -> deviation integral degC*s
+    -- the following demonstrate the 0.3.0 loop/device/signal extension blocks (sections 17~26) --
+    voted tower temp + q_fail -> FB_PV_HOLD (bad value held 5 s first then hold/substitute) -> temp_held
+    heat-up/soak 4-segment curve -> FB_RAMPSOAK8 -> rs_sp (program setpoint)
+    temp_held                -> FB_GAIN_SCHED3 (three-zone parameters + boundary transition)
+                               -> FB_PID_POS (program SP + scheduled parameters, observable p/i/d)
+                               -> FB_MANSTATION (manual station, balance bumpless) -> heat_out
+    temp_held / rs_sp        -> FB_PID_3STEP (motorized-actuator pulse control, for observation)
+    agitator fwd/rev buttons  -> FB_MOTOR_REV (reversal interlock 2 s, feedback echo simulation)
+    fill_open                -> FB_MOV (motorized make-up valve, 30 s simulated travel, dual limits)
+    dose start               -> FB_DOSE (coarse 8 / fine 1.5 units/s simulated flow)
+    gas_flow + operating p/t  -> FB_FLOW_COMP (square-root DP pressure/temperature compensation) -> gas_flow_std
+  scan_s must match the tasks.toml interval_ms (default 100 ms = 0.1 s).
 ============================================================================ *)
 
 (*
-  FB_SCALE — 线性量程变换：原始计数值 → 工程单位，含 NE43 风格断线提示。
+  FB_SCALE — linear span conversion: raw counts -> engineering units, with NE43-style open-circuit flag.
 
-  用途：模拟量输入标定。例如 4-20 mA 采样为原始计数（S7 风格 5530..27648），
-  变换为 0..100 % 或 0..5 m 等工程值。
+  Purpose: analog input scaling. For example, a 4-20 mA signal sampled as raw
+  counts (S7-style 5530..27648) is converted to an engineering value such as
+  0..100 % or 0..5 m.
 
-  公式：out := out_min + (raw - raw_min) * (out_max - out_min) / span
-        其中 span = MAX(raw_max - raw_min, 1e-6)（内联 IF 实现，防除零）。
-  假定 raw_max > raw_min（正向量程）。
+  Formula: out := out_min + (raw - raw_min) * (out_max - out_min) / span
+           where span = MAX(raw_max - raw_min, 1e-6) (inline IF, divide-by-zero guard).
+  Assumes raw_max > raw_min (forward span).
 
-  输入：
-    raw      REAL  原始计数值（如 AI 通道原值）
-    raw_min  REAL  量程下限对应的原始值（4 mA 点）
-    raw_max  REAL  量程上限对应的原始值（20 mA 点）
-    out_min  REAL  工程量程下限
-    out_max  REAL  工程量程上限
-    clamp    BOOL  TRUE 时输出钳位在 [out_min, out_max]（支持反向工程量程）
-  输出：
-    out      REAL  工程值
-    fault    BOOL  原始值越界 >5% 量程（NE43 风格断线/超限提示，不锁存）
+  Inputs:
+    raw      REAL  raw count value (e.g. AI channel raw value)
+    raw_min  REAL  raw value at span low (4 mA point)
+    raw_max  REAL  raw value at span high (20 mA point)
+    out_min  REAL  engineering span low
+    out_max  REAL  engineering span high
+    clamp    BOOL  TRUE clamps output to [out_min, out_max] (reverse engineering span supported)
+  Outputs:
+    out      REAL  engineering value
+    fault    BOOL  raw value out of range >5% of span (NE43-style open-circuit/over-range flag, not latched)
 *)
 FUNCTION_BLOCK FB_SCALE
   VAR_INPUT
@@ -92,13 +95,13 @@ FUNCTION_BLOCK FB_SCALE
     hi     : REAL;
   END_VAR
 
-  (* span = MAX(raw_max - raw_min, 1e-6) — 内联 IF 防除零 *)
+  (* span = MAX(raw_max - raw_min, 1e-6) — inline IF, divide-by-zero guard *)
   span := raw_max - raw_min;
   IF span < 0.000001 THEN
     span := 0.000001;
   END_IF;
 
-  (* NE43 风格越界判定：超出原始量程 5% 以上视为断线/故障 *)
+  (* NE43-style out-of-range test: more than 5% beyond raw span = open-circuit/fault *)
   margin := 0.05 * span;
   fault := (raw < raw_min - margin) OR (raw > raw_max + margin);
 
@@ -120,51 +123,57 @@ FUNCTION_BLOCK FB_SCALE
   END_IF;
 END_FUNCTION_BLOCK
 (*
-  FB_PID — 增量式（速度型）PID 调节器，带抗积分饱和、无扰切换、前馈、
-  输出跟踪与设定值斜坡。
+  FB_PID — incremental (velocity-form) PID controller with anti-windup,
+  bumpless transfer, feedforward, output tracking and setpoint ramp.
 
-  ≈ 通用 PID 必备形态：SP 斜坡 / 输出跟踪 / 前馈 / 手自动无扰（各主流 DCS/PLC 标准库均有同类块）。
+  ~ Universal PID essentials: SP ramp / output tracking / feedforward / auto-manual
+    bumpless transfer (every major DCS/PLC standard library has an equivalent block).
 
-  典型用法：流量 PID 驱动变频泵，正作用，输出限幅即变频上下限（如 10~45Hz
-  ——流量作 pv，变频器频率给定作 out：out_min:=10.0, out_max:=45.0,
-    direct := TRUE 正作用——pv 升高输出升高）。
+  Typical use: a flow PID driving a variable-speed pump, direct-acting, where the
+  output limits are the drive min/max frequency (e.g. 10..45 Hz — flow is pv, the
+  drive frequency reference is out: out_min:=10.0, out_max:=45.0, direct := TRUE
+  direct-acting — rising pv raises output).
 
-  算法（增量式 + 前馈）：
-    sp_int := sp 经 sp_rate 限速斜坡（sp_rate <= 0 直接取 sp；首扫描对中）
-    e      := sp_int - pv（反作用，默认）；direct=TRUE 时 e := pv - sp_int
-    Δpid   := kp*(e - e_prev)                          —— 比例增量
-            + kp*dt_s/ti_s * e（ti_s>0 时）            —— 积分增量
-            + kp*td_s/dt_s * (e - 2*e_prev + e_prev2)（td_s>0 时）—— 微分增量
-    acc    := acc + Δpid；out := acc + ff，钳位到 [out_min, out_max]
-    收尾    acc := out - ff（回算）
-  抗积分饱和：输出钳位 + 回算 + 条件积分（输出已贴限且积分增量继续推向
-  限幅时丢弃积分项）。
-  模式优先级：track（输出跟踪，联锁强制/外部接管用）> NOT auto（手动）>
-  自动。track/手动时 out 跟踪给定值（钳位），误差历史照常更新，回到自动
-  无跳变。ff 直接叠加在钳位前输出上（前馈即时生效；回算保证 ff 增减、
-  钳位、模式切换全程无扰）。
-  向后兼容：新增输入（ff/track/track_value/sp_rate）均带默认值，取默认值
-  时行为与旧版逐拍一致，既有调用无需改动；新增输出 dev 不影响旧接线。
+  Algorithm (incremental + feedforward):
+    sp_int := sp through an sp_rate-limited ramp (sp_rate <= 0 takes sp directly; first-scan alignment)
+    e      := sp_int - pv (reverse-acting, default); direct=TRUE gives e := pv - sp_int
+    dpid   := kp*(e - e_prev)                            -- proportional increment
+            + kp*dt_s/ti_s * e (when ti_s>0)             -- integral increment
+            + kp*td_s/dt_s * (e - 2*e_prev + e_prev2) (when td_s>0) -- derivative increment
+    acc    := acc + dpid; out := acc + ff, clamped to [out_min, out_max]
+    wrap-up  acc := out - ff (back-calculation)
+  Anti-windup: output clamp + back-calculation + conditional integration (when the
+  output is already at a limit and the integral increment keeps pushing toward that
+  limit, the integral term is dropped).
+  Mode priority: track (output tracking, for interlock forcing / external takeover)
+  > NOT auto (manual) > auto. In track/manual the output follows the supplied value
+  (clamped), the error history keeps updating, and returning to auto is bumpless.
+  ff adds directly onto the pre-clamp output (feedforward takes effect immediately;
+  back-calculation keeps ff changes, clamping and mode switching all bumpless).
+  Backward compatible: the added inputs (ff/track/track_value/sp_rate) all have
+  defaults, and at their defaults behavior is scan-for-scan identical to the old
+  version, so existing calls need no changes; the added output dev does not affect
+  legacy wiring.
 
-  输入：
-    pv          REAL  过程值
-    sp          REAL  设定值
-    kp          REAL  比例增益
-    ti_s        REAL  积分时间 s（0 = 积分关）
-    td_s        REAL  微分时间 s（0 = 微分关，微分项不滤波）
-    dt_s        REAL  采样周期 s（<=0 时本周期保持不动作）
-    direct      BOOL  TRUE = 正作用（pv↑→out↑），FALSE = 反作用
-    auto        BOOL  TRUE 自动 / FALSE 手动
-    manual_out  REAL  手动给定值
-    out_min     REAL  输出下限（假定 out_min < out_max）
-    out_max     REAL  输出上限
-    ff          REAL  前馈量（钳位前叠加到输出；接 FB_LEADLAG 可加动态补偿）
-    track       BOOL  输出跟踪使能（优先级最高，盖过 auto/手动）
-    track_value REAL  跟踪值
-    sp_rate     REAL  设定值斜坡限速 单位/s（0 = 不限速）
-  输出：
-    out         REAL  调节输出（各模式均钳位）
-    dev         REAL  偏差 pv - sp_int（经 SP 斜坡后的实际工作偏差）
+  Inputs:
+    pv          REAL  process value
+    sp          REAL  setpoint
+    kp          REAL  proportional gain
+    ti_s        REAL  integral time s (0 = integral off)
+    td_s        REAL  derivative time s (0 = derivative off, derivative term unfiltered)
+    dt_s        REAL  sample period s (<=0 holds this scan, no action)
+    direct      BOOL  TRUE = direct-acting (pv up -> out up), FALSE = reverse-acting
+    auto        BOOL  TRUE auto / FALSE manual
+    manual_out  REAL  manual output value
+    out_min     REAL  output low limit (assumes out_min < out_max)
+    out_max     REAL  output high limit
+    ff          REAL  feedforward (added to output before clamp; feed via FB_LEADLAG for dynamic shaping)
+    track       BOOL  output-tracking enable (highest priority, overrides auto/manual)
+    track_value REAL  tracking value
+    sp_rate     REAL  setpoint ramp rate limit units/s (0 = no rate limit)
+  Outputs:
+    out         REAL  control output (clamped in every mode)
+    dev         REAL  deviation pv - sp_int (actual working deviation after the SP ramp)
 *)
 FUNCTION_BLOCK FB_PID
   VAR_INPUT
@@ -189,8 +198,8 @@ FUNCTION_BLOCK FB_PID
     dev : REAL;
   END_VAR
   VAR
-    sp_int    : REAL; (* 斜坡后的内部工作设定值 *)
-    acc       : REAL; (* PID 累加器（不含 ff） *)
+    sp_int    : REAL; (* internal working setpoint after the ramp *)
+    acc       : REAL; (* PID accumulator (excludes ff) *)
     e         : REAL;
     e_prev    : REAL;
     e_prev2   : REAL;
@@ -199,14 +208,14 @@ FUNCTION_BLOCK FB_PID
     d_term    : REAL;
     sp_step   : REAL;
     sp_delta  : REAL;
-    init_done : BOOL; (* sp_int 首扫描对中标志 *)
+    init_done : BOOL; (* sp_int first-scan alignment flag *)
   END_VAR
 
   IF dt_s <= 0.0 THEN
-    RETURN; (* 采样周期非法：保持输出与历史不变 *)
+    RETURN; (* invalid sample period: hold output and history unchanged *)
   END_IF;
 
-  (* 设定值斜坡：sp_rate > 0 时 sp_int 限速逼近 sp；首扫描直接对中 *)
+  (* Setpoint ramp: when sp_rate > 0, sp_int approaches sp at the rate limit; first scan aligns directly *)
   IF NOT init_done THEN
     sp_int := sp;
     init_done := TRUE;
@@ -226,7 +235,7 @@ FUNCTION_BLOCK FB_PID
 
   dev := pv - sp_int;
 
-  (* 控制偏差；正作用取反号 *)
+  (* Control deviation; direct-acting flips the sign *)
   IF direct THEN
     e := pv - sp_int;
   ELSE
@@ -234,10 +243,10 @@ FUNCTION_BLOCK FB_PID
   END_IF;
 
   IF track THEN
-    (* 输出跟踪：无条件跟随 track_value（联锁强制/超驰接管），优先级最高 *)
+    (* Output tracking: follows track_value unconditionally (interlock forcing / override takeover), highest priority *)
     out := track_value;
   ELSIF NOT auto THEN
-    (* 手动：跟踪 manual_out，切回自动时增量式自然无扰 *)
+    (* Manual: follows manual_out; the incremental form makes the return to auto naturally bumpless *)
     out := manual_out;
   ELSE
     p_term := kp * (e - e_prev);
@@ -245,7 +254,7 @@ FUNCTION_BLOCK FB_PID
     i_term := 0.0;
     IF ti_s > 0.0 THEN
       i_term := kp * dt_s / ti_s * e;
-      (* 条件积分：输出已饱和且积分仍推向限幅方向时，本周期丢弃积分项 *)
+      (* Conditional integration: when the output is saturated and the integral still pushes toward the limit, drop the integral term this scan *)
       IF (out >= out_max AND i_term > 0.0) OR (out <= out_min AND i_term < 0.0) THEN
         i_term := 0.0;
       END_IF;
@@ -257,51 +266,53 @@ FUNCTION_BLOCK FB_PID
     END_IF;
 
     acc := acc + p_term + i_term + d_term;
-    out := acc + ff; (* 前馈钳位前叠加 *)
+    out := acc + ff; (* feedforward added before clamp *)
   END_IF;
 
-  (* 输出钳位（增量式下同时起抗积分饱和作用） *)
+  (* Output clamp (in the incremental form this also provides anti-windup) *)
   IF out > out_max THEN
     out := out_max;
   ELSIF out < out_min THEN
     out := out_min;
   END_IF;
 
-  (* 回算：acc 恒 = 钳位后输出 - 前馈 → 钳位/ff 变化/手动/跟踪全程无扰 *)
+  (* Back-calculation: acc always = clamped output - feedforward -> clamping / ff changes / manual / tracking all bumpless *)
   acc := out - ff;
 
   e_prev2 := e_prev;
   e_prev  := e;
 END_FUNCTION_BLOCK
 (*
-  FB_ALARM_HL — 四级高低报警（H/L/HH/LL），带死区、延时与简化 ISA-18.2 确认锁存。
+  FB_ALARM_HL — four-level high/low alarm (H/L/HH/LL) with deadband, delay and simplified ISA-18.2 acknowledge latch.
 
-  用途：液位/温度/压力等模拟量的 高/低/高高/低低 报警。
-  例：碳化塔液位 LT 报警，HH 联锁停进料。
+  Purpose: high/low/high-high/low-low alarms for analog values such as level/temperature/pressure.
+  Example: a vessel level LT alarm, with HH interlocking the feed shutdown.
 
-  行为（每级相同，独立计时）：
-    1) 原始越限判定（带死区回差）：
-       高类：pv > sp 置位；pv < sp - deadband 复位。
-       低类：pv < sp 置位；pv > sp + deadband 复位。
-    2) 延时：越限条件连续保持 delay_s 后才触发（内部用 dt_s 手工累加计时，
-       不使用 TON 实例，便于离线测试与移植）。
-    3) 锁存（简化 ISA-18.2）：报警输出 = 触发条件 OR (已锁存 AND NOT ack)。
-       即条件存在时报警常在；条件消失后仍保持，直到 ack 确认才清除。
+  Behavior (same for each level, independently timed):
+    1) Raw limit decision (with deadband hysteresis):
+       High type: pv > sp sets; pv < sp - deadband resets.
+       Low type:  pv < sp sets; pv > sp + deadband resets.
+    2) Delay: the limit condition must persist for delay_s before tripping (internally
+       timed by manual dt_s accumulation, not a TON instance, for easy offline testing
+       and portability).
+    3) Latch (simplified ISA-18.2): alarm output = trip condition OR (latched AND NOT ack).
+       That is, while the condition exists the alarm stays on; after the condition
+       clears it is held until ack acknowledges and clears it.
 
-  输入：
-    pv        REAL  过程值
-    h_sp      REAL  高报设定
-    l_sp      REAL  低报设定
-    hh_sp     REAL  高高报设定
-    ll_sp     REAL  低低报设定
-    deadband  REAL  死区（回差，工程单位）
-    delay_s   REAL  报警延时 s（0 = 立即）
-    dt_s      REAL  采样周期 s
-    ack       BOOL  确认（电平有效）
-  输出：
-    h_alm / l_alm / hh_alm / ll_alm  BOOL  锁存后的报警输出
-    any_alm                          BOOL  任一报警
-    h_cond / l_cond / hh_cond / ll_cond BOOL 原始越限位（含死区，未延时未锁存）
+  Inputs:
+    pv        REAL  process value
+    h_sp      REAL  high alarm setpoint
+    l_sp      REAL  low alarm setpoint
+    hh_sp     REAL  high-high alarm setpoint
+    ll_sp     REAL  low-low alarm setpoint
+    deadband  REAL  deadband (hysteresis, engineering units)
+    delay_s   REAL  alarm delay s (0 = immediate)
+    dt_s      REAL  sample period s
+    ack       BOOL  acknowledge (level-active)
+  Outputs:
+    h_alm / l_alm / hh_alm / ll_alm  BOOL  latched alarm outputs
+    any_alm                          BOOL  any alarm
+    h_cond / l_cond / hh_cond / ll_cond BOOL raw limit flags (with deadband, undelayed, unlatched)
 *)
 FUNCTION_BLOCK FB_ALARM_HL
   VAR_INPUT
@@ -327,7 +338,7 @@ FUNCTION_BLOCK FB_ALARM_HL
     ll_cond : BOOL;
   END_VAR
   VAR
-    h_t     : REAL; (* 各级延时累加器，手工计时替代 TON *)
+    h_t     : REAL; (* per-level delay accumulator, manual timing in place of TON *)
     l_t     : REAL;
     hh_t    : REAL;
     ll_t    : REAL;
@@ -337,7 +348,7 @@ FUNCTION_BLOCK FB_ALARM_HL
     ll_trip : BOOL;
   END_VAR
 
-  (* ---- 高报 H ---- *)
+  (* ---- High alarm H ---- *)
   IF pv > h_sp THEN
     h_cond := TRUE;
   ELSIF pv < h_sp - deadband THEN
@@ -351,7 +362,7 @@ FUNCTION_BLOCK FB_ALARM_HL
   h_trip := h_cond AND (h_t >= delay_s);
   h_alm  := h_trip OR (h_alm AND NOT ack);
 
-  (* ---- 低报 L ---- *)
+  (* ---- Low alarm L ---- *)
   IF pv < l_sp THEN
     l_cond := TRUE;
   ELSIF pv > l_sp + deadband THEN
@@ -365,7 +376,7 @@ FUNCTION_BLOCK FB_ALARM_HL
   l_trip := l_cond AND (l_t >= delay_s);
   l_alm  := l_trip OR (l_alm AND NOT ack);
 
-  (* ---- 高高报 HH ---- *)
+  (* ---- High-high alarm HH ---- *)
   IF pv > hh_sp THEN
     hh_cond := TRUE;
   ELSIF pv < hh_sp - deadband THEN
@@ -379,7 +390,7 @@ FUNCTION_BLOCK FB_ALARM_HL
   hh_trip := hh_cond AND (hh_t >= delay_s);
   hh_alm  := hh_trip OR (hh_alm AND NOT ack);
 
-  (* ---- 低低报 LL ---- *)
+  (* ---- Low-low alarm LL ---- *)
   IF pv < ll_sp THEN
     ll_cond := TRUE;
   ELSIF pv > ll_sp + deadband THEN
@@ -396,25 +407,26 @@ FUNCTION_BLOCK FB_ALARM_HL
   any_alm := h_alm OR l_alm OR hh_alm OR ll_alm;
 END_FUNCTION_BLOCK
 (*
-  FB_PULSER — 周期脉冲发生器。
+  FB_PULSER — periodic pulse generator.
 
-  用途：料仓空气炮/气锤周期吹扫、周期润滑、心跳输出。
-  例：使能后每 period_s 秒输出一个 pulse_len_s 秒宽的脉冲（周期起点先出脉冲）。
+  Purpose: periodic air-cannon / air-hammer silo purging, periodic lubrication, heartbeat output.
+  Example: once enabled, output a pulse_len_s-wide pulse every period_s seconds (the pulse comes at the period start).
 
-  行为：
-    enable 时相位 phase_s 以 dt_s 手工累加；phase_s < pulse_len_s 期间 q := TRUE，
-    到 period_s 回卷（减法回卷，长期节拍不漂移）。
-    NOT enable 或参数非法（period_s/dt_s <= 0）时 q := FALSE 且相位清零
-    （重新使能从脉冲开始）。
-    pulse_len_s >= period_s 时 q 恒为 TRUE（按定义连续输出）。
+  Behavior:
+    while enabled, the phase phase_s accumulates by dt_s manually; q := TRUE while
+    phase_s < pulse_len_s, wrapping at period_s (subtraction wrap, so the long-term
+    cadence does not drift).
+    NOT enable or invalid parameters (period_s/dt_s <= 0) -> q := FALSE and phase cleared
+    (re-enabling starts from the pulse).
+    pulse_len_s >= period_s -> q is always TRUE (continuous output by definition).
 
-  输入：
-    enable      BOOL  使能
-    period_s    REAL  脉冲周期 s
-    pulse_len_s REAL  脉冲宽度 s
-    dt_s        REAL  采样周期 s
-  输出：
-    q BOOL  脉冲输出
+  Inputs:
+    enable      BOOL  enable
+    period_s    REAL  pulse period s
+    pulse_len_s REAL  pulse width s
+    dt_s        REAL  sample period s
+  Outputs:
+    q BOOL  pulse output
 *)
 FUNCTION_BLOCK FB_PULSER
   VAR_INPUT
@@ -427,7 +439,7 @@ FUNCTION_BLOCK FB_PULSER
     q : BOOL;
   END_VAR
   VAR
-    phase_s : REAL; (* 周期内相位 0..period_s，手工计时替代 TP/TON *)
+    phase_s : REAL; (* phase within the period 0..period_s, manual timing in place of TP/TON *)
   END_VAR
 
   IF NOT enable OR period_s <= 0.0 OR dt_s <= 0.0 THEN
@@ -436,33 +448,35 @@ FUNCTION_BLOCK FB_PULSER
     RETURN;
   END_IF;
 
-  (* 先按当前相位出脉冲（使能首周期立即为 TRUE），再推进相位 *)
+  (* Emit the pulse by the current phase first (TRUE immediately on the first enabled period), then advance the phase *)
   q := phase_s < pulse_len_s;
 
   phase_s := phase_s + dt_s;
   IF phase_s >= period_s THEN
-    phase_s := phase_s - period_s; (* 减法回卷，保持长期节拍 *)
+    phase_s := phase_s - period_s; (* subtraction wrap, keeps the long-term cadence *)
   END_IF;
 END_FUNCTION_BLOCK
 (*
-  FB_HILO_FILL — 高位关、低位开的水箱/料仓补给控制。
+  FB_HILO_FILL — high-close, low-open tank/silo replenishment control.
 
-  用途：液位低于低位开补给阀，高于高位关阀，之间保持当前状态
-  （等效于低位接通方向的迟滞开关，专名封装便于组态阅读）。
-  例：循环水箱补水：pv <= l_sp 开补水阀，pv >= h_sp 关阀。
+  Purpose: below the low setpoint open the supply valve, above the high setpoint close
+  it, hold the current state in between (equivalent to a low-side-on hysteresis switch,
+  given a dedicated name for readability in configuration).
+  Example: circulating-tank make-up: pv <= l_sp opens the make-up valve, pv >= h_sp closes it.
 
-  行为：
-    pv <= l_sp → valve_open := TRUE（低位开）
-    pv >= h_sp → valve_open := FALSE（高位关）
-    l_sp < pv < h_sp → 保持。
-  假定 l_sp < h_sp；若设反则高位判断优先（先开后即被关，输出为 FALSE）。
+  Behavior:
+    pv <= l_sp -> valve_open := TRUE (low-open)
+    pv >= h_sp -> valve_open := FALSE (high-close)
+    l_sp < pv < h_sp -> hold.
+  Assumes l_sp < h_sp; if reversed, the high test takes priority (opens then is
+  immediately closed, output FALSE).
 
-  输入：
-    pv   REAL  液位/料位过程值
-    h_sp REAL  高位设定（关阀）
-    l_sp REAL  低位设定（开阀）
-  输出：
-    valve_open BOOL  补给阀输出（TRUE 开）
+  Inputs:
+    pv   REAL  level process value
+    h_sp REAL  high setpoint (close)
+    l_sp REAL  low setpoint (open)
+  Outputs:
+    valve_open BOOL  supply-valve output (TRUE open)
 *)
 FUNCTION_BLOCK FB_HILO_FILL
   VAR_INPUT
@@ -475,33 +489,35 @@ FUNCTION_BLOCK FB_HILO_FILL
   END_VAR
 
   IF pv >= h_sp THEN
-    valve_open := FALSE; (* 高位关，优先 *)
+    valve_open := FALSE; (* high-close, priority *)
   ELSIF pv <= l_sp THEN
-    valve_open := TRUE;  (* 低位开 *)
+    valve_open := TRUE;  (* low-open *)
   END_IF;
-  (* 区间内保持 *)
+  (* Hold in between *)
 END_FUNCTION_BLOCK
 (*
-  FB_RATIO — 比值站（比值给定器）。
+  FB_RATIO — ratio station (ratio setpoint generator).
 
-  ≈ 比值站（ratio station）：配比/配料回路惯用块，输出接下游 PID 的 sp。
+  ~ Ratio station: the customary block for proportioning/blending loops, output feeds the downstream PID's sp.
 
-  用途：配比控制：从动流量设定值 = 主动（wild）流量 × 比值 + 偏置，
-  sp 输出接下游 FB_PID 的 sp 输入构成比值回路。
-  例：碳化塔石灰乳流量按进气量 0.85 配比跟随。
+  Purpose: ratio control: the follower flow setpoint = wild (leading) flow * ratio +
+  bias, and the sp output feeds the sp input of a downstream FB_PID to form the ratio
+  loop.
+  Example: a follower stream tracks the leading flow at a 0.85 proportion.
 
-  公式：sp := clamp(ratio, ratio_min, ratio_max) * wild_flow + bias。
-  说明：仅对 ratio 钳位（操作员可调比值的安全限幅），不对 sp 钳位——
-  sp 量纲随 wild_flow，下游 PID 自有输出钳位。
+  Formula: sp := clamp(ratio, ratio_min, ratio_max) * wild_flow + bias.
+  Note: only ratio is clamped (a safety limit on the operator-adjustable ratio), sp is
+  not clamped -- sp's dimension follows wild_flow, and the downstream PID has its own
+  output clamp.
 
-  输入：
-    wild_flow REAL  主动流量（不受本回路控制的"野"流量）
-    ratio     REAL  比值
-    ratio_min REAL  比值下限
-    ratio_max REAL  比值上限
-    bias      REAL  偏置（工程单位）
-  输出：
-    sp        REAL  从动回路设定值
+  Inputs:
+    wild_flow REAL  leading flow (the "wild" flow not controlled by this loop)
+    ratio     REAL  ratio
+    ratio_min REAL  ratio low limit
+    ratio_max REAL  ratio high limit
+    bias      REAL  bias (engineering units)
+  Outputs:
+    sp        REAL  follower-loop setpoint
 *)
 FUNCTION_BLOCK FB_RATIO
   VAR_INPUT
@@ -528,38 +544,40 @@ FUNCTION_BLOCK FB_RATIO
   sp := ratio_used * wild_flow + bias;
 END_FUNCTION_BLOCK
 (*
-  FB_SPLIT_RANGE — 分程输出：一个调节器输出按 split 点分配到两个阀。
+  FB_SPLIT_RANGE — split-range output: one controller output distributed to two valves at the split point.
 
-  ≈ 分程输出（split range）：一个调节输出按区段驱动两个阀（加热/冷却、大小阀）。
+  ~ Split range: one control output drives two valves by segment (heating/cooling, large/small valves).
 
-  用途：一个 PID 驱动两个执行机构：大小阀扩量程（顺序分程，
-  reverse_b := FALSE），或加热/冷却、进料/回流互补型分程
-  （reverse_b := TRUE，按执行机构气开气关与 PID 作用方向整定）。
+  Purpose: one PID drives two actuators: large/small valves extending the range
+  (sequential split range, reverse_b := FALSE), or a heating/cooling or
+  feed/reflux complementary split range (reverse_b := TRUE, tuned per the actuator's
+  air-to-open/air-to-close action and the PID action direction).
 
-  行为（u 先钳位 0..100，两输出亦钳位 0..100）：
-    out_a：u 在 [0, split] 内 0→100 线性，u >= split 后保持 100。
-    out_b：u 在 [split, 100] 内 0→100 线性，u <= split 时为 0；
-           reverse_b = TRUE 时 B 段反转为 100→0（含段外端值保持，
-           即 u <= split 时 out_b = 100，输出连续无跳变）。
-    曲线示意（split = 50）：
-      reverse_b = FALSE（大小阀顺序分程）：
-        u:     0 …… 50 …… 100
-        out_a: 0 → 100 ┤ 保持 100
-        out_b: 0   0   ├ 0 → 100
-      reverse_b = TRUE（互补型，B 先全开后渐关）：
-        u:     0 …… 50 …… 100
-        out_a: 0 → 100 ┤ 保持 100
-        out_b: 100 100 ├ 100 → 0
-    退化：split <= 0 → A 段无量程（u > 0 即 100）；split >= 100 → B 段
-    无量程（u >= 100 才动作）。split 应整定在 (0, 100) 内。
+  Behavior (u is clamped 0..100 first, both outputs also clamped 0..100):
+    out_a: linear 0->100 for u in [0, split], holds 100 once u >= split.
+    out_b: linear 0->100 for u in [split, 100], 0 when u <= split;
+           when reverse_b = TRUE, segment B reverses to 100->0 (with the end value held
+           outside the segment, i.e. out_b = 100 when u <= split, output continuous with
+           no jump).
+    Curve sketch (split = 50):
+      reverse_b = FALSE (large/small valve sequential split range):
+        u:     0 .... 50 .... 100
+        out_a: 0 -> 100 | holds 100
+        out_b: 0   0    | 0 -> 100
+      reverse_b = TRUE (complementary, B fully open first then closing):
+        u:     0 .... 50 .... 100
+        out_a: 0 -> 100 | holds 100
+        out_b: 100 100  | 100 -> 0
+    Degenerate: split <= 0 -> segment A has no range (u > 0 means 100); split >= 100 ->
+    segment B has no range (acts only once u >= 100). split should be set within (0, 100).
 
-  输入：
-    u         REAL  调节器输出 0..100
-    split     REAL  分程点 %（B 阀起点）
-    reverse_b BOOL  TRUE = B 阀在其分程段内反作用（100→0）
-  输出：
-    out_a     REAL  A 阀开度 0..100
-    out_b     REAL  B 阀开度 0..100
+  Inputs:
+    u         REAL  controller output 0..100
+    split     REAL  split point % (segment B start)
+    reverse_b BOOL  TRUE = valve B is reverse-acting within its split segment (100->0)
+  Outputs:
+    out_a     REAL  valve A opening 0..100
+    out_b     REAL  valve B opening 0..100
 *)
 FUNCTION_BLOCK FB_SPLIT_RANGE
   VAR_INPUT
@@ -572,11 +590,11 @@ FUNCTION_BLOCK FB_SPLIT_RANGE
     out_b : REAL;
   END_VAR
   VAR
-    uc     : REAL; (* 钳位后的输入 *)
+    uc     : REAL; (* clamped input *)
     span_b : REAL;
   END_VAR
 
-  (* 输入钳位 0..100 *)
+  (* Input clamp 0..100 *)
   uc := u;
   IF uc < 0.0 THEN
     uc := 0.0;
@@ -584,11 +602,11 @@ FUNCTION_BLOCK FB_SPLIT_RANGE
     uc := 100.0;
   END_IF;
 
-  (* A 阀：[0, split] 内 0→100 *)
+  (* Valve A: 0->100 for u in [0, split] *)
   IF split > 0.0 THEN
     out_a := uc * 100.0 / split;
   ELSE
-    (* 退化：A 无分程段 *)
+    (* Degenerate: A has no split segment *)
     IF uc > 0.0 THEN
       out_a := 100.0;
     ELSE
@@ -601,12 +619,12 @@ FUNCTION_BLOCK FB_SPLIT_RANGE
     out_a := 100.0;
   END_IF;
 
-  (* B 阀：[split, 100] 内 0→100 *)
+  (* Valve B: 0->100 for u in [split, 100] *)
   span_b := 100.0 - split;
   IF span_b > 0.0 THEN
     out_b := (uc - split) * 100.0 / span_b;
   ELSE
-    (* 退化：B 无分程段 *)
+    (* Degenerate: B has no split segment *)
     IF uc >= split THEN
       out_b := 100.0;
     ELSE
@@ -619,33 +637,34 @@ FUNCTION_BLOCK FB_SPLIT_RANGE
     out_b := 100.0;
   END_IF;
 
-  (* B 段反作用（钳位后再反转，段外保持端值，输出连续） *)
+  (* Segment B reverse action (reverse after clamping, hold the end value outside the segment, output continuous) *)
   IF reverse_b THEN
     out_b := 100.0 - out_b;
   END_IF;
 END_FUNCTION_BLOCK
 (*
-  FB_RUNTIME — 设备运行小时 + 启动次数统计。
+  FB_RUNTIME — equipment run-hours + start-count statistics.
 
-  ≈ 设备运行统计（累计运行小时 + 启动次数），维护保养数据标配。
+  ~ Equipment run statistics (accumulated run hours + start count), standard
+  maintenance data.
 
-  用途：泵/风机磨损均衡（hours 接 FB_DUTY2 的 hours_a/b，配 alt_mode=1）、
-  维保到期提醒、启停频度统计。
-  行为：
-    running 为 TRUE 期间 hours := hours + dt_s/3600；
-    running 上升沿 starts := starts + 1；
-    reset 电平有效，两者清零（优先，复位周期不累计）。
-    实例可由调用方放 VAR RETAIN 块下断电保持（同 FB_TOTALIZER 注意事项：
-    IA2 retain 按 i32 存取，REAL 小时数的保持精度受此限制；starts 为
-    整数计数不受影响）。
+  Purpose: pump/fan wear balancing (feed hours to FB_DUTY2's hours_a/b with alt_mode=1),
+  maintenance-due reminders, start/stop frequency statistics.
+  Behavior:
+    while running is TRUE, hours := hours + dt_s/3600;
+    on a running rising edge, starts := starts + 1;
+    reset level-active clears both (priority, no accumulation during a reset scan).
+    The caller may place the instance under VAR RETAIN for retention across power loss
+    (same caveat as FB_TOTALIZER: IA2 retain stores as i32, so the retention precision
+    of the REAL hours is limited by this; starts is an integer count and is unaffected).
 
-  输入：
-    running BOOL  设备运行中（接运行反馈，必要时前置 FB_DEBOUNCE）
-    reset   BOOL  清零（电平有效，优先；检修换泵后用）
-    dt_s    REAL  采样周期 s
-  输出：
-    hours  REAL  累计运行小时
-    starts DINT  累计启动次数
+  Inputs:
+    running BOOL  equipment running (feed the run feedback, debounce with FB_DEBOUNCE if needed)
+    reset   BOOL  clear (level-active, priority; used after maintenance / pump replacement)
+    dt_s    REAL  sample period s
+  Outputs:
+    hours  REAL  accumulated run hours
+    starts DINT  accumulated start count
 *)
 FUNCTION_BLOCK FB_RUNTIME
   VAR_INPUT
@@ -658,7 +677,7 @@ FUNCTION_BLOCK FB_RUNTIME
     starts : DINT;
   END_VAR
   VAR
-    prev_run : BOOL; (* 上升沿记忆 *)
+    prev_run : BOOL; (* rising-edge memory *)
   END_VAR
 
   IF reset THEN
@@ -675,40 +694,44 @@ FUNCTION_BLOCK FB_RUNTIME
   prev_run := running;
 END_FUNCTION_BLOCK
 (*
-  FB_DUTY2 — 双泵值班/备用（duty/standby）轮换控制。
+  FB_DUTY2 — dual-pump duty/standby rotation control.
 
-  ≈ 双泵一用一备（duty/standby）轮换：按启动次序或运行小时均衡选值班泵，故障即时顶替。
+  ~ Dual-pump duty/standby rotation: select the duty pump by start sequence or run-hour
+  balancing, with immediate takeover on fault.
 
-  用途：两台泵一用一备：每次启动轮换或按累计运行小时均衡选值班泵；
-  值班泵故障备用泵立即顶上；双故障全停。
-  行为（扫描确定性：无内部计时，仅沿记忆）：
-    demand 上升沿选定本次值班泵，优先级：
-      1) 恰有一台已在运转（run_fb 单边 TRUE）→ 直接采纳其为值班
-         （无扰接管，避免停转再起备用泵）；
-      2) alt_mode = 1 → 累计小时小者值班（hours_a/b 接两个 FB_RUNTIME）；
-      3) alt_mode = 0（默认）→ 在当前值班位上翻转（含故障顶替后的状态，
-         天然磨损均衡）。
-    demand 保持期间：值班泵故障且另一台健康 → 值班立即切换（顶替）；
-    被命令泵故障即不出指令；双故障 → cmd 双 FALSE（值班选择保持）。
-    demand 撤销 → cmd 双 FALSE。
-    接线建议：fault_x 接 FB_MOTOR 的 fault 或电气综保；run_fb_x 接运行
-    反馈（抖动触点前置 FB_DEBOUNCE）；反馈超时判故障交给 FB_MOTOR，
-    本块不重复计时。
+  Purpose: two pumps in a duty/standby arrangement: select the duty pump by rotating
+  each start or by balancing accumulated run hours; on a duty-pump fault the standby
+  takes over immediately; on a dual fault both stop.
+  Behavior (scan-deterministic: no internal timing, only edge memory):
+    A demand rising edge selects this round's duty pump, by priority:
+      1) exactly one is already running (run_fb TRUE on one side) -> adopt it as duty
+         directly (bumpless takeover, avoiding stopping it to start the standby);
+      2) alt_mode = 1 -> the lower accumulated hours is duty (hours_a/b fed from two FB_RUNTIME);
+      3) alt_mode = 0 (default) -> toggle from the current duty position (including the
+         state after a fault takeover, giving natural wear balancing).
+    While demand persists: a duty-pump fault with the other healthy -> duty switches
+    immediately (takeover); a commanded pump that faults gets no command; a dual fault
+    -> both cmd FALSE (the duty selection is held).
+    demand withdrawn -> both cmd FALSE.
+    Wiring suggestion: feed fault_x from FB_MOTOR's fault or the electrical protection
+    relay; feed run_fb_x from the run feedback (debounce a chattering contact with
+    FB_DEBOUNCE); leave feedback-timeout fault decision to FB_MOTOR, this block does not
+    duplicate the timing.
 
-  输入：
-    demand   BOOL  系统需泵（电平）
-    alt_mode INT   0 = 每次启动轮换 / 1 = 运行小时均衡
-    run_fb_a BOOL  A 泵运行反馈
-    run_fb_b BOOL  B 泵运行反馈
-    fault_a  BOOL  A 泵故障
-    fault_b  BOOL  B 泵故障
-    hours_a  REAL  A 泵累计小时（alt_mode=1 用，接 FB_RUNTIME.hours）
-    hours_b  REAL  B 泵累计小时（alt_mode=1 用）
-    dt_s     REAL  采样周期 s（本块当前不计时，保留以统一库接口）
-  输出：
-    cmd_a     BOOL  A 泵启动指令
-    cmd_b     BOOL  B 泵启动指令
-    duty_is_a BOOL  当前值班泵为 A
+  Inputs:
+    demand   BOOL  system needs a pump (level)
+    alt_mode INT   0 = rotate each start / 1 = run-hour balancing
+    run_fb_a BOOL  pump A run feedback
+    run_fb_b BOOL  pump B run feedback
+    fault_a  BOOL  pump A fault
+    fault_b  BOOL  pump B fault
+    hours_a  REAL  pump A accumulated hours (used by alt_mode=1, fed from FB_RUNTIME.hours)
+    hours_b  REAL  pump B accumulated hours (used by alt_mode=1)
+    dt_s     REAL  sample period s (this block does not currently time; kept for a uniform library interface)
+  Outputs:
+    cmd_a     BOOL  pump A start command
+    cmd_b     BOOL  pump B start command
+    duty_is_a BOOL  the current duty pump is A
 *)
 FUNCTION_BLOCK FB_DUTY2
   VAR_INPUT
@@ -728,7 +751,7 @@ FUNCTION_BLOCK FB_DUTY2
     duty_is_a : BOOL;
   END_VAR
   VAR
-    prev_demand : BOOL; (* 上升沿记忆 *)
+    prev_demand : BOOL; (* rising-edge memory *)
     rising      : BOOL;
   END_VAR
 
@@ -737,18 +760,18 @@ FUNCTION_BLOCK FB_DUTY2
 
   IF rising THEN
     IF run_fb_a AND NOT run_fb_b THEN
-      duty_is_a := TRUE;  (* 已在转的泵直接作值班，无扰接管 *)
+      duty_is_a := TRUE;  (* the already-running pump becomes duty directly, bumpless takeover *)
     ELSIF run_fb_b AND NOT run_fb_a THEN
       duty_is_a := FALSE;
     ELSIF alt_mode = 1 THEN
-      duty_is_a := hours_a <= hours_b; (* 小时均衡：少者值班 *)
+      duty_is_a := hours_a <= hours_b; (* hour balancing: the lower is duty *)
     ELSE
-      duty_is_a := NOT duty_is_a; (* 每次启动轮换（初值 FALSE → 首启选 A） *)
+      duty_is_a := NOT duty_is_a; (* rotate each start (initial FALSE -> first start selects A) *)
     END_IF;
   END_IF;
 
   IF demand THEN
-    (* 故障顶替：值班故障且另一台健康 → 值班立即切换 *)
+    (* Fault takeover: duty faults and the other is healthy -> duty switches immediately *)
     IF duty_is_a AND fault_a AND NOT fault_b THEN
       duty_is_a := FALSE;
     ELSIF NOT duty_is_a AND fault_b AND NOT fault_a THEN
@@ -762,29 +785,33 @@ FUNCTION_BLOCK FB_DUTY2
   END_IF;
 END_FUNCTION_BLOCK
 (*
-  FB_INTERLOCK8 — 8 路联锁汇总 + 首出（first-out）记录。
+  FB_INTERLOCK8 — 8-channel interlock summary + first-out recording.
 
-  ≈ 联锁汇总 + 首出捕捉（first-out annunciation，参考 ISA-18.1 首出窗概念）。
+  ~ Interlock summary + first-out capture (first-out annunciation, after the ISA-18.1 first-out-window concept).
 
-  用途：机组联锁跳车原因追溯：多条件汇总成一个跳闸位，并锁存最先
-  动作的那一路，事后定位跳车根因（首出之后的连锁性动作不覆盖记录）。
-  行为：
-    有效条件 ax := cx AND enablex（enablex 默认 TRUE；置 FALSE = 旁路该路）。
-    tripped := 任一有效条件 OR (已锁存 AND NOT reset)
-    ——条件在则常报；条件全清后保持，直到 reset（等效"reset 且全清"
-    才能复位；条件未清时按 reset 无效）。
-    首出捕获：tripped 由 FALSE→TRUE 的那一拍记录当时动作的最小路号
-    （同拍多路同动取小号）。联锁保持期间后续动作不改写首出；
-    复位成功（tripped 回 FALSE）时 first_out 清 0。
-    cx 语义：TRUE = 该条件已动作（跳闸方向）。常闭型信号请在外部取反。
+  Purpose: trip-cause tracing for a unit interlock: summarize multiple conditions into a
+  single trip bit and latch the channel that acted first, to locate the trip root cause
+  afterward (consequential actions after the first-out do not overwrite the record).
+  Behavior:
+    Effective condition ax := cx AND enablex (enablex default TRUE; setting FALSE = bypass that channel).
+    tripped := any effective condition OR (latched AND NOT reset)
+    -- while any condition exists the alarm stays on; after all conditions clear it is
+    held until reset (equivalent to "reset AND all clear" to reset; reset has no effect
+    while a condition is uncleared).
+    First-out capture: the scan where tripped goes FALSE->TRUE records the lowest channel
+    number acting at that moment (on a tie, the lowest number). During the interlock hold,
+    later actions do not overwrite the first-out; on a successful reset (tripped returns
+    FALSE) first_out is cleared to 0.
+    cx semantics: TRUE = that condition has acted (trip direction). Invert normally-closed
+    signals externally.
 
-  输入：
-    c1..c8           BOOL  联锁条件（TRUE = 动作/越限）
-    enable1..enable8 BOOL  各路投用（默认 TRUE；FALSE = 旁路）
-    reset            BOOL  复位（电平有效；仅条件全清后生效）
-  输出：
-    tripped   BOOL  联锁动作（锁存）
-    first_out INT   首出路号 1..8，0 = 无
+  Inputs:
+    c1..c8           BOOL  interlock conditions (TRUE = acted/over-limit)
+    enable1..enable8 BOOL  per-channel in service (default TRUE; FALSE = bypass)
+    reset            BOOL  reset (level-active; effective only after all conditions clear)
+  Outputs:
+    tripped   BOOL  interlock acted (latched)
+    first_out INT   first-out channel number 1..8, 0 = none
 *)
 FUNCTION_BLOCK FB_INTERLOCK8
   VAR_INPUT
@@ -811,7 +838,7 @@ FUNCTION_BLOCK FB_INTERLOCK8
     first_out : INT;
   END_VAR
   VAR
-    a1    : BOOL; (* 投用后的有效条件 *)
+    a1    : BOOL; (* effective condition after in-service gating *)
     a2    : BOOL;
     a3    : BOOL;
     a4    : BOOL;
@@ -820,7 +847,7 @@ FUNCTION_BLOCK FB_INTERLOCK8
     a7    : BOOL;
     a8    : BOOL;
     any_c : BOOL;
-    was   : BOOL; (* 上一拍 tripped，捕获首出沿 *)
+    was   : BOOL; (* previous-scan tripped, to capture the first-out edge *)
   END_VAR
 
   a1 := c1 AND enable1;
@@ -837,7 +864,7 @@ FUNCTION_BLOCK FB_INTERLOCK8
   tripped := any_c OR (tripped AND NOT reset);
 
   IF tripped AND NOT was THEN
-    (* 新跳闸事件：记录首出（同拍多路取最小号） *)
+    (* New trip event: record the first-out (on a tie, the lowest number) *)
     IF a1 THEN
       first_out := 1;
     ELSIF a2 THEN
@@ -856,31 +883,30 @@ FUNCTION_BLOCK FB_INTERLOCK8
       first_out := 8;
     END_IF;
   ELSIF NOT tripped THEN
-    first_out := 0; (* 复位成功清首出 *)
+    first_out := 0; (* successful reset clears the first-out *)
   END_IF;
 END_FUNCTION_BLOCK
-
 (*
-  FB_LIMIT — 值限幅器（高低钳位 + 越限指示）。
+  FB_LIMIT — value limiter (high-low clamp + limit indication).
 
-  ≈ 标准限幅器（limiter / high-low clamp），各主流平台标准库必备。
+  ~ Standard limiter (limiter / high-low clamp), a staple of every major platform's standard library.
 
-  用途：设定值/输出值安全钳位、串级外环输出限制、操作员输入合法化、
-  下游裸执行器的最后一道保护。
-  行为（纯组合逻辑，无内部状态）：
-    out := u 钳位到 [lo, hi]；q_hi / q_lo 指示正在钳位（u 越上/下限）。
-    组态错误 lo > hi → out := (lo + hi) / 2，且 q_hi 与 q_lo 同时为 TRUE
-    ——双越限位同亮在物理上不可能出现，专作组态错误信号，便于上位
-    报警捕捉。
+  Purpose: safe clamping of setpoint/output values, cascade outer-loop output limiting,
+  operator-input validation, the last line of protection for a bare downstream actuator.
+  Behavior (pure combinational logic, no internal state):
+    out := u clamped to [lo, hi]; q_hi / q_lo indicate clamping in progress (u over the high/low limit).
+    Configuration error lo > hi -> out := (lo + hi) / 2, with q_hi and q_lo both TRUE
+    -- both limit flags lit at once cannot occur physically and serves purely as a
+    configuration-error signal, easy for a supervisory alarm to catch.
 
-  输入：
-    u  REAL  输入
-    lo REAL  下限
-    hi REAL  上限（假定 lo <= hi；设反触发组态错误信号）
-  输出：
-    out  REAL  钳位输出
-    q_hi BOOL  越上限（正在按 hi 钳位）
-    q_lo BOOL  越下限（正在按 lo 钳位；与 q_hi 同时 TRUE = lo > hi 组态错误）
+  Inputs:
+    u  REAL  input
+    lo REAL  low limit
+    hi REAL  high limit (assumes lo <= hi; reversed triggers the configuration-error signal)
+  Outputs:
+    out  REAL  clamped output
+    q_hi BOOL  over high limit (clamping at hi)
+    q_lo BOOL  over low limit (clamping at lo; TRUE together with q_hi = lo > hi configuration error)
 *)
 FUNCTION_BLOCK FB_LIMIT
   VAR_INPUT
@@ -895,7 +921,7 @@ FUNCTION_BLOCK FB_LIMIT
   END_VAR
 
   IF lo > hi THEN
-    (* 组态错误：取中值输出，双越限位同亮作错误信号 *)
+    (* Configuration error: output the midpoint, both limit flags lit as the error signal *)
     out := (lo + hi) / 2.0;
     q_hi := TRUE;
     q_lo := TRUE;
@@ -917,34 +943,40 @@ FUNCTION_BLOCK FB_LIMIT
   END_IF;
 END_FUNCTION_BLOCK
 (*
-  FB_STATS — 累计统计：最小/最大/均值/标准差（Welford 单遍递推）。
+  FB_STATS — running statistics: min/max/mean/standard deviation (Welford single-pass recurrence).
 
-  ≈ 标准统计块（min/max/average/standard deviation），各主流平台
-  标准库均有同类块；本块用 Welford 单遍递推，无数组、数值稳定。
+  ~ Standard statistics block (min/max/average/standard deviation), found in every
+  major platform's standard library; this block uses Welford's single-pass
+  recurrence -- no arrays, numerically stable.
 
-  用途：质量数据统计（批次温度均值/波动）、测量噪声水平评估、
-  调试期信号摸底（接 FB_AVG_TIME 看时间平均，接本块看全程分布）。
-  行为（按"样本"计，不吃 dt_s：每个 enable 为 TRUE 的扫描拍计 1 个样本）：
-    Welford 递推（标量，单遍，避免大数平方相减的精度灾难）：
-      n := n + 1；delta := u - avg；avg := avg + delta / n；
+  Purpose: quality-data statistics (batch temperature mean/spread), measurement
+  noise-level assessment, commissioning-time signal profiling (feed FB_AVG_TIME for
+  the time average, feed this block for the full-run distribution).
+  Behavior (counted by "sample", not consuming dt_s: each scan with enable TRUE counts as 1 sample):
+    Welford recurrence (scalar, single-pass, avoiding the precision disaster of
+    subtracting squares of large numbers):
+      n := n + 1; delta := u - avg; avg := avg + delta / n;
       m2 := m2 + delta * (u - avg)
-    sd := SQRT(m2 / n) —— 总体标准差（除 n 而非 n-1）：过程监视看的是
-    波动幅度，样本数大时两者无差，且单遍递推下除 n 形式最直接。
-    reset 电平有效：清零并在下一个使能样本重新播种（vmin/vmax/avg 取
-    该样本值）。
-    注意：n 为 REAL 计数，单精度下计到约 1.6E7 个样本（100 ms 采样约
-    19 天）后 +1 失效、统计冻结——长期运行请按班/按天 reset。
+    sd := SQRT(m2 / n) -- population standard deviation (divide by n, not n-1):
+    process monitoring cares about the spread magnitude, the two are indistinguishable
+    at large sample counts, and dividing by n is the most direct form in a single-pass
+    recurrence.
+    reset level-active: clears and re-seeds on the next enabled sample (vmin/vmax/avg
+    take that sample's value).
+    Note: n is a REAL count; in single precision, after about 1.6E7 samples (about 19
+    days at a 100 ms sample) the +1 stops taking effect and the statistics freeze --
+    for long-term running, reset per shift / per day.
 
-  输入：
-    u      REAL  输入样本
-    enable BOOL  采样使能（FALSE 拍不计样本，输出保持）
-    reset  BOOL  清零（电平有效，优先；下一使能样本重新播种）
-  输出：
-    vmin REAL  最小值
-    vmax REAL  最大值
-    avg  REAL  算术均值
-    sd   REAL  总体标准差
-    n    REAL  已计样本数
+  Inputs:
+    u      REAL  input sample
+    enable BOOL  sampling enable (a FALSE scan counts no sample, outputs hold)
+    reset  BOOL  clear (level-active, takes priority; re-seeds on the next enabled sample)
+  Outputs:
+    vmin REAL  minimum value
+    vmax REAL  maximum value
+    avg  REAL  arithmetic mean
+    sd   REAL  population standard deviation
+    n    REAL  samples counted so far
 *)
 FUNCTION_BLOCK FB_STATS
   VAR_INPUT
@@ -960,7 +992,7 @@ FUNCTION_BLOCK FB_STATS
     n    : REAL;
   END_VAR
   VAR
-    m2     : REAL; (* Welford 二阶累计量 Σ(u-avg)·(u-avg') *)
+    m2     : REAL; (* Welford second-order accumulator sum of (u-avg)*(u-avg') *)
     delta  : REAL;
     delta2 : REAL;
   END_VAR
@@ -976,11 +1008,11 @@ FUNCTION_BLOCK FB_STATS
   END_IF;
 
   IF NOT enable THEN
-    RETURN; (* 不计样本：输出保持 *)
+    RETURN; (* counts no sample: outputs hold *)
   END_IF;
 
   IF n <= 0.0 THEN
-    (* 首样本播种 *)
+    (* Seed on the first sample *)
     n := 1.0;
     avg := u;
     m2 := 0.0;
@@ -1005,34 +1037,40 @@ FUNCTION_BLOCK FB_STATS
   END_IF;
 END_FUNCTION_BLOCK
 (*
-  FB_AVG_TIME — 翻转窗时间平均（tumbling-window time average）。
+  FB_AVG_TIME — tumbling-window time average.
 
-  ≈ 标准定时平均块（time average），DCS 报表/平稳量监视的惯用形态。
+  ~ Standard time-average block, the customary form for DCS reporting / steady-quantity monitoring.
 
-  用途：报表用整窗平均（如每分钟平均流量）、慢变量的抗噪取值、
-  与瞬时值比较做漂移监视。
-  行为：
-    窗内逐拍累加 sum / count；avg_run := sum / count 为当前窗的滚动均值；
-    窗满（累计时间达 window_s）时把 avg_run 拷入 avg、置 ready，随后
-    清空累加器开下一窗（相位减法回卷，长期节拍不漂移）。
-    首窗未满期间 avg 暂跟 avg_run（避免投运期输出 0），ready = FALSE
-    标示"尚非完整窗结果"；首窗完成后 ready 恒 TRUE，avg 仅在窗满拍刷新。
-    reset 电平有效：清空累加器与 ready，重新开窗。
-    window_s <= 0 → 直通（avg := avg_run := u，ready := TRUE）；
-    dt_s <= 0 → 保持不动作。
-    注意：本块是翻转窗（每窗出一个值），不是滑动窗——真滑动窗需要
-    数组缓存（本方言 FB 作用域数组不能 codegen，见 README 坑 7）；
-    要"每拍都平滑"的连续输出请用 FB_LAG 指数平滑近似。
+  Purpose: full-window averages for reports (e.g. per-minute average flow), noise-robust
+  readings of slowly varying quantities, drift monitoring by comparison against the
+  instantaneous value.
+  Behavior:
+    Within the window, sum / count accumulate each scan; avg_run := sum / count is the
+    running mean of the current window; when the window is full (accumulated time
+    reaches window_s) avg_run is copied into avg, ready is set, and then the
+    accumulators are cleared to start the next window (phase subtraction wraps so the
+    long-term cadence does not drift).
+    While the first window is not yet full, avg temporarily tracks avg_run (to avoid
+    outputting 0 at startup) and ready = FALSE flags "not yet a complete-window result";
+    after the first window completes ready stays TRUE and avg refreshes only on the
+    window-full scan.
+    reset level-active: clears the accumulators and ready, restarting the window.
+    window_s <= 0 -> pass-through (avg := avg_run := u, ready := TRUE);
+    dt_s <= 0 -> hold (no action).
+    Note: this block is a tumbling window (one value per window), not a sliding window
+    -- a true sliding window needs an array buffer (in this dialect an FB-scope array
+    cannot be codegen'd, see README gotcha 7); for continuous "smoothed every scan"
+    output, use FB_LAG exponential smoothing as an approximation.
 
-  输入：
-    u        REAL  输入
-    window_s REAL  平均窗长 s（<= 0 直通）
-    dt_s     REAL  采样周期 s
-    reset    BOOL  复位（电平有效：清窗重开）
-  输出：
-    avg     REAL  上一完整窗的平均（首窗未满暂跟 avg_run）
-    avg_run REAL  当前窗的滚动均值
-    ready   BOOL  首个完整窗已完成（avg 可信）
+  Inputs:
+    u        REAL  input
+    window_s REAL  averaging window length s (<= 0 pass-through)
+    dt_s     REAL  sample period s
+    reset    BOOL  reset (level-active: clear the window and restart)
+  Outputs:
+    avg     REAL  average of the previous complete window (tracks avg_run while the first window is incomplete)
+    avg_run REAL  running mean of the current window
+    ready   BOOL  first complete window has finished (avg is trustworthy)
 *)
 FUNCTION_BLOCK FB_AVG_TIME
   VAR_INPUT
@@ -1047,9 +1085,9 @@ FUNCTION_BLOCK FB_AVG_TIME
     ready   : BOOL;
   END_VAR
   VAR
-    sum       : REAL; (* 当前窗累加和 *)
-    count     : REAL; (* 当前窗样本数 *)
-    elapsed_s : REAL; (* 当前窗累计时间，手工计时 *)
+    sum       : REAL; (* current-window accumulated sum *)
+    count     : REAL; (* current-window sample count *)
+    elapsed_s : REAL; (* current-window accumulated time, manual timing *)
   END_VAR
 
   IF reset THEN
@@ -1063,14 +1101,14 @@ FUNCTION_BLOCK FB_AVG_TIME
   END_IF;
 
   IF window_s <= 0.0 THEN
-    avg := u; (* 窗长非法：直通 *)
+    avg := u; (* invalid window length: pass-through *)
     avg_run := u;
     ready := TRUE;
     RETURN;
   END_IF;
 
   IF dt_s <= 0.0 THEN
-    RETURN; (* 采样周期非法：保持 *)
+    RETURN; (* invalid sample period: hold *)
   END_IF;
 
   sum := sum + u;
@@ -1079,47 +1117,49 @@ FUNCTION_BLOCK FB_AVG_TIME
   avg_run := sum / count;
 
   IF elapsed_s >= window_s THEN
-    (* 窗满：拷贝结果，清空开下一窗（减法回卷保持长期节拍） *)
+    (* Window full: copy the result, clear to start the next window (subtraction wrap keeps the long-term cadence) *)
     avg := avg_run;
     ready := TRUE;
     sum := 0.0;
     count := 0.0;
     elapsed_s := elapsed_s - window_s;
   ELSIF NOT ready THEN
-    avg := avg_run; (* 首窗未满：avg 暂跟滚动均值，避免投运期输出 0 *)
+    avg := avg_run; (* first window not yet full: avg tracks the running mean to avoid outputting 0 at startup *)
   END_IF;
 END_FUNCTION_BLOCK
 (*
-  FB_INTEG — 通用积分器（带保持/复位/置数与输出钳位）。
+  FB_INTEG — general-purpose integrator (with hold/reset/preset and output clamp).
 
-  ≈ 标准积分块（integrator），各主流平台标准库必备。
+  ~ Standard integrator block, a staple of every major platform's standard library.
 
-  用途：偏差积分（℃·s 之类的累计量监视）、简单物料/能量累计、
-  对象仿真中的积分环节、自定义控制算法的积分通路。
-  与 FB_TOTALIZER 的区别：TOTALIZER 是固定 /3600 的流量累积专用块；
-  本块为通用积分 out := out + k * u * dt_s，带 hold/preset/钳位。
-  行为（命令优先级 reset > preset > hold > 积分）：
-    reset  电平有效：out := 0，越限位清零；
-    preset 电平有效：out := preset_value（随后照常钳位）；
-    hold   电平有效：暂停积分，输出保持（钳位与越限位照常刷新）；
-    其余：out := out + k * u * dt_s，钳位到 [out_min, out_max]。
-    q_hi / q_lo 指示输出贴上/下限（抗饱和：贴限后反向输入立即退出）。
-    dt_s <= 0 → 本拍保持不动作（reset/preset 为电平命令，不受此限）。
+  Purpose: deviation integration (monitoring accumulated quantities such as degC*s),
+  simple material/energy totals, the integral element in plant simulation, the
+  integral path of a custom control algorithm.
+  Difference from FB_TOTALIZER: TOTALIZER is a flow-totalizing block fixed at /3600;
+  this block is general integration out := out + k * u * dt_s, with hold/preset/clamp.
+  Behavior (command priority reset > preset > hold > integrate):
+    reset  level-active: out := 0, limit flags cleared;
+    preset level-active: out := preset_value (then clamped as usual);
+    hold   level-active: integration paused, output held (clamp and limit flags still refresh);
+    otherwise: out := out + k * u * dt_s, clamped to [out_min, out_max].
+    q_hi / q_lo indicate the output at the high/low limit (anti-windup: at a limit, a
+    reverse input exits immediately).
+    dt_s <= 0 -> hold this scan (reset/preset are level commands, not subject to this).
 
-  输入：
-    u            REAL  被积输入
-    k            REAL  积分增益（1/s 量纲由调用方定义）
-    dt_s         REAL  采样周期 s
-    hold         BOOL  暂停积分（电平有效）
-    reset        BOOL  复位到 0（电平有效，最高优先）
-    preset       BOOL  置数（电平有效，优先于 hold）
-    preset_value REAL  置数值
-    out_min      REAL  输出下限（默认 -1.0E38 ≈ 不限）
-    out_max      REAL  输出上限（默认 +1.0E38 ≈ 不限）
-  输出：
-    out  REAL  积分输出（钳位）
-    q_hi BOOL  贴上限
-    q_lo BOOL  贴下限
+  Inputs:
+    u            REAL  integrand input
+    k            REAL  integral gain (1/s; dimension defined by the caller)
+    dt_s         REAL  sample period s
+    hold         BOOL  pause integration (level-active)
+    reset        BOOL  reset to 0 (level-active, highest priority)
+    preset       BOOL  preset (level-active, takes priority over hold)
+    preset_value REAL  preset value
+    out_min      REAL  output low limit (default -1.0E38 ~ unlimited)
+    out_max      REAL  output high limit (default +1.0E38 ~ unlimited)
+  Outputs:
+    out  REAL  integral output (clamped)
+    q_hi BOOL  at high limit
+    q_lo BOOL  at low limit
 *)
 FUNCTION_BLOCK FB_INTEG
   VAR_INPUT
@@ -1147,14 +1187,14 @@ FUNCTION_BLOCK FB_INTEG
   END_IF;
 
   IF preset THEN
-    out := preset_value; (* 置数后照常走下方钳位 *)
+    out := preset_value; (* after preset, fall through to the clamp below as usual *)
   ELSIF NOT hold THEN
     IF dt_s <= 0.0 THEN
-      RETURN; (* 采样周期非法：保持 *)
+      RETURN; (* invalid sample period: hold *)
     END_IF;
     out := out + k * u * dt_s;
   END_IF;
-  (* hold 电平期间：不积分，仅照常刷新钳位与越限位 *)
+  (* While hold is active: no integration, just refresh the clamp and limit flags as usual *)
 
   q_hi := FALSE;
   q_lo := FALSE;
@@ -1167,30 +1207,32 @@ FUNCTION_BLOCK FB_INTEG
   END_IF;
 END_FUNCTION_BLOCK
 (*
-  FB_DERIV — 滤波微分器（du/dt，先滤波后差分）。
+  FB_DERIV — filtered derivative (du/dt, filter first then difference).
 
-  ≈ 标准微分块（filtered derivative），各主流平台标准库必备。
+  ~ Standard filtered-derivative block, a staple of every major platform's standard library.
 
-  用途：变化趋势量化（℃/s、%/s 供显示/前馈/自定义逻辑用）、
-  前馈通路的微分整形。只要"超限即报警"请直接用 FB_ALARM_ROC
-  （同一滤波-差分内核 + 延时/锁存）。
-  行为：
-    u 先经内部 PT1 滤波（时间常数 t_filt_s；<= 0 时自动取 3*dt_s，
-    约 4 拍收敛），再对滤波值做后向差分：
+  Purpose: quantifying trend (degC/s, %/s for display/feedforward/custom logic),
+  derivative shaping in a feedforward path. Whenever you want "alarm on limit", use
+  FB_ALARM_ROC directly (the same filter-difference core + delay/latch).
+  Behavior:
+    u first passes through an internal PT1 filter (time constant t_filt_s; <= 0 takes
+    3*dt_s automatically, settling in about 4 scans), then a backward difference of
+    the filtered value:
       u_f := u_f + dt_s / (t_f + dt_s) * (u - u_f)
       out := (u_f - u_f_prev) / dt_s
-    单拍差分对量化/噪声极敏感，必须滤波否则输出全是毛刺——需要更强
-    去噪时加大 t_filt_s 或给 u 前置 FB_LAG。
-    reset / 首扫描：滤波状态对中到 u，out := 0（不出投运假导数）。
-    dt_s <= 0 → 保持不动作。
+    A single-scan difference is extremely sensitive to quantization/noise and must be
+    filtered, or the output is all spikes -- for stronger noise rejection, increase
+    t_filt_s or put FB_LAG ahead of u.
+    reset / first scan: the filter state aligns to u, out := 0 (no spurious startup derivative).
+    dt_s <= 0 -> hold (no action).
 
-  输入：
-    u        REAL  输入
-    t_filt_s REAL  微分前置滤波时间常数 s（<= 0 = 自动 3*dt_s）
-    dt_s     REAL  采样周期 s
-    reset    BOOL  复位/对中（电平有效：滤波态跟随 u，out 清零）
-  输出：
-    out REAL  滤波后的变化率 单位/s（带符号）
+  Inputs:
+    u        REAL  input
+    t_filt_s REAL  derivative pre-filter time constant s (<= 0 = auto 3*dt_s)
+    dt_s     REAL  sample period s
+    reset    BOOL  reset/align (level-active: filter state follows u, out cleared)
+  Outputs:
+    out REAL  filtered rate of change units/s (signed)
 *)
 FUNCTION_BLOCK FB_DERIV
   VAR_INPUT
@@ -1203,18 +1245,18 @@ FUNCTION_BLOCK FB_DERIV
     out : REAL;
   END_VAR
   VAR
-    u_f       : REAL; (* PT1 滤波后的输入 *)
-    u_f_prev  : REAL; (* 上一拍滤波值，后向差分用 *)
-    t_f       : REAL; (* 实际使用的滤波时间常数 *)
-    init_done : BOOL; (* 首扫描对中标志 *)
+    u_f       : REAL; (* PT1-filtered input *)
+    u_f_prev  : REAL; (* previous-scan filtered value, for the backward difference *)
+    t_f       : REAL; (* filter time constant actually used *)
+    init_done : BOOL; (* first-scan alignment flag *)
   END_VAR
 
   IF dt_s <= 0.0 THEN
-    RETURN; (* 采样周期非法：保持 *)
+    RETURN; (* invalid sample period: hold *)
   END_IF;
 
   IF reset OR NOT init_done THEN
-    u_f := u; (* 滤波态对中，不出投运假导数 *)
+    u_f := u; (* align the filter state, no spurious startup derivative *)
     u_f_prev := u;
     out := 0.0;
     init_done := TRUE;
@@ -1223,7 +1265,7 @@ FUNCTION_BLOCK FB_DERIV
 
   t_f := t_filt_s;
   IF t_f <= 0.0 THEN
-    t_f := 3.0 * dt_s; (* 自动：约 4 拍收敛的最低限度去噪 *)
+    t_f := 3.0 * dt_s; (* auto: the minimum noise rejection that settles in about 4 scans *)
   END_IF;
 
   u_f := u_f + dt_s / (t_f + dt_s) * (u - u_f);
@@ -1231,36 +1273,40 @@ FUNCTION_BLOCK FB_DERIV
   u_f_prev := u_f;
 END_FUNCTION_BLOCK
 (*
-  FB_DEADTIME8 — 纯滞后（dead time / transport delay），8 标量抽头 + 线性插值。
+  FB_DEADTIME8 — dead time / transport delay, 8 scalar taps + linear interpolation.
 
-  ≈ 标准纯滞后块（dead time / PTt / transport delay），对象仿真与
-  前馈动态补偿（Smith 预估类结构）的惯用块。
+  ~ Standard dead-time block (dead time / PTt / transport delay), the customary block
+  for plant simulation and feedforward dynamic compensation (Smith-predictor-type structures).
 
-  用途：对象仿真（与 FB_LAG 串联即组成一阶惯性+纯滞后 FOPDT 对象）、
-  前馈通路的传输延迟匹配、皮带/管道输送类测量的时间对齐。
-  行为：
-    抽头链 z1..z8（z1 最新、z8 最老），抽样周期 = t_delay_s / 8：
-    相位 phase_s 以 dt_s 手工累加，每经过一个抽样周期整链移位一次
-    （z8←z7←…←z1←u）；一拍最多移 8 次（8 次后整链已被 u 充满，
-    WHILE 有界、扫描确定性）。
-    输出在最老两个抽头间按相位分数线性插值：
+  Purpose: plant simulation (in series with FB_LAG it forms a first-order-lag-plus-dead-time
+  FOPDT plant), transport-delay matching in a feedforward path, time alignment of
+  belt/pipe-conveying measurements.
+  Behavior:
+    Tap chain z1..z8 (z1 newest, z8 oldest), sampling interval = t_delay_s / 8:
+    the phase phase_s accumulates by dt_s manually, and each time a sampling interval
+    elapses the whole chain shifts once (z8<-z7<-...<-z1<-u); at most 8 shifts per scan
+    (after 8 the whole chain has been filled by u, so the WHILE is bounded and
+    scan-deterministic).
+    The output interpolates linearly between the two oldest taps by the phase fraction:
       out := z8 + (z7 - z8) * phase_s / period_s
-    ——阶跃输入以一个抽样周期的斜坡渡过，输出连续无台阶。
-    分辨率 = t_delay_s / 8：8 抽头是无数组方言下的折衷，延迟时间的
-    阶梯/插值误差约为延迟的 1/8——回路整定够用；要更细分辨率请串联
-    两级本块（各承担一半延迟）。
-    t_delay_s <= 0 → 直通（out := u），抽头随 u 充满——延迟在线投用
-    的那一刻从当前值平滑起步（无扰）。
-    reset / 首扫描：全部抽头充 u，out := u，相位清零。
-    dt_s <= 0 → 保持不动作。
+    -- a step input is traversed as a ramp over one sampling interval, so the output is
+       continuous with no steps.
+    Resolution = t_delay_s / 8: 8 taps is the compromise in an array-free dialect; the
+    staircase/interpolation error of the delay time is about 1/8 of the delay --
+    adequate for loop tuning; for finer resolution, put two of these blocks in series
+    (each carrying half the delay).
+    t_delay_s <= 0 -> pass-through (out := u), and the taps fill with u -- when the
+    delay is put into service online it starts smoothly from the current value (bumpless).
+    reset / first scan: all taps filled with u, out := u, phase cleared.
+    dt_s <= 0 -> hold (no action).
 
-  输入：
-    u         REAL  输入
-    t_delay_s REAL  纯滞后时间 s（<= 0 直通；在线可改，按新周期推进）
-    dt_s      REAL  采样周期 s
-    reset     BOOL  复位（电平有效：抽头充 u，输出跟随 u）
-  输出：
-    out REAL  延迟后的输出（线性插值，连续）
+  Inputs:
+    u         REAL  input
+    t_delay_s REAL  dead time s (<= 0 pass-through; changeable online, advances at the new interval)
+    dt_s      REAL  sample period s
+    reset     BOOL  reset (level-active: taps filled with u, output follows u)
+  Outputs:
+    out REAL  delayed output (linearly interpolated, continuous)
 *)
 FUNCTION_BLOCK FB_DEADTIME8
   VAR_INPUT
@@ -1273,7 +1319,7 @@ FUNCTION_BLOCK FB_DEADTIME8
     out : REAL;
   END_VAR
   VAR
-    z1        : REAL; (* 抽头链：z1 最新 … z8 最老（无数组方言的标量形式） *)
+    z1        : REAL; (* tap chain: z1 newest ... z8 oldest (scalar form for the array-free dialect) *)
     z2        : REAL;
     z3        : REAL;
     z4        : REAL;
@@ -1281,10 +1327,10 @@ FUNCTION_BLOCK FB_DEADTIME8
     z6        : REAL;
     z7        : REAL;
     z8        : REAL;
-    phase_s   : REAL; (* 当前抽样周期内相位，手工计时 *)
-    period_s  : REAL; (* 抽样周期 = t_delay_s / 8 *)
-    shifts    : REAL; (* 本拍移位计数（封顶 8：整链已饱和） *)
-    init_done : BOOL; (* 首扫描对中标志 *)
+    phase_s   : REAL; (* phase within the current sampling interval, manual timing *)
+    period_s  : REAL; (* sampling interval = t_delay_s / 8 *)
+    shifts    : REAL; (* shift count this scan (capped at 8: chain already saturated) *)
+    init_done : BOOL; (* first-scan alignment flag *)
   END_VAR
 
   IF reset OR NOT init_done THEN
@@ -1303,7 +1349,7 @@ FUNCTION_BLOCK FB_DEADTIME8
   END_IF;
 
   IF t_delay_s <= 0.0 THEN
-    (* 直通；抽头随 u 充满，延迟在线投用时从当前值无扰起步 *)
+    (* Pass-through; taps fill with u, so when the delay is put into service online it starts bumplessly from the current value *)
     z1 := u;
     z2 := u;
     z3 := u;
@@ -1318,14 +1364,15 @@ FUNCTION_BLOCK FB_DEADTIME8
   END_IF;
 
   IF dt_s <= 0.0 THEN
-    RETURN; (* 采样周期非法：保持 *)
+    RETURN; (* invalid sample period: hold *)
   END_IF;
 
   period_s := t_delay_s / 8.0;
   phase_s := phase_s + dt_s;
 
-  (* 每经过一个抽样周期整链移位一次；封顶 8 次/拍（dt_s 跨多个周期时
-     补移，8 次后整链已被 u 充满，再移无意义）——WHILE 有界 *)
+  (* Shift the whole chain once per elapsed sampling interval; capped at 8/scan (when
+     dt_s spans several intervals, catch up; after 8 the chain is full of u and further
+     shifts are meaningless) -- the WHILE is bounded *)
   shifts := 0.0;
   WHILE (phase_s >= period_s) AND (shifts < 8.0) DO
     z8 := z7;
@@ -1340,41 +1387,44 @@ FUNCTION_BLOCK FB_DEADTIME8
     shifts := shifts + 1.0;
   END_WHILE;
   IF phase_s >= period_s THEN
-    phase_s := 0.0; (* 退化情形 dt_s >= t_delay_s：整链已是 u，相位清零防积累 *)
+    phase_s := 0.0; (* degenerate case dt_s >= t_delay_s: chain is already u, clear phase to prevent accumulation *)
   END_IF;
 
-  (* 最老两抽头间按相位分数插值：移位瞬间 frac=0 → out=z8(旧 z7)，连续 *)
+  (* Interpolate between the two oldest taps by phase fraction: at the shift instant frac=0 -> out=z8(old z7), continuous *)
   out := z8 + (z7 - z8) * phase_s / period_s;
 END_FUNCTION_BLOCK
 (*
-  FB_MID3 — 三取中表决（median select / 2oo3 模拟量表决）。
+  FB_MID3 — median select / 2oo3 analog voting.
 
-  ≈ 标准三取中/冗余测量表决块（median selector，2oo3 voting），
-  冗余变送器信号选择的惯用块。
+  ~ Standard median-select / redundant-measurement voting block (median selector,
+  2oo3 voting), the customary block for redundant-transmitter signal selection.
 
-  用途：三冗余变送器取中（剔除单点漂移/跳变）、双冗余取均、
-  关键测量的坏值降级处理（配 FB_SCALE 的 fault 作 good_x）。
-  行为（按好通道数 n_good 降级）：
-    3 好 → 取中值（天然剔除单通道漂移）；
-    2 好 → 取两好通道均值；
-    1 好 → 直通该通道；
-    0 好 → out 保持上一拍值，q_fail = TRUE（电平，非锁存）。
-    偏差监视：dev_max > 0 时，任意两个好通道之差 > dev_max → q_dev
-    （提示冗余通道间漂移拉大，该校验变送器了；dev_max <= 0 关闭监视）。
-    good_x 接坏值判定（变送器断线/超量程，如 FB_SCALE.fault 取反），
-    默认 TRUE = 全好。
-    注意：首拍即 0 好时 out 为初值 0（无历史可保持）；q_fail 期间的
-    保持值是"最后一次有好通道时的表决值"。
+  Purpose: median of three redundant transmitters (rejects single-point drift/jump),
+  average of dual redundancy, bad-value degradation of critical measurements (pair
+  with the inverse of FB_SCALE fault as good_x).
+  Behavior (degrades by the number of good channels n_good):
+    3 good -> take the median (naturally rejects single-channel drift);
+    2 good -> take the average of the two good channels;
+    1 good -> pass that channel through;
+    0 good -> out holds the previous scan's value, q_fail = TRUE (level, not latched).
+    Deviation monitor: when dev_max > 0, the difference between any two good channels
+    > dev_max -> q_dev (signals that drift between redundant channels has widened and
+    a transmitter check is due; dev_max <= 0 disables the monitor).
+    good_x takes the bad-value decision (transmitter open-circuit/over-range, e.g. the
+    inverse of FB_SCALE.fault), defaulting to TRUE = all good.
+    Note: when there are 0 good on the very first scan, out is its initial value 0 (no
+    history to hold); the held value during q_fail is "the voted value from the last
+    time a good channel existed".
 
-  输入：
-    a, b, c                REAL  三路冗余测量
-    good_a, good_b, good_c BOOL  各路有效（默认 TRUE；FALSE = 剔除）
-    dev_max                REAL  好通道间偏差监视限值（<= 0 = 关闭）
-  输出：
-    out    REAL  表决输出（0 好时保持）
-    n_good REAL  当前好通道数 0..3
-    q_dev  BOOL  好通道间偏差超限
-    q_fail BOOL  全部通道失效（输出处于保持）
+  Inputs:
+    a, b, c                REAL  three redundant measurements
+    good_a, good_b, good_c BOOL  per-channel validity (default TRUE; FALSE = excluded)
+    dev_max                REAL  deviation-monitor limit between good channels (<= 0 = disabled)
+  Outputs:
+    out    REAL  voted output (held when 0 good)
+    n_good REAL  current number of good channels 0..3
+    q_dev  BOOL  deviation between good channels over limit
+    q_fail BOOL  all channels failed (output is in hold)
 *)
 FUNCTION_BLOCK FB_MID3
   VAR_INPUT
@@ -1406,7 +1456,7 @@ FUNCTION_BLOCK FB_MID3
 
   q_fail := n_good <= 0.0;
 
-  (* 偏差监视：任意两个好通道差超 dev_max（内联 IF 替代 ABS，库惯例） *)
+  (* Deviation monitor: any two good channels differ by more than dev_max (inline IF instead of ABS, library convention) *)
   q_dev := FALSE;
   IF dev_max > 0.0 THEN
     IF good_a AND good_b THEN
@@ -1427,7 +1477,7 @@ FUNCTION_BLOCK FB_MID3
   END_IF;
 
   IF n_good >= 3.0 THEN
-    (* 三好：取中值 *)
+    (* 3 good: take the median *)
     IF (a >= b AND a <= c) OR (a <= b AND a >= c) THEN
       out := a;
     ELSIF (b >= a AND b <= c) OR (b <= a AND b >= c) THEN
@@ -1436,7 +1486,7 @@ FUNCTION_BLOCK FB_MID3
       out := c;
     END_IF;
   ELSIF n_good >= 2.0 THEN
-    (* 两好：取均值 *)
+    (* 2 good: take the average *)
     IF NOT good_a THEN
       out := (b + c) / 2.0;
     ELSIF NOT good_b THEN
@@ -1445,7 +1495,7 @@ FUNCTION_BLOCK FB_MID3
       out := (a + b) / 2.0;
     END_IF;
   ELSIF n_good >= 1.0 THEN
-    (* 一好：直通 *)
+    (* 1 good: pass-through *)
     IF good_a THEN
       out := a;
     ELSIF good_b THEN
@@ -1454,32 +1504,35 @@ FUNCTION_BLOCK FB_MID3
       out := c;
     END_IF;
   END_IF;
-  (* 0 好：out 保持上一拍值，q_fail 提示 *)
+  (* 0 good: out holds the previous scan's value, q_fail signals it *)
 END_FUNCTION_BLOCK
 (*
-  FB_CASCADE — 级联耦合胶水（主回路输出 → 副回路 SP 映射 + 非级联跟踪回算）。
+  FB_CASCADE — cascade coupling glue (master output -> slave SP mapping + non-cascade tracking back-calculation).
 
-  ≈ 标准级联耦合块（cascade SP coupling / 主回路跟踪回算），
-  串级回路组态的惯用胶水：两台 PID 之间只差这一块。
+  ~ Standard cascade-coupling block (cascade SP coupling / master tracking
+  back-calculation), the customary glue for cascade-loop configuration: only this one
+  block sits between the two PIDs.
 
-  用途：串级回路组态（温度主回路 → 流量副回路之类），把主调输出
-  0..100% 映射到副回路 SP 工程量程，并在非级联时给主调供跟踪值，
-  保证 CAS 投/切无扰。
-  行为：
-    CAS（cas_on = TRUE）：
+  Purpose: cascade-loop configuration (temperature master -> flow slave, and the like),
+  mapping the master output 0..100% to the slave SP engineering span, and supplying the
+  master a tracking value when not in cascade so that putting CAS into/out of service is
+  bumpless.
+  Behavior:
+    CAS (cas_on = TRUE):
       slave_sp := sp_min + master_out / 100 * (sp_max - sp_min)
-      master_track := FALSE（主调正常调节）。
-    非 CAS：
-      slave_sp := slave_sp_local（操作员直接给副回路的本地 SP）；
-      master_track := TRUE，master_track_value :=
-        (slave_sp_now - sp_min) / (sp_max - sp_min) * 100，钳位 0..100
-      ——主调输出被强制为"当前副 SP 的等效百分比"，切回 CAS 的那一拍
-      slave_sp 不跳变（无扰切换）。
-      量程未组态（|sp_max - sp_min| < 1E-6）→ 跟踪值取 0（防除零）。
-    跟踪值每拍都计算（与模式无关），CAS 切除瞬间即有效。
-    纯组合逻辑，无内部状态。
+      master_track := FALSE (the master controls normally).
+    Non-CAS:
+      slave_sp := slave_sp_local (the operator's local SP given directly to the slave loop);
+      master_track := TRUE, master_track_value :=
+        (slave_sp_now - sp_min) / (sp_max - sp_min) * 100, clamped 0..100
+      -- the master output is forced to "the equivalent percentage of the current slave
+      SP", so on the scan that switches back to CAS slave_sp does not jump (bumpless transfer).
+      Span not configured (|sp_max - sp_min| < 1E-6) -> tracking value takes 0 (divide-by-zero guard).
+    The tracking value is computed every scan (independent of mode), so it is valid the
+    instant CAS is removed.
+    Pure combinational logic, no internal state.
 
-  接线（与两台 FB_PID 组级联；slave_sp_now 喂上一拍工作 SP）：
+  Wiring (cascading two FB_PID instances; slave_sp_now is fed the previous scan's working SP):
     casc(master_out := pid_master.out, cas_on := cas_enable,
          sp_min := 0.0, sp_max := 2000.0,
          slave_sp_local := op_sp, slave_sp_now := slave_sp_used);
@@ -1489,17 +1542,17 @@ END_FUNCTION_BLOCK
                track_value := casc.master_track_value);
     pid_slave(pv := flow_pv, sp := slave_sp_used, ..., dt_s := scan_s);
 
-  输入：
-    master_out     REAL  主调输出 0..100 %
-    cas_on         BOOL  级联投入（FALSE = 副回路用本地 SP，主调跟踪）
-    sp_min         REAL  副回路 SP 量程下限（工程单位）
-    sp_max         REAL  副回路 SP 量程上限
-    slave_sp_local REAL  非级联时的副回路本地 SP
-    slave_sp_now   REAL  副回路当前工作 SP（喂上一拍 slave_sp，跟踪回算用）
-  输出：
-    slave_sp           REAL  副回路设定值（接 pid_slave.sp）
-    master_track       BOOL  主调跟踪命令（接 pid_master.track）
-    master_track_value REAL  主调跟踪值 0..100 %（接 pid_master.track_value）
+  Inputs:
+    master_out     REAL  master output 0..100 %
+    cas_on         BOOL  cascade enabled (FALSE = slave uses local SP, master tracks)
+    sp_min         REAL  slave SP span low (engineering units)
+    sp_max         REAL  slave SP span high
+    slave_sp_local REAL  slave-loop local SP when not in cascade
+    slave_sp_now   REAL  slave-loop current working SP (feed the previous scan's slave_sp, for the tracking back-calculation)
+  Outputs:
+    slave_sp           REAL  slave-loop setpoint (to pid_slave.sp)
+    master_track       BOOL  master tracking command (to pid_master.track)
+    master_track_value REAL  master tracking value 0..100 % (to pid_master.track_value)
 *)
 FUNCTION_BLOCK FB_CASCADE
   VAR_INPUT
@@ -1516,12 +1569,12 @@ FUNCTION_BLOCK FB_CASCADE
     master_track_value : REAL;
   END_VAR
   VAR
-    span : REAL; (* 副回路 SP 量程跨度 *)
+    span : REAL; (* slave-loop SP span width *)
   END_VAR
 
   span := sp_max - sp_min;
 
-  (* 跟踪值每拍计算：当前副 SP 的等效百分比（量程未组态取 0，防除零） *)
+  (* Tracking value computed every scan: the equivalent percentage of the current slave SP (span not configured -> 0, divide-by-zero guard) *)
   IF (span < 0.000001) AND (span > -0.000001) THEN
     master_track_value := 0.0;
   ELSE
@@ -1541,43 +1594,43 @@ FUNCTION_BLOCK FB_CASCADE
     master_track := TRUE;
   END_IF;
 END_FUNCTION_BLOCK
-
 (*
-  FB_PV_HOLD — 坏值保持/替代（bad-PV hold / substitute）。
+  FB_PV_HOLD — bad-PV hold / substitute.
 
-  ≈ 标准坏值处理块（last-good hold / substitute value，含坏值
-  超时降级），测量信号进控制回路前的标准防线，各主流 DCS/PLC
-  的输入处理均有同类机制。
+  ~ Standard bad-value handling block (last-good hold / substitute value, including
+  bad-value timeout degradation), the standard line of defense before a measurement
+  enters a control loop; every major DCS/PLC input-processing chain has an equivalent
+  mechanism.
 
-  用途：变送器断线/超量程（如 FB_SCALE.fault、FB_MID3.q_fail 取反
-  作 good）时给下游回路一个可控的 PV：先保持最后好值渡过抖动，
-  超时后按组态保持/替代/跟随，并出 q_bad/q_timeout 供报警与
-  回路切手动逻辑使用。
+  Purpose: on transmitter open-circuit/over-range (e.g. FB_SCALE.fault, or the inverse
+  of FB_MID3.q_fail used as good), give the downstream loop a controlled PV: hold the
+  last good value first to ride out chatter, then on timeout hold/substitute/follow as
+  configured, while emitting q_bad/q_timeout for alarming and loop-to-manual logic.
 
-  行为：
-    good = TRUE：out := u，记忆最后好值，q_bad/q_timeout 清零，
-    坏值计时清零。
-    good = FALSE：q_bad := TRUE，坏值计时累加（手工 dt_s）：
-      未到 timeout_s：out := 最后好值（短时抖动按保持渡过）；
-      到 timeout_s（timeout_s = 0 立即）：q_timeout := TRUE，按 mode：
-        mode = 0：继续保持最后好值；
-        mode = 1：out := sub_value（替代值，如安全侧设定）；
-        mode = 2：out := u（跟随原值——只挂报警牌不干预，
-                  下游自行处置）。
-    首扫描即坏值时最后好值取当前 u（无更好历史）。
-    dt_s <= 0 → 坏值计时不推进（timeout_s > 0 时维持保持段）。
+  Behavior:
+    good = TRUE: out := u, remember the last good value, clear q_bad/q_timeout, clear
+    the bad-value timer.
+    good = FALSE: q_bad := TRUE, accumulate the bad-value timer (manual dt_s):
+      before timeout_s: out := last good value (short chatter rides through on hold);
+      at timeout_s (timeout_s = 0 immediately): q_timeout := TRUE, then by mode:
+        mode = 0: keep holding the last good value;
+        mode = 1: out := sub_value (substitute value, e.g. a safe-side setting);
+        mode = 2: out := u (follow the raw value -- just raise the alarm flag without
+                  intervening, downstream handles it).
+    When bad on the very first scan, the last good value takes the current u (no better history).
+    dt_s <= 0 -> the bad-value timer does not advance (when timeout_s > 0, the hold segment is maintained).
 
-  输入：
-    u         REAL  输入（原始 PV）
-    good      BOOL  输入有效（FALSE = 坏值；接质量位/断线判定取反）
-    mode      REAL  0 = 保持最后好值 / 1 = 替代值 / 2 = 跟随原值
-    sub_value REAL  替代值（mode = 1 用）
-    timeout_s REAL  坏值持续超时 s（0 = 立即按 mode 动作；> 0 先保持）
-    dt_s      REAL  采样周期 s
-  输出：
-    out       REAL  处理后的 PV
-    q_bad     BOOL  坏值中（电平）
-    q_timeout BOOL  坏值已超时（mode 已生效）
+  Inputs:
+    u         REAL  input (raw PV)
+    good      BOOL  input valid (FALSE = bad value; feed the inverse of a quality bit / open-circuit decision)
+    mode      REAL  0 = hold last good value / 1 = substitute value / 2 = follow raw value
+    sub_value REAL  substitute value (used by mode = 1)
+    timeout_s REAL  bad-value persistence timeout s (0 = act by mode immediately; > 0 hold first)
+    dt_s      REAL  sample period s
+  Outputs:
+    out       REAL  processed PV
+    q_bad     BOOL  in bad value (level)
+    q_timeout BOOL  bad value has timed out (mode in effect)
 *)
 FUNCTION_BLOCK FB_PV_HOLD
   VAR_INPUT
@@ -1594,13 +1647,13 @@ FUNCTION_BLOCK FB_PV_HOLD
     q_timeout : BOOL;
   END_VAR
   VAR
-    last_good : REAL; (* 最后好值 *)
-    bad_t     : REAL; (* 坏值持续累计时间 s *)
-    init_done : BOOL; (* 首扫描播种标志 *)
+    last_good : REAL; (* last good value *)
+    bad_t     : REAL; (* bad-value accumulated persistence time s *)
+    init_done : BOOL; (* first-scan seeding flag *)
   END_VAR
 
   IF NOT init_done THEN
-    last_good := u; (* 首扫描即坏值时也以当前 u 作保持值 *)
+    last_good := u; (* even when bad on the first scan, take the current u as the held value *)
     init_done := TRUE;
   END_IF;
 
@@ -1615,7 +1668,7 @@ FUNCTION_BLOCK FB_PV_HOLD
 
   q_bad := TRUE;
 
-  (* 超时前：保持最后好值（短时抖动渡过段） *)
+  (* Before timeout: hold the last good value (the segment that rides out short chatter) *)
   IF timeout_s > 0.0 THEN
     IF dt_s > 0.0 THEN
       bad_t := bad_t + dt_s;
@@ -1627,63 +1680,63 @@ FUNCTION_BLOCK FB_PV_HOLD
     END_IF;
   END_IF;
 
-  (* 超时（或 timeout_s = 0 立即）：按 mode 动作 *)
+  (* On timeout (or immediately when timeout_s = 0): act by mode *)
   q_timeout := TRUE;
   IF mode >= 1.5 THEN
-    out := u;         (* 2 = 跟随原值 *)
+    out := u;         (* 2 = follow raw value *)
   ELSIF mode >= 0.5 THEN
-    out := sub_value; (* 1 = 替代值 *)
+    out := sub_value; (* 1 = substitute value *)
   ELSE
-    out := last_good; (* 0 = 保持最后好值 *)
+    out := last_good; (* 0 = hold last good value *)
   END_IF;
 END_FUNCTION_BLOCK
 (*
-  FB_RAMPSOAK8 — 8 段程序给定发生器（ramp-soak setpoint programmer）。
+  FB_RAMPSOAK8 — 8-segment setpoint programmer (ramp-soak setpoint programmer).
 
-  ≈ 标准程序给定/曲线给定块（ramp-soak / setpoint programmer，
-  升温曲线、热处理曲线、批次温度程序），各主流 DCS/PLC 与程序
-  调节仪均有同类块。
+  ~ Standard program-setpoint / curve-setpoint block (ramp-soak / setpoint programmer:
+  heat-up curves, heat-treatment curves, batch temperature programs), found in every
+  major DCS/PLC and program controller.
 
-  用途：按"斜坡到目标 + 保温"的分段曲线生成设定值，接 FB_PID /
-  FB_PID_POS 的 sp 输入：热处理/养护/反应釜升温程序、开停车
-  升降负荷曲线。段参数为标量展开 sp1..sp8 / ramp1_s..ramp8_s /
-  soak1_s..soak8_s（本方言 FB 作用域数组不能 codegen，见 README
-  坑 7；FB_CHAR 同例）。
+  Purpose: generate a setpoint from a segmented "ramp to target + soak" curve, feeding
+  the sp input of FB_PID / FB_PID_POS: heat-treatment/curing/reactor heat-up programs,
+  startup/shutdown load ramp curves. Segment parameters are scalar-expanded sp1..sp8 /
+  ramp1_s..ramp8_s / soak1_s..soak8_s (in this dialect an FB-scope array cannot be
+  codegen'd, see README gotcha 7; same as FB_CHAR).
 
-  行为：
-    每段 N：sp 从上一段电平（段 1 从 sp_init）经 rampN_s 线性斜坡到
-    spN（rampN_s <= 0 跳变），再保温 soakN_s（soaking = TRUE；
-    soakN_s <= 0 即过）。段参数在进段拍锁存——运行中改参数下一段
-    生效。
-    run 电平有效：TRUE 启动并推进程序；FALSE → 回到初始（seg := 0，
-    sp := sp_init，done 清零），再置 TRUE 从段 1 重新开始。
-    hold 电平有效：冻结 sp 与段内计时（hold 期间 advance 无效）。
-    advance 上升沿：立即跳下一段（从当前 sp 续斜坡，曲线连续）；
-    在末段 advance → 完成（或 cyclic 回绕）。
-    末段（n_seg 钳 2..8）保温结束：
-      cyclic = FALSE → done := TRUE，sp 钉在末段目标，seg := 0，
-      保持到 reset 或 run 撤销；
-      cyclic = TRUE  → 回绕段 1（从当前 sp 续斜坡，长期循环）。
-    reset 电平有效（优先）：回初始同 run 撤销。
-    dt_s <= 0 → 段内不推进（启动/advance 沿照常处理）。
+  Behavior:
+    Each segment N: sp ramps linearly from the previous segment's level (segment 1 from
+    sp_init) over rampN_s to spN (rampN_s <= 0 steps), then soaks for soakN_s
+    (soaking = TRUE; soakN_s <= 0 passes immediately). Segment parameters latch on the
+    segment-entry scan -- changing parameters while running takes effect on the next segment.
+    run level-active: TRUE starts and advances the program; FALSE -> return to the start
+    (seg := 0, sp := sp_init, done cleared), and setting TRUE again restarts from segment 1.
+    hold level-active: freeze sp and the in-segment timer (advance has no effect during hold).
+    advance rising edge: jump to the next segment immediately (continue ramping from the
+    current sp, curve continuous); advance in the last segment -> done (or cyclic wrap).
+    On the last segment's soak end (n_seg clamped 2..8):
+      cyclic = FALSE -> done := TRUE, sp pinned at the last segment's target, seg := 0,
+      held until reset or run is withdrawn;
+      cyclic = TRUE  -> wrap to segment 1 (continue ramping from the current sp, long-term cycling).
+    reset level-active (priority): return to start, same as withdrawing run.
+    dt_s <= 0 -> no in-segment advance (start/advance edges still handled).
 
-  输入：
-    sp1..sp8       REAL  各段目标值（标量展开）
-    ramp1_s..ramp8_s REAL  各段斜坡时间 s（<= 0 = 跳变）
-    soak1_s..soak8_s REAL  各段保温时间 s（<= 0 = 不保温）
-    n_seg          REAL  使用段数 2..8（自动钳位）
-    run            BOOL  运行（电平；撤销回初始）
-    hold           BOOL  暂停（电平；冻结 sp 与计时）
-    advance        BOOL  跳段（上升沿）
-    reset          BOOL  复位（电平，优先）
-    cyclic         BOOL  TRUE = 末段完成后回绕段 1 循环
-    sp_init        REAL  起始值（段 1 斜坡的出发电平）
-    dt_s           REAL  采样周期 s
-  输出：
-    sp      REAL  程序设定值输出
-    seg     REAL  当前段 1..8（0 = 未运行/已完成）
-    soaking BOOL  保温段进行中
-    done    BOOL  程序完成（非循环；保持到 reset / run 撤销）
+  Inputs:
+    sp1..sp8       REAL  per-segment target values (scalar-expanded)
+    ramp1_s..ramp8_s REAL  per-segment ramp times s (<= 0 = step)
+    soak1_s..soak8_s REAL  per-segment soak times s (<= 0 = no soak)
+    n_seg          REAL  number of segments in use 2..8 (auto-clamped)
+    run            BOOL  run (level; withdrawing returns to start)
+    hold           BOOL  pause (level; freeze sp and the timer)
+    advance        BOOL  jump segment (rising edge)
+    reset          BOOL  reset (level, priority)
+    cyclic         BOOL  TRUE = wrap to segment 1 and cycle after the last segment completes
+    sp_init        REAL  start value (the launch level of the segment-1 ramp)
+    dt_s           REAL  sample period s
+  Outputs:
+    sp      REAL  program setpoint output
+    seg     REAL  current segment 1..8 (0 = not running / completed)
+    soaking BOOL  soak segment in progress
+    done    BOOL  program complete (non-cyclic; held until reset / run withdrawn)
 *)
 FUNCTION_BLOCK FB_RAMPSOAK8
   VAR_INPUT
@@ -1727,16 +1780,16 @@ FUNCTION_BLOCK FB_RAMPSOAK8
     done    : BOOL;
   END_VAR
   VAR
-    nn         : REAL; (* 钳位后的段数 2..8 *)
-    elapsed_t  : REAL; (* 段内相位计时 s（斜坡/保温各自从 0 起） *)
-    level_from : REAL; (* 本段斜坡出发电平 *)
-    seg_sp     : REAL; (* 进段锁存的段参数 *)
+    nn         : REAL; (* clamped segment count 2..8 *)
+    elapsed_t  : REAL; (* in-segment phase timer s (ramp/soak each start from 0) *)
+    level_from : REAL; (* this segment's ramp launch level *)
+    seg_sp     : REAL; (* segment parameters latched on entry *)
     seg_ramp_s : REAL;
     seg_soak_s : REAL;
-    enter_seg  : REAL; (* 本拍要进入的段号（0 = 不进段） *)
-    go_next    : BOOL; (* 本拍段完成/跳段 *)
+    enter_seg  : REAL; (* segment number to enter this scan (0 = no entry) *)
+    go_next    : BOOL; (* segment complete / jump this scan *)
     adv_edge   : BOOL;
-    prev_adv   : BOOL; (* advance 上升沿记忆 *)
+    prev_adv   : BOOL; (* advance rising-edge memory *)
   END_VAR
 
   IF reset THEN
@@ -1753,7 +1806,7 @@ FUNCTION_BLOCK FB_RAMPSOAK8
   prev_adv := advance;
 
   IF NOT run THEN
-    (* 停止：回初始，重新 run 从段 1 开始 *)
+    (* Stopped: return to start; re-running starts from segment 1 *)
     seg := 0.0;
     soaking := FALSE;
     done := FALSE;
@@ -1762,7 +1815,7 @@ FUNCTION_BLOCK FB_RAMPSOAK8
   END_IF;
 
   IF done THEN
-    RETURN; (* 完成保持：sp 钉在末段目标，等 reset / run 撤销 *)
+    RETURN; (* Completion hold: sp pinned at the last segment's target, awaiting reset / run withdrawal *)
   END_IF;
 
   nn := n_seg;
@@ -1776,45 +1829,45 @@ FUNCTION_BLOCK FB_RAMPSOAK8
   go_next := FALSE;
 
   IF seg < 0.5 THEN
-    (* 启动：从 sp_init 进段 1 *)
+    (* Start: enter segment 1 from sp_init *)
     sp := sp_init;
     enter_seg := 1.0;
   ELSIF hold THEN
-    RETURN; (* 冻结：sp 与计时保持（advance 在 hold 期间无效） *)
+    RETURN; (* Freeze: sp and timer held (advance has no effect during hold) *)
   ELSIF adv_edge THEN
-    go_next := TRUE; (* 跳段：从当前 sp 续走 *)
+    go_next := TRUE; (* Jump segment: continue from the current sp *)
   ELSE
     IF dt_s <= 0.0 THEN
-      RETURN; (* 采样周期非法：段内不推进 *)
+      RETURN; (* invalid sample period: no in-segment advance *)
     END_IF;
     elapsed_t := elapsed_t + dt_s;
     IF NOT soaking THEN
-      (* 斜坡相位 *)
+      (* Ramp phase *)
       IF seg_ramp_s <= 0.0 THEN
-        sp := seg_sp; (* 跳变段 *)
+        sp := seg_sp; (* step segment *)
         soaking := TRUE;
         elapsed_t := 0.0;
       ELSIF elapsed_t >= seg_ramp_s THEN
         sp := seg_sp;
         soaking := TRUE;
-        elapsed_t := elapsed_t - seg_ramp_s; (* 跨相位余量结转 *)
+        elapsed_t := elapsed_t - seg_ramp_s; (* carry the cross-phase remainder forward *)
       ELSE
         sp := level_from + (seg_sp - level_from) * elapsed_t / seg_ramp_s;
       END_IF;
     END_IF;
     IF soaking AND elapsed_t >= seg_soak_s THEN
-      go_next := TRUE; (* 保温结束 *)
+      go_next := TRUE; (* soak ended *)
     END_IF;
   END_IF;
 
-  (* 段推进决策：末段 → 完成/回绕；否则进下一段 *)
+  (* Segment-advance decision: last segment -> complete/wrap; otherwise enter the next segment *)
   IF go_next THEN
     IF seg >= nn - 0.5 THEN
       IF cyclic THEN
-        enter_seg := 1.0; (* 回绕：段 1 从当前 sp 续斜坡 *)
+        enter_seg := 1.0; (* Wrap: segment 1 continues ramping from the current sp *)
       ELSE
         done := TRUE;
-        sp := seg_sp; (* 完成：钉在末段目标（提前跳段也直接到位） *)
+        sp := seg_sp; (* Complete: pin at the last segment's target (an early jump also lands here directly) *)
         seg := 0.0;
         soaking := FALSE;
       END_IF;
@@ -1823,7 +1876,7 @@ FUNCTION_BLOCK FB_RAMPSOAK8
     END_IF;
   END_IF;
 
-  (* 进段：锁存段参数，斜坡从当前 sp 出发 *)
+  (* Segment entry: latch the segment parameters, ramp launches from the current sp *)
   IF enter_seg > 0.5 THEN
     seg := enter_seg;
     level_from := sp;
@@ -1865,46 +1918,52 @@ FUNCTION_BLOCK FB_RAMPSOAK8
   END_IF;
 END_FUNCTION_BLOCK
 (*
-  FB_GAIN_SCHED3 — 三区增益调度（gain scheduling，迟滞分区 +
-  可选区界线性过渡）。
+  FB_GAIN_SCHED3 — three-zone gain scheduling (gain scheduling, hysteresis zoning +
+  optional zone-boundary linear transition).
 
-  ≈ 标准增益调度器（gain scheduler / parameter scheduler，按工况
-  变量分区切换 PID 参数组），非线性对象分段整定的惯用块。
+  ~ Standard gain scheduler / parameter scheduler (switches the PID parameter set by
+  zone of an operating variable), the customary block for segmented tuning of a
+  nonlinear plant.
 
-  用途：对象增益随工况大幅变化（负荷段、阀特性段、pH 强非线性段）
-  时按调度变量（负荷/开度/PV 本身）分三区出 kp/ti/td 参数组，
-  输出直接接 FB_PID / FB_PID_POS 的参数输入——参数在线改变即时
-  生效（两块均按当前参数算增量/分项）。
+  Purpose: when the plant gain varies greatly with operating point (load segments,
+  valve-characteristic segments, the strongly nonlinear pH segment), output a kp/ti/td
+  parameter set in three zones of a scheduling variable (load / opening / the PV itself);
+  the output feeds the parameter inputs of FB_PID / FB_PID_POS directly -- an online
+  parameter change takes effect immediately (both blocks compute their increment/terms
+  from the current parameters).
 
-  行为：
-    分区（u_sched 对 x12 / x23 两个区界，假定 x12 < x23）：
-      区 1：u <= x12；区 2：x12 < u <= x23；区 3：u > x23。
-    迟滞：越过区界 ± hyst 才换区（防区界附近抖动来回切参数）；
-    首扫描按纯比较播种。大阶跃一拍内可连跳两区（逐级迁移收敛）。
-    参数输出：
-      interp = FALSE：取当前区参数组（迟滞切换，参数有台阶——
-      接 FB_PID 增量式天然无扰，接 FB_PID_POS 时 P 项会按新 kp
-      立即重算）；
-      interp = TRUE 且 hyst > 0：u 落在区界 ±hyst 内时两区参数
-      线性过渡（参数输出连续、仅由 u_sched 决定；zone 仍按迟滞出
-      离散指示）。
-    注意：interp 混用 ti = 0（积分关）与 ti > 0 的区时，过渡段会
-    产生极小的 ti（极强积分）——各区 ti/td 应同为 0 或同为非 0。
+  Behavior:
+    Zoning (u_sched against the two boundaries x12 / x23, assuming x12 < x23):
+      zone 1: u <= x12; zone 2: x12 < u <= x23; zone 3: u > x23.
+    Hysteresis: a zone change requires crossing the boundary +/- hyst (preventing
+    chatter near a boundary from toggling parameters back and forth); the first scan
+    seeds by plain comparison. A large step can jump two zones within one scan (it
+    settles by stepwise migration).
+    Parameter output:
+      interp = FALSE: take the current zone's parameter set (hysteresis switching, with
+      stepped parameters -- feeding incremental FB_PID is naturally bumpless, feeding
+      FB_PID_POS recomputes the P term immediately at the new kp);
+      interp = TRUE and hyst > 0: when u falls within +/-hyst of a boundary the two
+      zones' parameters transition linearly (parameter output continuous, determined by
+      u_sched alone; zone still gives its discrete indication by hysteresis).
+    Note: when interp mixes a zone with ti = 0 (integral off) and one with ti > 0, the
+    transition segment produces a very small ti (very strong integral) -- each zone's
+    ti/td should be all 0 or all non-zero.
 
-  输入：
-    u_sched         REAL  调度变量（负荷/阀位/PV 等）
-    x12             REAL  区 1/2 边界
-    x23             REAL  区 2/3 边界（> x12，且两过渡带不重叠）
-    hyst            REAL  区界迟滞半宽（0 = 无迟滞）
-    interp          BOOL  TRUE = 区界 ±hyst 内参数线性过渡
-    kp1, ti1_s, td1_s REAL  区 1 参数组
-    kp2, ti2_s, td2_s REAL  区 2 参数组
-    kp3, ti3_s, td3_s REAL  区 3 参数组
-  输出：
-    kp_out   REAL  调度后比例增益（接 PID 的 kp）
-    ti_out_s REAL  调度后积分时间 s
-    td_out_s REAL  调度后微分时间 s
-    zone     REAL  当前区 1 / 2 / 3（迟滞判定）
+  Inputs:
+    u_sched         REAL  scheduling variable (load / valve position / PV, etc.)
+    x12             REAL  zone 1/2 boundary
+    x23             REAL  zone 2/3 boundary (> x12, and the two transition bands must not overlap)
+    hyst            REAL  zone-boundary hysteresis half-width (0 = no hysteresis)
+    interp          BOOL  TRUE = linear parameter transition within +/-hyst of a boundary
+    kp1, ti1_s, td1_s REAL  zone 1 parameter set
+    kp2, ti2_s, td2_s REAL  zone 2 parameter set
+    kp3, ti3_s, td3_s REAL  zone 3 parameter set
+  Outputs:
+    kp_out   REAL  scheduled proportional gain (to the PID's kp)
+    ti_out_s REAL  scheduled integral time s
+    td_out_s REAL  scheduled derivative time s
+    zone     REAL  current zone 1 / 2 / 3 (hysteresis decision)
 *)
 FUNCTION_BLOCK FB_GAIN_SCHED3
   VAR_INPUT
@@ -1930,10 +1989,10 @@ FUNCTION_BLOCK FB_GAIN_SCHED3
     zone     : REAL;
   END_VAR
   VAR
-    f : REAL; (* 过渡带内插值分数 0..1 *)
+    f : REAL; (* interpolation fraction within the transition band 0..1 *)
   END_VAR
 
-  (* 1) 区选择（迟滞）：首扫描 zone = 0 → 按纯比较播种 *)
+  (* 1) Zone selection (hysteresis): first scan zone = 0 -> seed by plain comparison *)
   IF zone < 0.5 THEN
     IF u_sched <= x12 THEN
       zone := 1.0;
@@ -1944,7 +2003,7 @@ FUNCTION_BLOCK FB_GAIN_SCHED3
     END_IF;
   END_IF;
 
-  (* 逐级迁移（1→2、3→2 先判，2→1/2→3 后判：大阶跃一拍收敛） *)
+  (* Stepwise migration (test 1->2, 3->2 first, then 2->1/2->3: a large step settles in one scan) *)
   IF zone <= 1.5 THEN
     IF u_sched > x12 + hyst THEN
       zone := 2.0;
@@ -1963,7 +2022,7 @@ FUNCTION_BLOCK FB_GAIN_SCHED3
     END_IF;
   END_IF;
 
-  (* 2) 区参数（离散取值，迟滞切换） *)
+  (* 2) Zone parameters (discrete values, hysteresis switching) *)
   IF zone <= 1.5 THEN
     kp_out   := kp1;
     ti_out_s := ti1_s;
@@ -1978,8 +2037,9 @@ FUNCTION_BLOCK FB_GAIN_SCHED3
     td_out_s := td3_s;
   END_IF;
 
-  (* 3) interp：区界 ±hyst 内线性过渡（参数连续、仅由 u_sched 决定，
-        覆盖上面的离散取值；zone 输出不受影响） *)
+  (* 3) interp: linear transition within +/-hyst of a boundary (parameters continuous,
+        determined by u_sched alone, overriding the discrete values above; the zone
+        output is unaffected) *)
   IF interp AND hyst > 0.0 THEN
     IF (u_sched > x12 - hyst) AND (u_sched < x12 + hyst) THEN
       f := (u_sched - (x12 - hyst)) / (2.0 * hyst);
@@ -2000,66 +2060,71 @@ FUNCTION_BLOCK FB_GAIN_SCHED3
       ti_out_s := ti3_s;
       td_out_s := td3_s;
     ELSE
-      kp_out   := kp2; (* 两过渡带之间：纯区 2 *)
+      kp_out   := kp2; (* between the two transition bands: pure zone 2 *)
       ti_out_s := ti2_s;
       td_out_s := td2_s;
     END_IF;
   END_IF;
 END_FUNCTION_BLOCK
 (*
-  FB_PID_POS — 位置式（绝对输出）PID 调节器，p/i/d 分项可观测，
-  带 SP 加权、微分先行（D 于 PV + PT1 滤波）、回算抗饱和与无扰切换。
+  FB_PID_POS — positional (absolute-output) PID controller with observable p/i/d terms,
+  SP weighting, derivative-on-PV (D on PV + PT1 filter), back-calculation anti-windup
+  and bumpless transfer.
 
-  ≈ 标准位置式 PID（绝对输出形态，P/I/D 分项可观测、SP 加权 b、
-  微分作用于 PV），各主流 DCS/PLC 标准库均有同类块。
+  ~ Standard positional PID (absolute-output form, observable P/I/D terms, SP weighting
+  b, derivative acting on PV), found in every major DCS/PLC standard library.
 
-  用途：与速度型 FB_PID 互补——需要观测/调试积分项、要 SP 加权
-  （b < 1 抑制设定值阶跃的比例踢）、或下游需要绝对量输出的回路。
-  增量输出/级联接力等场景仍推荐 FB_PID。
+  Purpose: complements the velocity-form FB_PID -- for loops that need to observe/debug
+  the integral term, want SP weighting (b < 1 suppresses the proportional kick on a
+  setpoint step), or need an absolute-quantity output downstream. For incremental
+  output / cascade relay scenarios, FB_PID is still recommended.
 
-  算法（位置式）：
-    e   := sp - pv（反作用，默认）；direct = TRUE 时 e := pv - sp
-    e_p := b*sp - pv（P 项专用的 SP 加权偏差；direct 时取反向）
+  Algorithm (positional):
+    e   := sp - pv (reverse-acting, default); direct = TRUE gives e := pv - sp
+    e_p := b*sp - pv (the SP-weighted deviation used only by the P term; reversed when direct)
     p_part := kp * e_p
-    i_part := i_part + kp*dt_s/ti_s * e（ti_s > 0 时累加）
-    d_part := -kp*td_s * d(pv_f)/dt（微分作用于 PV：SP 阶跃不踢；
-              pv 先经 PT1 滤波，t_dfilt_s <= 0 自动取 3*dt_s；
-              direct 时符号取正）
-    out := p_part + i_part + d_part + ff，钳位到 [out_min, out_max]
-  抗积分饱和与无扰（回算）：每拍收尾把 i_part 回算为
+    i_part := i_part + kp*dt_s/ti_s * e (accumulated when ti_s > 0)
+    d_part := -kp*td_s * d(pv_f)/dt (derivative acts on PV: no kick on an SP step;
+              pv first passes a PT1 filter, t_dfilt_s <= 0 takes 3*dt_s automatically;
+              sign goes positive when direct)
+    out := p_part + i_part + d_part + ff, clamped to [out_min, out_max]
+  Anti-windup and bumpless (back-calculation): each scan wraps up by back-calculating i_part as
     i_part := out - p_part - d_part - ff
-  ——钳位时积分被拉回（不饱和）；手动/跟踪时 out 跟随给定，i_part
-  同步回算，切回自动无跳变。ti_s = 0（无积分）时 i_part 仅在手动/
-  跟踪期间回算（此时它是固定偏置/手动复位项，自动期间不被钳位事件
-  改写，P 型调节的静差特性保持稳定）。
-  模式优先级：track > NOT auto（手动）> 自动（与 FB_PID 一致）。
-  恒等式：任意模式下 out = p_part + i_part + d_part + ff（钳位后，
-  ti_s = 0 的自动钳位拍除外）——分项之和即输出，调试直观。
+  -- on clamping the integral is pulled back (no windup); in manual/track the output
+  follows the supplied value and i_part back-calculates in step, so the return to auto
+  has no jump. When ti_s = 0 (no integral), i_part is back-calculated only during
+  manual/track (where it is a fixed bias / manual-reset term, not overwritten by
+  clamping events during auto, keeping the offset characteristic of P-type control
+  stable).
+  Mode priority: track > NOT auto (manual) > auto (same as FB_PID).
+  Identity: in every mode out = p_part + i_part + d_part + ff (after clamping, except
+  on an auto clamping scan with ti_s = 0) -- the sum of the terms is the output,
+  intuitive for debugging.
 
-  输入：
-    pv          REAL  过程值
-    sp          REAL  设定值
-    kp          REAL  比例增益
-    ti_s        REAL  积分时间 s（0 = 无积分）
-    td_s        REAL  微分时间 s（0 = 微分关）
-    t_dfilt_s   REAL  微分前置 PT1 滤波时间常数 s（<= 0 = 自动 3*dt_s）
-    sp_weight_b REAL  SP 加权系数 b（仅作用于 P 项；1 = 不加权，
-                      0 = P 项只看 pv——SP 阶跃完全不踢比例）
-    dt_s        REAL  采样周期 s（<= 0 时本周期保持不动作）
-    direct      BOOL  TRUE = 正作用（pv↑→out↑），FALSE = 反作用
-    auto        BOOL  TRUE 自动 / FALSE 手动
-    manual_out  REAL  手动给定值
-    out_min     REAL  输出下限（假定 out_min < out_max）
-    out_max     REAL  输出上限
-    ff          REAL  前馈量（钳位前叠加到输出）
-    track       BOOL  输出跟踪使能（优先级最高）
-    track_value REAL  跟踪值
-  输出：
-    out    REAL  调节输出（各模式均钳位）
-    dev    REAL  偏差（反作用 sp-pv / 正作用 pv-sp，不带 SP 加权）
-    p_part REAL  比例分项（含 SP 加权）
-    i_part REAL  积分分项（含回算修正）
-    d_part REAL  微分分项
+  Inputs:
+    pv          REAL  process value
+    sp          REAL  setpoint
+    kp          REAL  proportional gain
+    ti_s        REAL  integral time s (0 = no integral)
+    td_s        REAL  derivative time s (0 = derivative off)
+    t_dfilt_s   REAL  derivative pre-filter PT1 time constant s (<= 0 = auto 3*dt_s)
+    sp_weight_b REAL  SP weighting coefficient b (acts on the P term only; 1 = no weighting,
+                      0 = the P term sees pv only -- an SP step gives no proportional kick at all)
+    dt_s        REAL  sample period s (<= 0 holds this scan, no action)
+    direct      BOOL  TRUE = direct-acting (pv up -> out up), FALSE = reverse-acting
+    auto        BOOL  TRUE auto / FALSE manual
+    manual_out  REAL  manual output value
+    out_min     REAL  output low limit (assumes out_min < out_max)
+    out_max     REAL  output high limit
+    ff          REAL  feedforward (added to output before clamp)
+    track       BOOL  output-tracking enable (highest priority)
+    track_value REAL  tracking value
+  Outputs:
+    out    REAL  control output (clamped in every mode)
+    dev    REAL  deviation (reverse-acting sp-pv / direct-acting pv-sp, without SP weighting)
+    p_part REAL  proportional term (includes SP weighting)
+    i_part REAL  integral term (includes back-calculation correction)
+    d_part REAL  derivative term
 *)
 FUNCTION_BLOCK FB_PID_POS
   VAR_INPUT
@@ -2088,26 +2153,26 @@ FUNCTION_BLOCK FB_PID_POS
     d_part : REAL;
   END_VAR
   VAR
-    pv_f      : REAL; (* D 项 PT1 滤波后的 PV *)
-    pv_f_prev : REAL; (* 上一拍滤波值，后向差分用 *)
-    t_f       : REAL; (* 实际使用的滤波时间常数 *)
-    d_pv      : REAL; (* 滤波 PV 的变化率 单位/s *)
-    e         : REAL; (* 控制偏差（含作用方向） *)
-    e_p       : REAL; (* P 项偏差（SP 加权 b） *)
-    init_done : BOOL; (* 滤波态首扫描对中标志 *)
+    pv_f      : REAL; (* PV after the D-term PT1 filter *)
+    pv_f_prev : REAL; (* previous-scan filtered value, for the backward difference *)
+    t_f       : REAL; (* filter time constant actually used *)
+    d_pv      : REAL; (* rate of change of the filtered PV, units/s *)
+    e         : REAL; (* control deviation (includes the action direction) *)
+    e_p       : REAL; (* P-term deviation (SP weighting b) *)
+    init_done : BOOL; (* filter-state first-scan alignment flag *)
   END_VAR
 
   IF dt_s <= 0.0 THEN
-    RETURN; (* 采样周期非法：保持输出与历史不变 *)
+    RETURN; (* invalid sample period: hold output and history unchanged *)
   END_IF;
 
   IF NOT init_done THEN
-    pv_f := pv; (* 滤波态对中：不出投运假微分 *)
+    pv_f := pv; (* align the filter state: no spurious startup derivative *)
     pv_f_prev := pv;
     init_done := TRUE;
   END_IF;
 
-  (* D 项前置 PT1 滤波 + 后向差分（与 FB_DERIV 同核） *)
+  (* D-term pre-filter PT1 + backward difference (same core as FB_DERIV) *)
   t_f := t_dfilt_s;
   IF t_f <= 0.0 THEN
     t_f := 3.0 * dt_s;
@@ -2116,7 +2181,7 @@ FUNCTION_BLOCK FB_PID_POS
   d_pv := (pv_f - pv_f_prev) / dt_s;
   pv_f_prev := pv_f;
 
-  (* 偏差（按作用方向）与 SP 加权 P 偏差 *)
+  (* Deviation (by action direction) and the SP-weighted P deviation *)
   IF direct THEN
     e := pv - sp;
     e_p := pv - sp_weight_b * sp;
@@ -2130,7 +2195,7 @@ FUNCTION_BLOCK FB_PID_POS
 
   d_part := 0.0;
   IF td_s > 0.0 THEN
-    (* 微分作用于 PV（SP 阶跃不踢微分）：反作用 pv↑ 应压输出 → 取负号 *)
+    (* Derivative acts on PV (no kick on an SP step): reverse-acting, rising pv should push the output down -> negative sign *)
     IF direct THEN
       d_part := kp * td_s * d_pv;
     ELSE
@@ -2139,10 +2204,10 @@ FUNCTION_BLOCK FB_PID_POS
   END_IF;
 
   IF track THEN
-    (* 输出跟踪：无条件跟随 track_value，优先级最高 *)
+    (* Output tracking: follows track_value unconditionally, highest priority *)
     out := track_value;
   ELSIF NOT auto THEN
-    (* 手动：跟踪 manual_out，i_part 回算保证返回自动无扰 *)
+    (* Manual: follows manual_out; the i_part back-calculation guarantees a bumpless return to auto *)
     out := manual_out;
   ELSE
     IF ti_s > 0.0 THEN
@@ -2151,59 +2216,64 @@ FUNCTION_BLOCK FB_PID_POS
     out := p_part + i_part + d_part + ff;
   END_IF;
 
-  (* 输出钳位 *)
+  (* Output clamp *)
   IF out > out_max THEN
     out := out_max;
   ELSIF out < out_min THEN
     out := out_min;
   END_IF;
 
-  (* 回算 i_part：使 P+I+D+ff 恒等于钳位后输出 → 钳位即抗积分饱和、
-     手动/跟踪即无扰对中。ti_s = 0 时仅手动/跟踪期间回算（见头注） *)
+  (* Back-calculate i_part: makes P+I+D+ff always equal the clamped output -> clamping
+     gives anti-windup and manual/track gives bumpless alignment. When ti_s = 0,
+     back-calculate only during manual/track (see header note) *)
   IF ti_s > 0.0 OR track OR NOT auto THEN
     i_part := out - p_part - d_part - ff;
   END_IF;
 END_FUNCTION_BLOCK
 (*
-  FB_MANSTATION — 手操/偏置站（manual loader / bias station）。
+  FB_MANSTATION — manual loader / bias station.
 
-  ≈ 标准手操站 + 偏置站（manual station / auto-manual station with
-  bias），调节输出与执行机构之间的标准操作层，各主流 DCS/PLC
-  标准库均有同类块。
+  ~ Standard manual station + bias station (manual station / auto-manual station with
+  bias), the standard operating layer between a controller output and an actuator,
+  found in every major DCS/PLC standard library.
 
-  用途：放在调节器输出与执行机构之间：自动时透传（可加偏置、可限
-  速），手动时操作员直接给定输出；balance 保证手动→自动切换无扰。
-  也可单独作纯手操器（auto := FALSE 常手动）或纯偏置/限速站。
+  Purpose: placed between a controller output and an actuator: in auto it passes through
+  (with optional bias and rate limiting); in manual the operator sets the output
+  directly; balance guarantees a bumpless manual->auto transfer. It can also serve
+  standalone as a pure manual loader (auto := FALSE, always manual) or a pure bias /
+  rate-limit station.
 
-  行为：
-    自动（auto = TRUE）：out 朝 (auto_in + bias + corr) 逼近——
-      rate > 0 时按 rate 单位/秒限速，rate = 0 直接跳变；钳位到
-      [out_min, out_max]。corr 是 balance 切换时回算的内部偏置修正。
-    手动（auto = FALSE）：out := manual_out（钳位，不限速），
-      tracking := TRUE。
-    无扰切换（balance = TRUE）：手动→自动切换沿回算
+  Behavior:
+    Auto (auto = TRUE): out approaches (auto_in + bias + corr) --
+      when rate > 0 limited to rate units/second, rate = 0 steps directly; clamped to
+      [out_min, out_max]. corr is the internal bias correction back-calculated at a balance transfer.
+    Manual (auto = FALSE): out := manual_out (clamped, not rate-limited),
+      tracking := TRUE.
+    Bumpless transfer (balance = TRUE): the manual->auto transition edge back-calculates
       corr := out - auto_in - bias
-    ——切换瞬间 out 连续；之后 auto_in/bias 的变化照常生效，corr
-    保持到下一次切换再重算。balance = FALSE 时 corr 恒 0（切换差值
-    靠 rate 限速渡过；rate = 0 则跳变）。
-    首扫描：out 直接对中到当前模式的目标值（不从 0 爬升）。
-    dt_s <= 0 → 本周期保持不动作。
-    注意：bias 是操作员/上位写的名义偏置；corr 是块内自整定修正，
-    两者叠加。要"清掉"历史修正：置 balance := FALSE 一拍即可。
+    -- out is continuous at the transfer instant; afterward changes in auto_in/bias take
+    effect as usual, and corr is held until recomputed at the next transfer. When
+    balance = FALSE, corr is always 0 (the transfer step is ridden out by the rate
+    limit; rate = 0 means a step).
+    First scan: out aligns directly to the current mode's target value (no climb from 0).
+    dt_s <= 0 -> hold this scan, no action.
+    Note: bias is the nominal bias written by the operator/supervisory level; corr is
+    the block's self-trimming correction, and the two add. To "clear" the historical
+    correction, set balance := FALSE for one scan.
 
-  输入：
-    auto_in    REAL  自动输入（上游调节器输出）
-    auto       BOOL  TRUE 自动 / FALSE 手动
-    manual_out REAL  手动给定值
-    bias       REAL  偏置（自动时叠加）
-    rate       REAL  自动输出限速 单位/s（0 = 不限速）
-    out_min    REAL  输出下限
-    out_max    REAL  输出上限
-    balance    BOOL  TRUE = 手动→自动切换回算偏置修正（无扰）
-    dt_s       REAL  采样周期 s
-  输出：
-    out      REAL  站输出（各模式均钳位）
-    tracking BOOL  手动中（上游调节器可接此位做输出跟踪）
+  Inputs:
+    auto_in    REAL  auto input (upstream controller output)
+    auto       BOOL  TRUE auto / FALSE manual
+    manual_out REAL  manual output value
+    bias       REAL  bias (added in auto)
+    rate       REAL  auto-output rate limit units/s (0 = no rate limit)
+    out_min    REAL  output low limit
+    out_max    REAL  output high limit
+    balance    BOOL  TRUE = back-calculate the bias correction on a manual->auto transfer (bumpless)
+    dt_s       REAL  sample period s
+  Outputs:
+    out      REAL  station output (clamped in every mode)
+    tracking BOOL  in manual (the upstream controller can use this bit for output tracking)
 *)
 FUNCTION_BLOCK FB_MANSTATION
   VAR_INPUT
@@ -2222,16 +2292,16 @@ FUNCTION_BLOCK FB_MANSTATION
     tracking : BOOL;
   END_VAR
   VAR
-    corr      : REAL; (* balance 回算的内部偏置修正 *)
-    target    : REAL; (* 自动目标 = auto_in + bias + corr *)
+    corr      : REAL; (* internal bias correction back-calculated by balance *)
+    target    : REAL; (* auto target = auto_in + bias + corr *)
     delta     : REAL;
     step      : REAL;
-    prev_auto : BOOL; (* 切换沿记忆 *)
-    init_done : BOOL; (* 首扫描对中标志 *)
+    prev_auto : BOOL; (* transfer-edge memory *)
+    init_done : BOOL; (* first-scan alignment flag *)
   END_VAR
 
   IF dt_s <= 0.0 THEN
-    RETURN; (* 采样周期非法：保持 *)
+    RETURN; (* invalid sample period: hold *)
   END_IF;
 
   IF NOT balance THEN
@@ -2239,7 +2309,7 @@ FUNCTION_BLOCK FB_MANSTATION
   END_IF;
 
   IF NOT init_done THEN
-    (* 首扫描：直接对中当前模式目标，不从 0 爬升 *)
+    (* First scan: align directly to the current mode's target, no climb from 0 *)
     IF auto THEN
       out := auto_in + bias;
     ELSE
@@ -2256,14 +2326,14 @@ FUNCTION_BLOCK FB_MANSTATION
     RETURN;
   END_IF;
 
-  (* 手动→自动切换沿：balance 回算修正，使 out 连续 *)
+  (* Manual->auto transition edge: balance back-calculates the correction so out is continuous *)
   IF auto AND NOT prev_auto AND balance THEN
     corr := out - auto_in - bias;
   END_IF;
   prev_auto := auto;
 
   IF NOT auto THEN
-    (* 手动：直接给定（钳位，不限速） *)
+    (* Manual: set directly (clamped, not rate-limited) *)
     out := manual_out;
     IF out > out_max THEN
       out := out_max;
@@ -2275,7 +2345,7 @@ FUNCTION_BLOCK FB_MANSTATION
   END_IF;
   tracking := FALSE;
 
-  (* 自动：朝 auto_in + bias + corr 限速逼近（rate = 0 跳变） *)
+  (* Auto: approach auto_in + bias + corr at the rate limit (rate = 0 steps) *)
   target := auto_in + bias + corr;
   IF rate > 0.0 THEN
     delta := target - out;
@@ -2298,52 +2368,58 @@ FUNCTION_BLOCK FB_MANSTATION
   END_IF;
 END_FUNCTION_BLOCK
 (*
-  FB_PID_3STEP — 步进（三步）PID：电动执行机构的开/关脉冲调节，
-  支持无阀位反馈（行程时间积分估计）与有反馈两种接法。
+  FB_PID_3STEP — step (3-step) PID: open/close pulse control of a motorized actuator,
+  supporting both no-position-feedback (travel-time integral estimate) and
+  with-feedback wiring.
 
-  ≈ 标准步进 PID / 三步输出调节器（step controller / 3-step PID，
-  驱动电动调节阀、电动风门等积分型执行机构），各主流 DCS/PLC
-  标准库均有同类块。
+  ~ Standard step PID / 3-step output controller (step controller / 3-step PID, driving
+  integrating-type actuators such as motorized control valves and motorized dampers),
+  found in every major DCS/PLC standard library.
 
-  用途：电动执行机构（电动阀/电动风门，机构本身是积分环节：通电
-  开/关方向运行，断电停在原位）的闭环调节。无阀位变送器时用行程
-  时间积分估计阀位（pos_fb < 0），有 4-20 mA 阀位反馈时直接用。
+  Purpose: closed-loop control of a motorized actuator (motorized valve / motorized
+  damper, which is itself an integrating element: energized it runs open/close, de-energized
+  it stops in place). Without a position transmitter, estimate position by integrating
+  travel time (pos_fb < 0); with a 4-20 mA position feedback, use it directly.
 
-  行为：
-    1) 阀位估计 pos_est：pos_fb >= 0 直接取反馈（钳 0..100）；否则按
-       上一拍输出与行程时间积分：开脉冲 +100*dt_s/motor_time_s，
-       关脉冲同理递减（钳 0..100）。
-    2) 内部位置式 PID（反作用 e = sp - pv，D 作用于 PV、PT1 自动
-       3*dt_s 滤波）算出目标阀位 target 0..100；积分回算抗饱和；
-       手动时 target 跟踪 pos_est，返回自动无扰。正作用场景请在
-       外部对 pv/sp 做取反处理。
-    3) 三步输出：阀位偏差 = target - pos_est；
-       > deadband_pct 出开脉冲，< -deadband_pct 出关脉冲，死区内停。
-       自动方式下脉冲一旦发出至少保持 min_pulse_s（防短脉冲打接触器）；
-       手动点动 man_open/man_close 直通（无最小脉宽，同发互锁），
-       仅受行程限位约束。换向必经一拍全停（先停后反向）。
-       贴行程边界（pos_est 到 0 或 100）立即停该方向脉冲。
-    整定提示：deadband_pct 应大于最小脉宽对应的行程
-    （min_pulse_s / motor_time_s * 100%），否则死区内仍会过冲振荡。
+  Behavior:
+    1) Position estimate pos_est: pos_fb >= 0 takes the feedback directly (clamped
+       0..100); otherwise integrate from the previous scan's output and the travel time:
+       an open pulse adds +100*dt_s/motor_time_s, a close pulse decrements likewise
+       (clamped 0..100).
+    2) An internal positional PID (reverse-acting e = sp - pv, D on PV with automatic
+       3*dt_s PT1 filtering) computes the target position target 0..100; integral
+       back-calculation anti-windup; in manual, target tracks pos_est so the return to
+       auto is bumpless. For direct-acting scenarios, invert pv/sp externally.
+    3) Three-step output: position deviation = target - pos_est;
+       > deadband_pct emits an open pulse, < -deadband_pct emits a close pulse, within
+       the deadband stop. In auto, once a pulse is emitted it is held at least
+       min_pulse_s (to avoid short pulses hammering the contactor); manual jogs
+       man_open/man_close pass through (no minimum pulse width, mutually interlocked
+       when both are commanded), constrained only by the travel limits. A reversal must
+       pass through one scan fully stopped (stop before reversing). At a travel boundary
+       (pos_est reaching 0 or 100), stop that direction's pulse immediately.
+    Tuning tip: deadband_pct should be larger than the travel corresponding to the
+    minimum pulse width (min_pulse_s / motor_time_s * 100%), otherwise it will still
+    overshoot and oscillate within the deadband.
 
-  输入：
-    pv           REAL  过程值
-    sp           REAL  设定值
-    kp           REAL  比例增益
-    ti_s         REAL  积分时间 s（0 = 无积分）
-    td_s         REAL  微分时间 s（0 = 微分关）
-    dt_s         REAL  采样周期 s（<= 0 时本周期保持不动作）
-    motor_time_s REAL  执行机构全行程时间 s（0→100%；估计与限位用）
-    min_pulse_s  REAL  自动方式最小脉冲宽度 s
-    deadband_pct REAL  阀位死区 %（偏差死区内不动作）
-    auto         BOOL  TRUE 自动 / FALSE 手动点动
-    man_open     BOOL  手动开点动（与 man_close 同发互锁不动作）
-    man_close    BOOL  手动关点动
-    pos_fb       REAL  阀位反馈 0..100 %（< 0 = 无反馈，用行程估计）
-  输出：
-    q_open  BOOL  开方向脉冲输出
-    q_close BOOL  关方向脉冲输出
-    pos_est REAL  阀位估计/反馈 0..100 %
+  Inputs:
+    pv           REAL  process value
+    sp           REAL  setpoint
+    kp           REAL  proportional gain
+    ti_s         REAL  integral time s (0 = no integral)
+    td_s         REAL  derivative time s (0 = derivative off)
+    dt_s         REAL  sample period s (<= 0 holds this scan, no action)
+    motor_time_s REAL  actuator full-travel time s (0->100%; used for estimation and limits)
+    min_pulse_s  REAL  minimum pulse width in auto s
+    deadband_pct REAL  position deadband % (no action within the deviation deadband)
+    auto         BOOL  TRUE auto / FALSE manual jog
+    man_open     BOOL  manual open jog (interlocked, no action when commanded with man_close)
+    man_close    BOOL  manual close jog
+    pos_fb       REAL  position feedback 0..100 % (< 0 = no feedback, use travel estimate)
+  Outputs:
+    q_open  BOOL  open-direction pulse output
+    q_close BOOL  close-direction pulse output
+    pos_est REAL  position estimate/feedback 0..100 %
 *)
 FUNCTION_BLOCK FB_PID_3STEP
   VAR_INPUT
@@ -2367,23 +2443,23 @@ FUNCTION_BLOCK FB_PID_3STEP
     pos_est : REAL;
   END_VAR
   VAR
-    i_acc     : REAL; (* 位置式 PID 积分项（回算无扰） *)
-    pv_f      : REAL; (* D 项 PT1 滤波态 *)
+    i_acc     : REAL; (* positional-PID integral term (back-calculation bumpless) *)
+    pv_f      : REAL; (* D-term PT1 filter state *)
     pv_f_prev : REAL;
     t_f       : REAL;
     e         : REAL;
     p_term    : REAL;
     d_term    : REAL;
-    target    : REAL; (* PID 目标阀位 0..100 *)
-    err_pos   : REAL; (* 阀位偏差 target - pos_est *)
-    pulse_t   : REAL; (* 当前脉冲已持续时间 s *)
-    open_req  : BOOL; (* 本拍开方向需求 *)
+    target    : REAL; (* PID target position 0..100 *)
+    err_pos   : REAL; (* position deviation target - pos_est *)
+    pulse_t   : REAL; (* elapsed duration of the current pulse s *)
+    open_req  : BOOL; (* open-direction demand this scan *)
     close_req : BOOL;
-    init_done : BOOL; (* 滤波态首扫描对中标志 *)
+    init_done : BOOL; (* filter-state first-scan alignment flag *)
   END_VAR
 
   IF dt_s <= 0.0 THEN
-    RETURN; (* 采样周期非法：保持 *)
+    RETURN; (* invalid sample period: hold *)
   END_IF;
 
   IF NOT init_done THEN
@@ -2392,7 +2468,7 @@ FUNCTION_BLOCK FB_PID_3STEP
     init_done := TRUE;
   END_IF;
 
-  (* 1) 阀位估计：有反馈直接用；无反馈按上一拍输出行程时间积分 *)
+  (* 1) Position estimate: use feedback directly when available; otherwise integrate from the previous scan's output over the travel time *)
   IF pos_fb >= 0.0 THEN
     pos_est := pos_fb;
   ELSE
@@ -2411,7 +2487,7 @@ FUNCTION_BLOCK FB_PID_3STEP
     pos_est := 0.0;
   END_IF;
 
-  (* 2) 位置式 PID → 目标阀位（反作用；D 于 PV，自动 3*dt_s 滤波） *)
+  (* 2) Positional PID -> target position (reverse-acting; D on PV, automatic 3*dt_s filtering) *)
   t_f := 3.0 * dt_s;
   pv_f := pv_f + dt_s / (t_f + dt_s) * (pv - pv_f);
   e := sp - pv;
@@ -2428,7 +2504,7 @@ FUNCTION_BLOCK FB_PID_3STEP
     END_IF;
     target := p_term + i_acc + d_term;
   ELSE
-    target := pos_est; (* 手动：目标跟踪当前阀位，返回自动无扰 *)
+    target := pos_est; (* Manual: target tracks the current position, bumpless return to auto *)
   END_IF;
   IF target > 100.0 THEN
     target := 100.0;
@@ -2436,20 +2512,20 @@ FUNCTION_BLOCK FB_PID_3STEP
     target := 0.0;
   END_IF;
   IF ti_s > 0.0 OR NOT auto THEN
-    i_acc := target - p_term - d_term; (* 回算：抗饱和 + 无扰 *)
+    i_acc := target - p_term - d_term; (* Back-calculation: anti-windup + bumpless *)
   END_IF;
 
-  (* 3) 三步输出需求 *)
+  (* 3) Three-step output demand *)
   IF auto THEN
     err_pos := target - pos_est;
     open_req := err_pos > deadband_pct;
     close_req := err_pos < 0.0 - deadband_pct;
   ELSE
-    open_req := man_open AND NOT man_close; (* 手动点动直通，同发互锁 *)
+    open_req := man_open AND NOT man_close; (* Manual jog passes through, interlocked when both commanded *)
     close_req := man_close AND NOT man_open;
   END_IF;
 
-  (* 行程限位：贴边不再出该方向脉冲（手/自动一致） *)
+  (* Travel limits: at a boundary, stop emitting that direction's pulse (same in manual/auto) *)
   IF pos_est >= 100.0 THEN
     open_req := FALSE;
   END_IF;
@@ -2457,15 +2533,17 @@ FUNCTION_BLOCK FB_PID_3STEP
     close_req := FALSE;
   END_IF;
 
-  (* 脉冲计时与输出：自动撤需求须满足最小脉宽；手动撤即停；
-     换向必经一拍全停（当前方向先落，下一拍才允许反向） *)
+  (* Pulse timing and output: in auto, dropping the demand must satisfy the minimum
+     pulse width; in manual, dropping stops immediately; a reversal must pass through
+     one scan fully stopped (the current direction drops first, the reverse is allowed
+     only on the next scan) *)
   IF q_open OR q_close THEN
     pulse_t := pulse_t + dt_s;
   END_IF;
 
   IF q_open THEN
     IF pos_est >= 100.0 THEN
-      q_open := FALSE; (* 限位即停 *)
+      q_open := FALSE; (* at limit, stop *)
     ELSIF NOT open_req AND (NOT auto OR pulse_t >= min_pulse_s) THEN
       q_open := FALSE;
     END_IF;
@@ -2485,44 +2563,47 @@ FUNCTION_BLOCK FB_PID_3STEP
   END_IF;
 END_FUNCTION_BLOCK
 (*
-  FB_MOTOR_REV — 双向（正/反转）电机控制，带换向闭锁、运行反馈
-  监视与故障锁存。
+  FB_MOTOR_REV — bidirectional (forward/reverse) motor control, with reversal interlock,
+  run-feedback monitoring and fault latch.
 
-  ≈ 标准双向电机块（reversing motor / forward-reverse starter，
-  含换向互锁延时），各主流 DCS/PLC 标准库均有同类块。
+  ~ Standard reversing-motor block (reversing motor / forward-reverse starter, including
+  the reversal-interlock delay), found in every major DCS/PLC standard library.
 
-  用途：搅拌器、卷扬、双向皮带、闸门开度电机等可逆运转设备的
-  标准封装（范式沿自 FB_MOTOR：命令锁存 + 反馈超时故障锁存）。
+  Purpose: standard wrapper for reversible-running equipment such as agitators, hoists,
+  bidirectional conveyors and gate-opening motors (pattern following FB_MOTOR: command
+  latch + feedback-timeout fault latch).
 
-  行为：
-    1) 故障监视：fb_fwd 与 fb_rev 同时为 TRUE → 反馈/接触器故障，
-       立即 fault；输出与反馈不一致（q_fwd<>fb_fwd 或 q_rev<>fb_rev）
-       持续 fb_timeout_s（手工 dt_s 累加计时）→ fault。均锁存，
-       reset 且双反馈条件已消除时清除。
-    2) 方向命令锁存（停车/故障优先）：cmd_fwd / cmd_rev 置位对应
-       方向请求（同拍双向命令视为冲突，不动作）；stop 或 fault 清除
-       全部请求。
-    3) 换向闭锁：换向（反向请求仍在、或反向反馈仍在转）时强制双输出
-       全停 reversal_delay_s 后才允许新方向输出——接触器灭弧/机械
-       泄劲时间。reversal_delay_s 应小于 fb_timeout_s（闭锁等待期的
-       反馈余转靠超时容忍）。
-    4) 状态字 state：0 停止 / 1 正转 / 2 反转 / 3 故障 / 4 换向等待。
+  Behavior:
+    1) Fault monitoring: fb_fwd and fb_rev TRUE at once -> feedback/contactor fault,
+       immediate fault; an output-feedback mismatch (q_fwd<>fb_fwd or q_rev<>fb_rev)
+       persisting for fb_timeout_s (manual dt_s accumulation) -> fault. All latched;
+       cleared by reset with the dual-feedback condition cleared.
+    2) Direction command latch (stop/fault priority): cmd_fwd / cmd_rev set the
+       corresponding direction request (a both-direction command in the same scan is
+       treated as a conflict, no action); stop or fault clears all requests.
+    3) Reversal interlock: on a reversal (the reverse request is still present, or the
+       reverse feedback is still turning), both outputs are forced fully stopped, and a
+       new-direction output is allowed only after reversal_delay_s -- the contactor
+       arc-quench / mechanical run-down time. reversal_delay_s should be less than
+       fb_timeout_s (residual feedback rotation during the interlock wait is covered by
+       the timeout tolerance).
+    4) Status word state: 0 stopped / 1 forward / 2 reverse / 3 faulted / 4 reversal wait.
 
-  输入：
-    cmd_fwd          BOOL  正转命令
-    cmd_rev          BOOL  反转命令
-    stop             BOOL  停止命令（优先）
-    fb_fwd           BOOL  正转运行反馈
-    fb_rev           BOOL  反转运行反馈
-    fb_timeout_s     REAL  反馈不一致容忍时间 s
-    reversal_delay_s REAL  换向全停闭锁时间 s
-    reset            BOOL  故障复位
-    dt_s             REAL  采样周期 s
-  输出：
-    q_fwd BOOL  正转输出
-    q_rev BOOL  反转输出
-    fault BOOL  故障（锁存）
-    state REAL  0 停止 / 1 正转 / 2 反转 / 3 故障 / 4 换向等待
+  Inputs:
+    cmd_fwd          BOOL  forward command
+    cmd_rev          BOOL  reverse command
+    stop             BOOL  stop command (priority)
+    fb_fwd           BOOL  forward run feedback
+    fb_rev           BOOL  reverse run feedback
+    fb_timeout_s     REAL  feedback-mismatch tolerance time s
+    reversal_delay_s REAL  reversal full-stop interlock time s
+    reset            BOOL  fault reset
+    dt_s             REAL  sample period s
+  Outputs:
+    q_fwd BOOL  forward output
+    q_rev BOOL  reverse output
+    fault BOOL  fault (latched)
+    state REAL  0 stopped / 1 forward / 2 reverse / 3 faulted / 4 reversal wait
 *)
 FUNCTION_BLOCK FB_MOTOR_REV
   VAR_INPUT
@@ -2543,16 +2624,16 @@ FUNCTION_BLOCK FB_MOTOR_REV
     state : REAL;
   END_VAR
   VAR
-    want_fwd : BOOL; (* 锁存的方向请求 *)
+    want_fwd : BOOL; (* latched direction request *)
     want_rev : BOOL;
-    wait_t   : REAL; (* 换向闭锁剩余时间 s *)
-    mism_t   : REAL; (* 反馈不一致累计时间 s *)
-    conflict : BOOL; (* 同拍双向命令 *)
+    wait_t   : REAL; (* reversal-interlock remaining time s *)
+    mism_t   : REAL; (* feedback-mismatch accumulated time s *)
+    conflict : BOOL; (* both-direction command in the same scan *)
   END_VAR
 
-  (* 1) 故障监视 *)
+  (* 1) Fault monitoring *)
   IF fb_fwd AND fb_rev THEN
-    fault := TRUE; (* 双向反馈同时有效：接触器粘连/反馈回路故障 *)
+    fault := TRUE; (* both feedbacks active at once: welded contactor / feedback-circuit fault *)
   END_IF;
   IF (q_fwd <> fb_fwd) OR (q_rev <> fb_rev) THEN
     mism_t := mism_t + dt_s;
@@ -2567,11 +2648,11 @@ FUNCTION_BLOCK FB_MOTOR_REV
     mism_t := 0.0;
   END_IF;
 
-  (* 2) 方向命令锁存（停车/故障优先；同拍双向命令冲突不动作） *)
+  (* 2) Direction command latch (stop/fault priority; a both-direction command in the same scan conflicts, no action) *)
   conflict := cmd_fwd AND cmd_rev;
   IF cmd_fwd AND NOT conflict AND NOT fault AND NOT stop THEN
     IF want_rev OR fb_rev THEN
-      wait_t := reversal_delay_s; (* 反向仍在令/仍在转：先全停闭锁 *)
+      wait_t := reversal_delay_s; (* reverse still commanded / still turning: full-stop interlock first *)
     END_IF;
     want_fwd := TRUE;
     want_rev := FALSE;
@@ -2587,7 +2668,7 @@ FUNCTION_BLOCK FB_MOTOR_REV
     want_rev := FALSE;
   END_IF;
 
-  (* 3) 换向闭锁计时（手工 dt_s 递减） *)
+  (* 3) Reversal-interlock timing (manual dt_s decrement) *)
   IF wait_t > 0.0 THEN
     wait_t := wait_t - dt_s;
     IF wait_t < 0.0 THEN
@@ -2595,11 +2676,11 @@ FUNCTION_BLOCK FB_MOTOR_REV
     END_IF;
   END_IF;
 
-  (* 4) 输出：闭锁期间双输出强制全停 *)
+  (* 4) Output: during the interlock both outputs are forced fully stopped *)
   q_fwd := want_fwd AND wait_t <= 0.0;
   q_rev := want_rev AND wait_t <= 0.0;
 
-  (* 5) 状态字 *)
+  (* 5) Status word *)
   IF fault THEN
     state := 3.0;
   ELSIF wait_t > 0.0 AND (want_fwd OR want_rev) THEN
@@ -2613,43 +2694,47 @@ FUNCTION_BLOCK FB_MOTOR_REV
   END_IF;
 END_FUNCTION_BLOCK
 (*
-  FB_MOV — 电动阀（开/停/关三命令 + ZSO/ZSC 双限位 + 行程超时）。
+  FB_MOV — motor-operated valve (open/stop/close three commands + ZSO/ZSC dual limits + travel timeout).
 
-  ≈ 标准电动阀块（motor-operated valve，开/停/关型，带行程监视），
-  各主流 DCS/PLC 标准库均有同类块。
+  ~ Standard motor-operated-valve block (open/stop/close type, with travel monitoring),
+  found in every major DCS/PLC standard library.
 
-  用途：电动闸阀/蝶阀等"开-停-关"型电动阀的标准封装。与 FB_VALVE
-  （两位阀，单输出保持）的区别：本块是双方向脉冲驱动 + 可中停，
-  电机到位由限位自动停；与 FB_PID_3STEP（调节型步进）的区别：
-  本块只做全开/全关/中停的顺控操作，不做闭环调节。
+  Purpose: standard wrapper for "open-stop-close"-type motor-operated valves such as
+  motorized gate/butterfly valves. Difference from FB_VALVE (two-position valve, single
+  held output): this block is dual-direction pulse-driven with mid-travel stop, and the
+  motor stops automatically at the limit; difference from FB_PID_3STEP (modulating step
+  type): this block does only full-open/full-close/mid-stop sequential operations, no
+  closed-loop control.
 
-  行为：
-    1) 故障监视：zso 与 zsc 同时 TRUE → 限位开关故障，立即 fault；
-       行程（任一方向输出有效且未到目标限位）持续超过 travel_s →
-       行程超时 fault（阀卡/限位丢失），同时停输出。均锁存，
-       reset 且双限位条件已消除时清除（行程计时同步清零）。
-    2) 命令：cmd_stop 或故障 → 双输出停（优先；cmd_open 与
-       cmd_close 同拍同发视为冲突，按停处理）；cmd_open 锁存开输出、
-       cmd_close 锁存关输出（互斥，新命令即新行程，行程计时清零）。
-    3) 到位自停：q_open 期间 zso 到 → 停开输出；q_close 期间 zsc
-       到 → 停关输出。
-    4) 状态字 pos_state：0 全关 / 1 开行程中 / 2 全开 / 3 关行程中 /
-       4 故障；中停（无输出且不在限位）保持上一状态值。
+  Behavior:
+    1) Fault monitoring: zso and zsc TRUE at once -> limit-switch fault, immediate fault;
+       travel (an output active in either direction and the target limit not reached)
+       exceeding travel_s -> travel-timeout fault (stuck valve / lost limit), and the
+       outputs stop. All latched; cleared by reset with the dual-limit condition cleared
+       (the travel timer is cleared in step).
+    2) Commands: cmd_stop or fault -> both outputs stop (priority; cmd_open and cmd_close
+       commanded together in the same scan is treated as a conflict, handled as stop);
+       cmd_open latches the open output, cmd_close latches the close output (mutually
+       exclusive, a new command is a new travel, the travel timer is cleared).
+    3) Stop-at-position: zso reached during q_open -> stop the open output; zsc reached
+       during q_close -> stop the close output.
+    4) Status word pos_state: 0 fully closed / 1 opening / 2 fully open / 3 closing /
+       4 faulted; a mid-stop (no output and not at a limit) holds the previous status value.
 
-  输入：
-    cmd_open  BOOL  开阀命令
-    cmd_close BOOL  关阀命令
-    cmd_stop  BOOL  停止命令（优先，中停）
-    zso       BOOL  开到位限位
-    zsc       BOOL  关到位限位
-    travel_s  REAL  行程超时 s（<= 0 = 不监视）
-    reset     BOOL  故障复位
-    dt_s      REAL  采样周期 s
-  输出：
-    q_open    BOOL  开方向输出
-    q_close   BOOL  关方向输出
-    pos_state REAL  0 全关 / 1 开行程中 / 2 全开 / 3 关行程中 / 4 故障
-    fault     BOOL  故障（锁存）
+  Inputs:
+    cmd_open  BOOL  open command
+    cmd_close BOOL  close command
+    cmd_stop  BOOL  stop command (priority, mid-stop)
+    zso       BOOL  open limit
+    zsc       BOOL  close limit
+    travel_s  REAL  travel timeout s (<= 0 = not monitored)
+    reset     BOOL  fault reset
+    dt_s      REAL  sample period s
+  Outputs:
+    q_open    BOOL  open-direction output
+    q_close   BOOL  close-direction output
+    pos_state REAL  0 fully closed / 1 opening / 2 fully open / 3 closing / 4 faulted
+    fault     BOOL  fault (latched)
 *)
 FUNCTION_BLOCK FB_MOV
   VAR_INPUT
@@ -2669,27 +2754,27 @@ FUNCTION_BLOCK FB_MOV
     fault     : BOOL;
   END_VAR
   VAR
-    travel_t : REAL; (* 当前行程累计时间 s *)
+    travel_t : REAL; (* current-travel accumulated time s *)
   END_VAR
 
-  (* 1) 双限位故障（立即） *)
+  (* 1) Dual-limit fault (immediate) *)
   IF zso AND zsc THEN
-    fault := TRUE; (* 双限位同时有效：限位开关故障 *)
+    fault := TRUE; (* both limits active at once: limit-switch fault *)
   END_IF;
 
-  (* 复位（双限位条件仍在时无效） *)
+  (* Reset (no effect while the dual-limit condition is still present) *)
   IF reset AND NOT (zso AND zsc) THEN
     fault    := FALSE;
     travel_t := 0.0;
   END_IF;
 
-  (* 2) 命令锁存：停/故障/同拍双命令 → 全停；开关互斥，新命令即新行程 *)
+  (* 2) Command latch: stop/fault/both-commands-same-scan -> full stop; open and close mutually exclusive, a new command is a new travel *)
   IF cmd_stop OR fault OR (cmd_open AND cmd_close) THEN
     q_open  := FALSE;
     q_close := FALSE;
   ELSIF cmd_open THEN
     IF NOT q_open THEN
-      travel_t := 0.0; (* 新行程：计时清零 *)
+      travel_t := 0.0; (* new travel: clear the timer *)
     END_IF;
     q_open  := TRUE;
     q_close := FALSE;
@@ -2701,7 +2786,7 @@ FUNCTION_BLOCK FB_MOV
     q_open  := FALSE;
   END_IF;
 
-  (* 3) 到位自停 *)
+  (* 3) Stop-at-position *)
   IF q_open AND zso THEN
     q_open := FALSE;
   END_IF;
@@ -2709,11 +2794,11 @@ FUNCTION_BLOCK FB_MOV
     q_close := FALSE;
   END_IF;
 
-  (* 4) 行程超时（手工 dt_s 累加计时） *)
+  (* 4) Travel timeout (manual dt_s accumulation) *)
   IF q_open OR q_close THEN
     travel_t := travel_t + dt_s;
     IF travel_s > 0.0 AND travel_t >= travel_s THEN
-      fault   := TRUE; (* 行程超时：阀卡/限位丢失 *)
+      fault   := TRUE; (* travel timeout: stuck valve / lost limit *)
       q_open  := FALSE;
       q_close := FALSE;
     END_IF;
@@ -2721,7 +2806,7 @@ FUNCTION_BLOCK FB_MOV
     travel_t := 0.0;
   END_IF;
 
-  (* 5) 状态字（中停保持上一状态值） *)
+  (* 5) Status word (a mid-stop holds the previous status value) *)
   IF fault THEN
     pos_state := 4.0;
   ELSIF zso THEN
@@ -2735,47 +2820,51 @@ FUNCTION_BLOCK FB_MOV
   END_IF;
 END_FUNCTION_BLOCK
 (*
-  FB_DOSE — 定量下料/定量给料（粗/精两段 + 落差补偿）。
+  FB_DOSE — batch dosing / batch feeding (coarse/fine two stages + in-flight compensation).
 
-  ≈ 标准定量加料块（dosing / batch weighing，coarse-fine 两速加料
-  + in-flight 落差提前关），配料秤/定量给料控制的惯用块。
+  ~ Standard dosing block (dosing / batch weighing, coarse-fine two-speed feeding +
+  early in-flight cutoff), the customary block for batch-scale / batch-feed control.
 
-  用途：料仓向秤斗/反应釜定量加料：粗加料快速接近目标，精加料
-  收口，按落差（关阀后仍在途的物料）提前关精阀，沉降后给出
-  完成与过冲量。流量输入可来自称重微分或流量计。
+  Purpose: dosing material from a silo into a weigh hopper / reactor: coarse feed
+  approaches the target quickly, fine feed trims, the fine valve closes early by the
+  in-flight amount (the material still in flight after the valve closes), and after
+  settling the completion and overshoot are reported. The flow input may come from a
+  weight derivative or a flowmeter.
 
-  行为：
-    start 上升沿（空闲且未完成、abort 未压下时）开新批：qty 清零，
-    进入加料段。加料/沉降期间累积 qty := qty + flow * dt_s
-    （flow <= 0 不计，落料完成的判据之一）。
-      粗段：qty < target - fine_qty → q_coarse = TRUE（粗精两阀同开）；
-      精段：qty < target - inflight → q_fine = TRUE；到点关精阀
-      （落差 inflight 即在途量预留），进入沉降段。
-      沉降段：等 flow <= 0 或固定 2 s（先到为准）→ done := TRUE，
-      overshoot := qty - target（在途料落完后的实际过冲）。
-    abort 电平有效：立即停双阀、退出加料/沉降，qty 保留（盘点用），
-    done 不置位。
-    done 后 start 无效，须 reset（电平有效）清 qty/done/overshoot
-    开下一批。
-    假定 fine_qty >= inflight >= 0（粗阀先关、精阀后关）；
-    done 之后的滴漏不再计入 qty。
-    dt_s <= 0 → 本周期保持不动作（命令沿照常记忆）。
+  Behavior:
+    start rising edge (when idle, not complete, and abort not pressed) begins a new
+    batch: qty cleared, enter the feed stage. During feeding/settling, accumulate
+    qty := qty + flow * dt_s (flow <= 0 not counted, one of the criteria for material
+    fully landed).
+      Coarse stage: qty < target - fine_qty -> q_coarse = TRUE (both coarse and fine valves open);
+      Fine stage: qty < target - inflight -> q_fine = TRUE; at the point, close the fine
+      valve (the in-flight reserve inflight is the in-flight amount held back) and enter
+      the settling stage.
+      Settling stage: wait for flow <= 0 or a fixed 2 s (whichever first) -> done := TRUE,
+      overshoot := qty - target (the actual overshoot once the in-flight material has landed).
+    abort level-active: stop both valves immediately, exit feeding/settling, qty
+    retained (for stocktaking), done not set.
+    After done, start has no effect; reset (level-active) is required to clear
+    qty/done/overshoot and begin the next batch.
+    Assumes fine_qty >= inflight >= 0 (coarse valve closes first, fine valve closes after);
+    dribble after done is no longer counted into qty.
+    dt_s <= 0 -> hold this scan, no action (command edges still remembered).
 
-  输入：
-    start    BOOL  启动（上升沿开新批）
-    abort    BOOL  中止（电平有效：停阀保量）
-    flow     REAL  瞬时流量 单位/s（称重微分或流量计）
-    target   REAL  目标量（与 flow 积分同单位）
-    fine_qty REAL  精加料段量（剩这么多时关粗阀）
-    inflight REAL  落差/在途量（剩这么多时关精阀）
-    dt_s     REAL  采样周期 s
-    reset    BOOL  批复位（电平有效：清 qty/done/overshoot）
-  输出：
-    q_coarse  BOOL  粗加料阀
-    q_fine    BOOL  精加料阀
-    qty       REAL  本批累计量
-    done      BOOL  本批完成（沉降后置位，保持到 reset）
-    overshoot REAL  完成后实际 - 目标（落差整定依据）
+  Inputs:
+    start    BOOL  start (rising edge begins a new batch)
+    abort    BOOL  abort (level-active: stop valves, retain quantity)
+    flow     REAL  instantaneous flow units/s (weight derivative or flowmeter)
+    target   REAL  target quantity (same unit as the flow integral)
+    fine_qty REAL  fine-feed-stage quantity (close the coarse valve with this much remaining)
+    inflight REAL  in-flight amount (close the fine valve with this much remaining)
+    dt_s     REAL  sample period s
+    reset    BOOL  batch reset (level-active: clear qty/done/overshoot)
+  Outputs:
+    q_coarse  BOOL  coarse-feed valve
+    q_fine    BOOL  fine-feed valve
+    qty       REAL  this batch's accumulated quantity
+    done      BOOL  this batch complete (set after settling, held until reset)
+    overshoot REAL  actual - target after completion (basis for tuning the in-flight amount)
 *)
 FUNCTION_BLOCK FB_DOSE
   VAR_INPUT
@@ -2796,10 +2885,10 @@ FUNCTION_BLOCK FB_DOSE
     overshoot : REAL;
   END_VAR
   VAR
-    dosing     : BOOL; (* 加料段（粗/精） *)
-    settling   : BOOL; (* 沉降等待段 *)
-    settle_t   : REAL; (* 沉降计时 s *)
-    prev_start : BOOL; (* 启动上升沿记忆 *)
+    dosing     : BOOL; (* feed stage (coarse/fine) *)
+    settling   : BOOL; (* settling-wait stage *)
+    settle_t   : REAL; (* settling timer s *)
+    prev_start : BOOL; (* start rising-edge memory *)
   END_VAR
 
   IF reset THEN
@@ -2816,14 +2905,14 @@ FUNCTION_BLOCK FB_DOSE
   END_IF;
 
   IF abort THEN
-    (* 中止：停阀退段，qty 保留，done 不置位 *)
+    (* Abort: stop valves and exit the stage, qty retained, done not set *)
     dosing   := FALSE;
     settling := FALSE;
     q_coarse := FALSE;
     q_fine   := FALSE;
   END_IF;
 
-  (* start 上升沿且空闲且未完成 → 开新批 *)
+  (* start rising edge, idle and not complete -> begin a new batch *)
   IF start AND NOT prev_start AND NOT abort
      AND NOT dosing AND NOT settling AND NOT done THEN
     dosing    := TRUE;
@@ -2834,10 +2923,10 @@ FUNCTION_BLOCK FB_DOSE
   prev_start := start;
 
   IF dt_s <= 0.0 THEN
-    RETURN; (* 采样周期非法：保持 *)
+    RETURN; (* invalid sample period: hold *)
   END_IF;
 
-  (* 加料/沉降期间累积流量（负流量不计） *)
+  (* Accumulate flow during feeding/settling (negative flow not counted) *)
   IF (dosing OR settling) AND flow > 0.0 THEN
     qty := qty + flow * dt_s;
   END_IF;
@@ -2846,7 +2935,7 @@ FUNCTION_BLOCK FB_DOSE
     q_coarse := qty < target - fine_qty;
     q_fine   := qty < target - inflight;
     IF NOT q_fine THEN
-      (* 到落差预留点：关精阀进沉降段 *)
+      (* At the in-flight reserve point: close the fine valve and enter the settling stage *)
       q_coarse := FALSE;
       dosing   := FALSE;
       settling := TRUE;
@@ -2864,42 +2953,45 @@ FUNCTION_BLOCK FB_DOSE
   END_IF;
 END_FUNCTION_BLOCK
 (*
-  FB_FLOW_COMP — 气体流量温压补偿（理想气体近似）。
+  FB_FLOW_COMP — gas-flow pressure/temperature compensation (ideal-gas approximation).
 
-  ≈ 标准温压补偿块（pressure/temperature compensation for gas
-  flow），气体流量折标况/折设计条件的惯用块。
+  ~ Standard pressure/temperature compensation block for gas flow, the customary
+  block for correcting gas flow to standard / design conditions.
 
-  用途：按工况压力/温度把气体流量修正到参比（设计）条件：
-  设计条件标定的 DP 流量计在工况偏离设计点时的读数修正、
-  体积式流量折标况量。补偿比：
-    ratio := (p_abs / p_ref) * (t_ref_k / t_k)   —— 密度比（理想气体）
-    p_abs := p_gauge_kpa + atm_kpa（表压 → 绝压）
+  Purpose: correct gas flow to reference (design) conditions using operating
+  pressure/temperature: reading correction for a DP flowmeter calibrated at design
+  conditions when operation departs from the design point, and correction of
+  volumetric flow to standard conditions. Compensation ratio:
+    ratio := (p_abs / p_ref) * (t_ref_k / t_k)   -- density ratio (ideal gas)
+    p_abs := p_gauge_kpa + atm_kpa (gauge -> absolute)
     t_k   := t_c + 273.15
-  行为（按 mode 选流量计类型）：
-    mode = 0（开方式 DP 流量计，差压开方后的流量信号）：
+  Behavior (mode selects the flowmeter type):
+    mode = 0 (square-root DP flowmeter, the flow signal after DP square-root extraction):
       q_comp := q_raw * SQRT(ratio)
-      ——DP 流量 ∝ SQRT(密度)，密度偏离设计值按开方修正。
-    mode = 1（线性体积式，工况体积流量折参比条件）：
+      -- DP flow is proportional to SQRT(density), so a density departure from the
+         design value is corrected via the square root.
+    mode = 1 (linear volumetric, operating volumetric flow corrected to reference conditions):
       q_comp := q_raw * ratio
-    防护：t_k <= 0、t_ref_k <= 0、p_ref_kpa_abs <= 0 或 p_abs <= 0
-    （测量/组态非法）→ q_comp := q_raw 直通。
-    纯组合逻辑，无内部状态。
-    范围说明：理想气体近似（不含压缩因子/湿度修正）；贸易交接级
-    的全规格能量计量标准算法不在本块范围。
-    参比条件默认 p_ref = 201.325 kPa(a)（即 100 kPa 表压 + 标准
-    大气压）、t_ref = 20 ℃——按流量计设计数据单整定。
+    Guard: t_k <= 0, t_ref_k <= 0, p_ref_kpa_abs <= 0 or p_abs <= 0
+    (invalid measurement/configuration) -> q_comp := q_raw pass-through.
+    Pure combinational logic, no internal state.
+    Scope note: ideal-gas approximation (no compressibility-factor or humidity
+    correction); custody-transfer-grade full-specification energy-metering standard
+    algorithms are outside this block's scope.
+    Reference conditions default to p_ref = 201.325 kPa(a) (i.e. 100 kPa gauge +
+    standard atmosphere), t_ref = 20 degC -- set per the flowmeter design datasheet.
 
-  输入：
-    q_raw         REAL  原始流量（工况读数）
-    p_gauge_kpa   REAL  工况表压 kPa(g)
-    t_c           REAL  工况温度 ℃
-    p_ref_kpa_abs REAL  参比绝压 kPa(a)（设计条件）
-    t_ref_c       REAL  参比温度 ℃（设计条件）
-    atm_kpa       REAL  当地大气压 kPa（表压→绝压换算）
-    mode          REAL  0 = 开方式 DP（乘 SQRT(ratio)）/
-                        1 = 线性体积式（乘 ratio）
-  输出：
-    q_comp REAL  补偿后的流量
+  Inputs:
+    q_raw         REAL  raw flow (operating reading)
+    p_gauge_kpa   REAL  operating gauge pressure kPa(g)
+    t_c           REAL  operating temperature degC
+    p_ref_kpa_abs REAL  reference absolute pressure kPa(a) (design condition)
+    t_ref_c       REAL  reference temperature degC (design condition)
+    atm_kpa       REAL  local atmospheric pressure kPa (gauge -> absolute conversion)
+    mode          REAL  0 = square-root DP (multiply by SQRT(ratio)) /
+                        1 = linear volumetric (multiply by ratio)
+  Outputs:
+    q_comp REAL  compensated flow
 *)
 FUNCTION_BLOCK FB_FLOW_COMP
   VAR_INPUT
@@ -2915,10 +3007,10 @@ FUNCTION_BLOCK FB_FLOW_COMP
     q_comp : REAL;
   END_VAR
   VAR
-    p_abs_kpa : REAL; (* 工况绝压 *)
-    t_k       : REAL; (* 工况热力学温度 K *)
-    t_ref_k   : REAL; (* 参比热力学温度 K *)
-    ratio     : REAL; (* 密度比（理想气体） *)
+    p_abs_kpa : REAL; (* operating absolute pressure *)
+    t_k       : REAL; (* operating absolute temperature K *)
+    t_ref_k   : REAL; (* reference absolute temperature K *)
+    ratio     : REAL; (* density ratio (ideal gas) *)
   END_VAR
 
   p_abs_kpa := p_gauge_kpa + atm_kpa;
@@ -2927,42 +3019,42 @@ FUNCTION_BLOCK FB_FLOW_COMP
 
   IF (t_k <= 0.0) OR (t_ref_k <= 0.0)
      OR (p_ref_kpa_abs <= 0.0) OR (p_abs_kpa <= 0.0) THEN
-    q_comp := q_raw; (* 测量/组态非法：直通 *)
+    q_comp := q_raw; (* invalid measurement/configuration: pass-through *)
     RETURN;
   END_IF;
 
   ratio := (p_abs_kpa / p_ref_kpa_abs) * (t_ref_k / t_k);
 
   IF mode >= 0.5 THEN
-    q_comp := q_raw * ratio;       (* 1 = 线性体积式 *)
+    q_comp := q_raw * ratio;       (* 1 = linear volumetric *)
   ELSE
-    q_comp := q_raw * SQRT(ratio); (* 0 = 开方式 DP *)
+    q_comp := q_raw * SQRT(ratio); (* 0 = square-root DP *)
   END_IF;
 END_FUNCTION_BLOCK
 (* ---------------------------------------------------------------------------
-   PROGRAM demo_main — 接线层
+   PROGRAM demo_main — wiring layer
 --------------------------------------------------------------------------- *)
 PROGRAM demo_main
   VAR
-    (* —— 现场信号（经 iomap 绑定；演示给初值） —— *)
-    lt0101_raw    : REAL := 13824.0; (* 液位变送器原始计数（4-20mA → 5530..27648） *)
-    level_sp      : REAL := 60.0;    (* 液位设定 % *)
-    alm_ack       : BOOL := FALSE;   (* 报警确认按钮 *)
-    hammer_enable : BOOL := TRUE;    (* 空气炮投用 *)
-    gas_flow      : REAL := 1200.0;  (* 进气流量 m3/h（主动量 FT0201） *)
-    milk_flow     : REAL := 950.0;   (* 石灰乳流量 m3/h（从动 pv，FT0202） *)
-    milk_ratio    : REAL := 0.85;    (* 石灰乳/进气 配比 *)
-    pump_run_fb_a : BOOL := FALSE;   (* 1# 石灰乳泵运行反馈 *)
-    pump_run_fb_b : BOOL := FALSE;   (* 2# 石灰乳泵运行反馈 *)
-    pump_fault_a  : BOOL := FALSE;   (* 1# 泵故障（综保/热继） *)
-    pump_fault_b  : BOOL := FALSE;   (* 2# 泵故障 *)
-    temp_hh       : BOOL := FALSE;   (* 塔温高高（外部报警位） *)
-    ilk_reset     : BOOL := FALSE;   (* 联锁复位按钮 *)
-    rt_reset      : BOOL := FALSE;   (* 运行小时清零（检修后） *)
+    (* -- field signals (bound via iomap; given initial values for the demo) -- *)
+    lt0101_raw    : REAL := 13824.0; (* level transmitter raw counts (4-20mA -> 5530..27648) *)
+    level_sp      : REAL := 60.0;    (* level setpoint % *)
+    alm_ack       : BOOL := FALSE;   (* alarm acknowledge button *)
+    hammer_enable : BOOL := TRUE;    (* air cannon in service *)
+    gas_flow      : REAL := 1200.0;  (* inlet gas flow m3/h (leading flow FT0201) *)
+    milk_flow     : REAL := 950.0;   (* lime-milk flow m3/h (follower pv, FT0202) *)
+    milk_ratio    : REAL := 0.85;    (* lime-milk / inlet-gas ratio *)
+    pump_run_fb_a : BOOL := FALSE;   (* lime-milk pump 1 run feedback *)
+    pump_run_fb_b : BOOL := FALSE;   (* lime-milk pump 2 run feedback *)
+    pump_fault_a  : BOOL := FALSE;   (* pump 1 fault (protection relay / thermal overload) *)
+    pump_fault_b  : BOOL := FALSE;   (* pump 2 fault *)
+    temp_hh       : BOOL := FALSE;   (* tower temperature high-high (external alarm bit) *)
+    ilk_reset     : BOOL := FALSE;   (* interlock reset button *)
+    rt_reset      : BOOL := FALSE;   (* run-hours clear (after maintenance) *)
 
-    scan_s : REAL := 0.1; (* 采样周期 s，须与 tasks.toml interval_ms 一致 *)
+    scan_s : REAL := 0.1; (* sample period s, must match tasks.toml interval_ms *)
 
-    (* —— FB 实例 —— *)
+    (* -- FB instances -- *)
     scale_lt      : FB_SCALE;
     pid_level     : FB_PID;
     alm_level     : FB_ALARM_HL;
@@ -2976,122 +3068,123 @@ PROGRAM demo_main
     pid_milk      : FB_PID;
     split_milk    : FB_SPLIT_RANGE;
 
-    (* —— 输出/中间变量（经 iomap 绑定到 AO/DO） —— *)
-    level_pct   : REAL; (* 塔液位 % *)
-    lt_fault    : BOOL; (* 变送器断线 *)
-    valve_pct   : REAL; (* 进料调节阀开度 % *)
-    lv_any_alm  : BOOL; (* 任一液位报警 *)
-    hammer_q    : BOOL; (* 空气炮电磁阀 *)
-    fill_open   : BOOL; (* 补水需求（高位关低位开） *)
-    ilk_trip    : BOOL; (* 塔联锁动作 *)
-    ilk_first   : INT;  (* 联锁首出路号 *)
-    pump_cmd_a  : BOOL; (* 1# 泵启动指令 *)
-    pump_cmd_b  : BOOL; (* 2# 泵启动指令 *)
-    duty_a      : BOOL; (* 当前值班泵为 1# *)
-    milk_sp     : REAL; (* 配比后的石灰乳流量设定 m3/h *)
-    milk_dev    : REAL; (* 石灰乳回路工作偏差（经 SP 斜坡后） *)
-    valve_small : REAL; (* 石灰乳小阀开度 %（分程 A 段，细调） *)
-    valve_big   : REAL; (* 石灰乳大阀开度 %（分程 B 段，扩量程） *)
+    (* -- output / intermediate variables (bound to AO/DO via iomap) -- *)
+    level_pct   : REAL; (* tower level % *)
+    lt_fault    : BOOL; (* transmitter open-circuit *)
+    valve_pct   : REAL; (* feed control-valve opening % *)
+    lv_any_alm  : BOOL; (* any level alarm *)
+    hammer_q    : BOOL; (* air-cannon solenoid *)
+    fill_open   : BOOL; (* make-up demand (high-close low-open) *)
+    ilk_trip    : BOOL; (* tower interlock acted *)
+    ilk_first   : INT;  (* interlock first-out channel *)
+    pump_cmd_a  : BOOL; (* pump 1 start command *)
+    pump_cmd_b  : BOOL; (* pump 2 start command *)
+    duty_a      : BOOL; (* current duty pump is pump 1 *)
+    milk_sp     : REAL; (* lime-milk flow setpoint after ratioing m3/h *)
+    milk_dev    : REAL; (* lime-milk loop working deviation (after the SP ramp) *)
+    valve_small : REAL; (* lime-milk small-valve opening % (split segment A, fine trim) *)
+    valve_big   : REAL; (* lime-milk large-valve opening % (split segment B, range extension) *)
 
-    (* —— 数学/动态块演示：蒸汽加热级联 + FOPDT 对象仿真（第 12~16 节） —— *)
-    cas_enable     : BOOL := TRUE;  (* 级联投入开关 *)
-    temp_sp        : REAL := 75.0;  (* 塔温设定 ℃（级联主回路 SP） *)
-    steam_local_sp : REAL := 800.0; (* 非级联时操作员给的蒸汽流量本地 SP kg/h *)
-    stats_reset    : BOOL := FALSE; (* 统计/偏差积分清零按钮 *)
+    (* -- math/dynamics block demo: steam-heating cascade + FOPDT plant simulation (sections 12~16) -- *)
+    cas_enable     : BOOL := TRUE;  (* cascade-enable switch *)
+    temp_sp        : REAL := 75.0;  (* tower-temperature setpoint degC (cascade master SP) *)
+    steam_local_sp : REAL := 800.0; (* operator-given steam-flow local SP kg/h when not cascaded *)
+    stats_reset    : BOOL := FALSE; (* statistics / deviation-integral clear button *)
 
-    dly_obj      : FB_DEADTIME8; (* 对象纯滞后 20 s *)
-    mid_temp     : FB_MID3;      (* 塔温三取中（两好一坏） *)
-    lim_temp     : FB_LIMIT;     (* 表决塔温限幅 0..150 ℃ *)
-    deriv_temp   : FB_DERIV;     (* 塔温变化率 *)
-    casc_temp    : FB_CASCADE;   (* 级联耦合：主输出 → 蒸汽 SP *)
-    pid_tc       : FB_PID;       (* 级联主回路：塔温 *)
-    pid_fc_steam : FB_PID;       (* 级联副回路：蒸汽流量 *)
-    integ_dev    : FB_INTEG;     (* 主回路偏差积分 *)
-    stats_temp   : FB_STATS;     (* 塔温全程统计 *)
-    avgt_temp    : FB_AVG_TIME;  (* 塔温 60 s 翻转窗平均 *)
+    dly_obj      : FB_DEADTIME8; (* plant dead time 20 s *)
+    mid_temp     : FB_MID3;      (* tower-temperature median of three (two good one bad) *)
+    lim_temp     : FB_LIMIT;     (* voted tower-temperature limit 0..150 degC *)
+    deriv_temp   : FB_DERIV;     (* tower-temperature rate of change *)
+    casc_temp    : FB_CASCADE;   (* cascade coupling: master output -> steam SP *)
+    pid_tc       : FB_PID;       (* cascade master loop: tower temperature *)
+    pid_fc_steam : FB_PID;       (* cascade slave loop: steam flow *)
+    integ_dev    : FB_INTEG;     (* master-loop deviation integral *)
+    stats_temp   : FB_STATS;     (* tower-temperature full-run statistics *)
+    avgt_temp    : FB_AVG_TIME;  (* tower-temperature 60 s tumbling-window average *)
 
-    sim_state     : REAL := 40.0; (* FOPDT 对象一阶状态（PT1 手工离散，T = 30 s） *)
-    temp_a        : REAL;         (* 1# 塔温变送器 ℃（对象仿真输出） *)
-    temp_b        : REAL;         (* 2# 冗余测点 ℃（仿真 +0.5 ℃ 偏置） *)
-    temp_voted    : REAL;         (* 表决 + 限幅后的塔温 ℃ *)
-    temp_roc      : REAL;         (* 塔温变化率 ℃/s *)
-    steam_sp_used : REAL;         (* 蒸汽副回路工作 SP kg/h（喂回 slave_sp_now） *)
-    steam_flow    : REAL;         (* 蒸汽流量 pv kg/h（仿真静态阀特性） *)
-    steam_valve   : REAL;         (* 蒸汽阀开度 %（副回路输出） *)
-    temp_dev_int  : REAL;         (* 塔温偏差积分 ℃·s *)
+    sim_state     : REAL := 40.0; (* FOPDT plant first-order state (manual PT1 discretization, T = 30 s) *)
+    temp_a        : REAL;         (* tower-temperature transmitter 1 degC (plant-simulation output) *)
+    temp_b        : REAL;         (* redundant point 2 degC (simulated +0.5 degC bias) *)
+    temp_voted    : REAL;         (* tower temperature after voting + limiting degC *)
+    temp_roc      : REAL;         (* tower-temperature rate of change degC/s *)
+    steam_sp_used : REAL;         (* steam slave-loop working SP kg/h (fed back to slave_sp_now) *)
+    steam_flow    : REAL;         (* steam flow pv kg/h (simulated static valve characteristic) *)
+    steam_valve   : REAL;         (* steam-valve opening % (slave-loop output) *)
+    temp_dev_int  : REAL;         (* tower-temperature deviation integral degC*s *)
 
-    (* —— 0.3.0 扩展块演示：程序给定 + 位置式 PID 链、设备层、补偿
-          （第 17~26 节） —— *)
-    rs_run       : BOOL := TRUE;  (* 程序给定运行 *)
-    rs_hold      : BOOL := FALSE; (* 程序给定暂停 *)
-    rs_advance   : BOOL := FALSE; (* 程序给定跳段按钮 *)
-    batch_reset  : BOOL := FALSE; (* 程序/批次复位按钮 *)
-    msta_auto    : BOOL := TRUE;  (* 手操站自动投入 *)
-    msta_man_out : REAL := 0.0;   (* 手操站手动给定 % *)
-    agit_fwd_btn : BOOL := FALSE; (* 搅拌正转按钮 *)
-    agit_rev_btn : BOOL := FALSE; (* 搅拌反转按钮 *)
-    dose_start   : BOOL := FALSE; (* 下料启动按钮 *)
-    dose_abort   : BOOL := FALSE; (* 下料中止按钮 *)
+    (* -- 0.3.0 extension block demo: program setpoint + positional PID chain, device layer,
+          compensation (sections 17~26) -- *)
+    rs_run       : BOOL := TRUE;  (* program setpoint run *)
+    rs_hold      : BOOL := FALSE; (* program setpoint pause *)
+    rs_advance   : BOOL := FALSE; (* program setpoint jump-segment button *)
+    batch_reset  : BOOL := FALSE; (* program / batch reset button *)
+    msta_auto    : BOOL := TRUE;  (* manual station auto in service *)
+    msta_man_out : REAL := 0.0;   (* manual station manual output % *)
+    agit_fwd_btn : BOOL := FALSE; (* agitator forward button *)
+    agit_rev_btn : BOOL := FALSE; (* agitator reverse button *)
+    dose_start   : BOOL := FALSE; (* dose start button *)
+    dose_abort   : BOOL := FALSE; (* dose abort button *)
 
-    hold_temp  : FB_PV_HOLD;     (* 表决塔温坏值保持 *)
-    rs_temp    : FB_RAMPSOAK8;   (* 升温-保温程序给定 *)
-    gsch_temp  : FB_GAIN_SCHED3; (* 三区增益调度 *)
-    pidp_temp  : FB_PID_POS;     (* 位置式塔温 PID（影子回路） *)
-    msta_temp  : FB_MANSTATION;  (* 加热输出手操站 *)
-    pid3s_temp : FB_PID_3STEP;   (* 步进 PID（电动执行机构，观察用） *)
-    mrev_agit  : FB_MOTOR_REV;   (* 双向搅拌电机 *)
-    mov_fill   : FB_MOV;         (* 电动补水阀 *)
-    dose_lime  : FB_DOSE;        (* 石灰石定量下料 *)
-    comp_gas   : FB_FLOW_COMP;   (* 进气温压补偿 *)
+    hold_temp  : FB_PV_HOLD;     (* voted tower-temperature bad-value hold *)
+    rs_temp    : FB_RAMPSOAK8;   (* heat-up/soak program setpoint *)
+    gsch_temp  : FB_GAIN_SCHED3; (* three-zone gain scheduling *)
+    pidp_temp  : FB_PID_POS;     (* positional tower-temperature PID (shadow loop) *)
+    msta_temp  : FB_MANSTATION;  (* heating-output manual station *)
+    pid3s_temp : FB_PID_3STEP;   (* step PID (motorized actuator, for observation) *)
+    mrev_agit  : FB_MOTOR_REV;   (* bidirectional agitator motor *)
+    mov_fill   : FB_MOV;         (* motorized make-up valve *)
+    dose_lime  : FB_DOSE;        (* limestone batch dosing *)
+    comp_gas   : FB_FLOW_COMP;   (* inlet-gas pressure/temperature compensation *)
 
-    temp_held    : REAL;          (* 坏值保持后的塔温 ℃ *)
-    rs_sp        : REAL;          (* 程序给定 SP ℃ *)
-    heat_out_pos : REAL;          (* 位置式 PID 输出 % *)
-    heat_out     : REAL;          (* 手操站后的最终加热输出 % *)
-    agit_fb_f    : BOOL;          (* 搅拌正转反馈（输出回送仿真） *)
-    agit_fb_r    : BOOL;          (* 搅拌反转反馈 *)
-    mov_sim_pos  : REAL := 0.0;   (* 电动阀仿真行程 0..100 % *)
-    mov_zso      : BOOL := FALSE; (* 电动阀开到位（仿真） *)
-    mov_zsc      : BOOL := TRUE;  (* 电动阀关到位（仿真，初始全关） *)
-    mov_q_open   : BOOL;          (* 电动阀开输出（局部拷贝，坑 8） *)
-    mov_q_close  : BOOL;          (* 电动阀关输出 *)
-    dose_flow    : REAL := 0.0;   (* 下料仿真流量 kg/s *)
-    dose_q_coar  : BOOL;          (* 粗加料阀（局部拷贝，坑 8） *)
-    dose_q_fine  : BOOL;          (* 精加料阀 *)
-    gas_flow_std : REAL;          (* 温压补偿后的标况进气量 m3/h *)
+    temp_held    : REAL;          (* tower temperature after bad-value hold degC *)
+    rs_sp        : REAL;          (* program setpoint SP degC *)
+    heat_out_pos : REAL;          (* positional PID output % *)
+    heat_out     : REAL;          (* final heating output after the manual station % *)
+    agit_fb_f    : BOOL;          (* agitator forward feedback (output-echo simulation) *)
+    agit_fb_r    : BOOL;          (* agitator reverse feedback *)
+    mov_sim_pos  : REAL := 0.0;   (* motorized-valve simulated travel 0..100 % *)
+    mov_zso      : BOOL := FALSE; (* motorized-valve open limit (simulated) *)
+    mov_zsc      : BOOL := TRUE;  (* motorized-valve close limit (simulated, initially fully closed) *)
+    mov_q_open   : BOOL;          (* motorized-valve open output (local copy, gotcha 8) *)
+    mov_q_close  : BOOL;          (* motorized-valve close output *)
+    dose_flow    : REAL := 0.0;   (* dose simulated flow kg/s *)
+    dose_q_coar  : BOOL;          (* coarse-feed valve (local copy, gotcha 8) *)
+    dose_q_fine  : BOOL;          (* fine-feed valve *)
+    gas_flow_std : REAL;          (* standard-condition inlet-gas flow after compensation m3/h *)
   END_VAR
 
-  (* 1) 量程变换：原始计数 → 液位 % *)
+  (* 1) Span conversion: raw counts -> level % *)
   scale_lt(raw := lt0101_raw, raw_min := 5530.0, raw_max := 27648.0,
            out_min := 0.0, out_max := 100.0, clamp := TRUE);
   level_pct := scale_lt.out;
   lt_fault  := scale_lt.fault;
 
-  (* 2) 四级液位报警，2% 死区、3 s 延时 *)
+  (* 2) Four-level level alarm, 2% deadband, 3 s delay *)
   alm_level(pv := level_pct, h_sp := 80.0, l_sp := 20.0,
             hh_sp := 90.0, ll_sp := 10.0,
             deadband := 2.0, delay_s := 3.0, dt_s := scan_s, ack := alm_ack);
   lv_any_alm := alm_level.any_alm;
 
-  (* 3) 液位 PID（反作用：液位高 → 关小进料阀）；变送器断线时切手动落 0。
-        注意：保持旧版签名调用——验证 FB_PID 升级后的向后兼容 *)
+  (* 3) Level PID (reverse-acting: high level -> close the feed valve); on transmitter
+        open-circuit, switch to manual and drop to 0. Note: kept as a legacy-signature
+        call -- verifies the backward compatibility after the FB_PID upgrade *)
   pid_level(pv := level_pct, sp := level_sp,
             kp := 2.0, ti_s := 120.0, td_s := 0.0, dt_s := scan_s,
             direct := FALSE, auto := NOT lt_fault, manual_out := 0.0,
             out_min := 0.0, out_max := 100.0);
   valve_pct := pid_level.out;
 
-  (* 4) 空气炮：每 300 s 吹扫 2 s *)
+  (* 4) Air cannon: a 2 s purge every 300 s *)
   pulser_hammer(enable := hammer_enable, period_s := 300.0,
                 pulse_len_s := 2.0, dt_s := scan_s);
   hammer_q := pulser_hammer.q;
 
-  (* 5) 补水需求：低于 15% 要水，高于 85% 停 *)
+  (* 5) Make-up demand: below 15% needs water, above 85% stops *)
   fill_ctl(pv := level_pct, h_sp := 85.0, l_sp := 15.0);
   fill_open := fill_ctl.valve_open;
 
-  (* 6) 塔联锁汇总 + 首出：1=液位HH 2=变送器断线 3=塔温HH 4=双泵故障；
-        5..8 备用旁路 *)
+  (* 6) Tower interlock summary + first-out: 1=level HH 2=transmitter open-circuit
+        3=tower-temp HH 4=dual-pump fault; 5..8 spare, bypassed *)
   ilk_tower(c1 := alm_level.hh_alm,
             c2 := lt_fault,
             c3 := temp_hh,
@@ -3102,11 +3195,11 @@ PROGRAM demo_main
   ilk_trip  := ilk_tower.tripped;
   ilk_first := ilk_tower.first_out;
 
-  (* 7) 双泵运行统计（hours 喂 FB_DUTY2 小时均衡；实例可放 VAR RETAIN） *)
+  (* 7) Dual-pump run statistics (hours feed FB_DUTY2 hour balancing; instances may go in VAR RETAIN) *)
   rt_pump_a(running := pump_run_fb_a, reset := rt_reset, dt_s := scan_s);
   rt_pump_b(running := pump_run_fb_b, reset := rt_reset, dt_s := scan_s);
 
-  (* 8) 双补水泵一用一备：小时均衡选值班；联锁动作时撤需求全停 *)
+  (* 8) Dual make-up pumps duty/standby: select duty by hour balancing; on interlock action, withdraw demand and stop all *)
   duty_pumps(demand := fill_open AND NOT ilk_trip, alt_mode := 1,
              run_fb_a := pump_run_fb_a, run_fb_b := pump_run_fb_b,
              fault_a := pump_fault_a, fault_b := pump_fault_b,
@@ -3116,13 +3209,14 @@ PROGRAM demo_main
   pump_cmd_b := duty_pumps.cmd_b;
   duty_a     := duty_pumps.duty_is_a;
 
-  (* 9) 比值站：石灰乳流量设定 = 进气量 × 0.85（比值钳 0.5..1.2） *)
+  (* 9) Ratio station: lime-milk flow setpoint = inlet-gas flow x 0.85 (ratio clamped 0.5..1.2) *)
   ratio_milk(wild_flow := gas_flow, ratio := milk_ratio,
              ratio_min := 0.5, ratio_max := 1.2, bias := 0.0);
   milk_sp := ratio_milk.sp;
 
-  (* 10) 石灰乳流量 PID：进气量静态前馈（增益 0.01 → %开度），
-         SP 斜坡 50 (m3/h)/s 防配比阶跃，联锁动作 track 强制关阀 *)
+  (* 10) Lime-milk flow PID: inlet-gas static feedforward (gain 0.01 -> % opening),
+         SP ramp 50 (m3/h)/s to avoid a ratio step, interlock action forces the valve
+         closed via track *)
   pid_milk(pv := milk_flow, sp := milk_sp,
            kp := 0.8, ti_s := 30.0, td_s := 0.0, dt_s := scan_s,
            direct := FALSE, auto := TRUE, manual_out := 0.0,
@@ -3132,36 +3226,38 @@ PROGRAM demo_main
            sp_rate := 50.0);
   milk_dev := pid_milk.dev;
 
-  (* 11) 分程：PID 输出 0..50% 走小阀细调，50..100% 大阀接力（顺序分程，
-         不反转） *)
+  (* 11) Split range: PID output 0..50% drives the small valve for fine trim, 50..100%
+         the large valve relays (sequential split range, no reversal) *)
   split_milk(u := pid_milk.out, split := 50.0, reverse_b := FALSE);
   valve_small := split_milk.out_a;
   valve_big   := split_milk.out_b;
 
-  (* 12) FOPDT 对象仿真：蒸汽阀开度（上一拍）→ FB_DEADTIME8 纯滞后 20 s →
-         手工 PT1（T = 30 s，与 FB_LAG 同核）→ 塔温。纯滞后 + 一阶惯性
-         两块即组成最常用的仿真/整定对象 *)
+  (* 12) FOPDT plant simulation: steam-valve opening (previous scan) -> FB_DEADTIME8 dead
+         time 20 s -> manual PT1 (T = 30 s, same core as FB_LAG) -> tower temperature.
+         Dead time + first-order lag, these two blocks form the most common
+         simulation/tuning plant *)
   dly_obj(u := steam_valve, t_delay_s := 20.0, dt_s := scan_s);
   sim_state := sim_state + scan_s / (30.0 + scan_s) * (dly_obj.out - sim_state);
-  temp_a := 40.0 + 0.5 * sim_state; (* 0..100 % 阀开度 → 40..90 ℃ *)
-  temp_b := temp_a + 0.5;           (* 2# 冗余测点：演示 +0.5 ℃ 偏置 *)
+  temp_a := 40.0 + 0.5 * sim_state; (* 0..100 % valve opening -> 40..90 degC *)
+  temp_b := temp_a + 0.5;           (* redundant point 2: demo +0.5 degC bias *)
 
-  (* 13) 三取中表决：3# 测点坏值被剔除（good_c := FALSE）→ 两好取均值；
-         好通道差 > 5 ℃ 出 q_dev 提示 *)
+  (* 13) Median of three: point 3's bad value is excluded (good_c := FALSE) -> two good,
+         take the average; good channels differing by > 5 degC raise q_dev *)
   mid_temp(a := temp_a, b := temp_b, c := 0.0,
            good_a := TRUE, good_b := TRUE, good_c := FALSE,
            dev_max := 5.0);
 
-  (* 14) 表决值限幅 0..150 ℃ + 滤波微分（变化率 ℃/s 供趋势/前馈用） *)
+  (* 14) Limit the voted value 0..150 degC + filtered derivative (rate of change degC/s for trend/feedforward) *)
   lim_temp(u := mid_temp.out, lo := 0.0, hi := 150.0);
   temp_voted := lim_temp.out;
   deriv_temp(u := temp_voted, t_filt_s := 2.0, dt_s := scan_s);
   temp_roc := deriv_temp.out;
 
-  (* 15) 级联：塔温主 PID（0..100 %）→ FB_CASCADE 映射为蒸汽流量 SP
-         （0..2000 kg/h）→ 蒸汽流量副 PID → 蒸汽阀。非级联（cas_enable
-         = FALSE）时副回路用本地 SP，主调经 track 跟踪其等效百分比，
-         CAS 投切无扰。slave_sp_now 喂上一拍工作 SP（标准接法） *)
+  (* 15) Cascade: tower-temperature master PID (0..100 %) -> FB_CASCADE maps to steam-flow
+         SP (0..2000 kg/h) -> steam-flow slave PID -> steam valve. When not cascaded
+         (cas_enable = FALSE) the slave uses its local SP and the master tracks the
+         equivalent percentage via track, so CAS transfer is bumpless. slave_sp_now is
+         fed the previous scan's working SP (standard wiring) *)
   casc_temp(master_out := pid_tc.out, cas_on := cas_enable,
             sp_min := 0.0, sp_max := 2000.0,
             slave_sp_local := steam_local_sp, slave_sp_now := steam_sp_used);
@@ -3177,11 +3273,11 @@ PROGRAM demo_main
                direct := FALSE, auto := TRUE, manual_out := 0.0,
                out_min := 0.0, out_max := 100.0);
   steam_valve := pid_fc_steam.out;
-  steam_flow := steam_valve * 20.0; (* 仿真静态阀特性：0..100 % → 0..2000 kg/h *)
+  steam_flow := steam_valve * 20.0; (* simulated static valve characteristic: 0..100 % -> 0..2000 kg/h *)
 
-  (* 16) 共用信号（表决塔温）统计三件套 + 偏差积分：全程 min/max/均值/
-         标准差、60 s 翻转窗平均；主回路偏差积分 ℃·s（联锁动作时 hold，
-         钳 ±1000） *)
+  (* 16) Shared-signal (voted tower temperature) statistics trio + deviation integral:
+         full-run min/max/mean/standard deviation, 60 s tumbling-window average;
+         master-loop deviation integral degC*s (hold on interlock action, clamped +/-1000) *)
   stats_temp(u := temp_voted, enable := TRUE, reset := stats_reset);
   avgt_temp(u := temp_voted, window_s := 60.0, dt_s := scan_s, reset := stats_reset);
   integ_dev(u := pid_tc.dev, k := 1.0, dt_s := scan_s,
@@ -3190,15 +3286,15 @@ PROGRAM demo_main
             out_min := -1000.0, out_max := 1000.0);
   temp_dev_int := integ_dev.out;
 
-  (* 17) 坏值保持：表决全坏（q_fail）时先保持最后好值 5 s，超时后继续
-         保持（mode 0），q_bad/q_timeout 供报警与回路切手动 *)
+  (* 17) Bad-value hold: when the vote is all bad (q_fail), hold the last good value 5 s
+         first, then keep holding (mode 0); q_bad/q_timeout feed alarming and loop-to-manual *)
   hold_temp(u := mid_temp.out, good := NOT mid_temp.q_fail,
             mode := 0.0, sub_value := 60.0, timeout_s := 5.0,
             dt_s := scan_s);
   temp_held := hold_temp.out;
 
-  (* 18) 8 段程序给定（用 4 段）：40 ℃ 起升温-保温-降温曲线；
-         hold 暂停、advance 跳段、batch_reset 复位 *)
+  (* 18) 8-segment program setpoint (using 4 segments): a heat-up/soak/cool-down curve
+         starting at 40 degC; hold pauses, advance jumps segment, batch_reset resets *)
   rs_temp(sp1 := 55.0, ramp1_s := 120.0, soak1_s := 60.0,
           sp2 := 70.0, ramp2_s := 180.0, soak2_s := 120.0,
           sp3 := 85.0, ramp3_s := 120.0, soak3_s := 300.0,
@@ -3208,16 +3304,17 @@ PROGRAM demo_main
           cyclic := FALSE, sp_init := 40.0, dt_s := scan_s);
   rs_sp := rs_temp.sp;
 
-  (* 19) 三区增益调度：按保持后塔温分区出 PID 参数（低温区强、
-         高温区弱），区界 ±2 ℃ 线性过渡（interp） *)
+  (* 19) Three-zone gain scheduling: output PID parameters by zone of the held tower
+         temperature (strong in the low-temp zone, weak in the high-temp zone), with a
+         +/-2 degC linear transition at the boundaries (interp) *)
   gsch_temp(u_sched := temp_held, x12 := 55.0, x23 := 75.0,
             hyst := 2.0, interp := TRUE,
             kp1 := 2.0, ti1_s := 90.0, td1_s := 0.0,
             kp2 := 1.5, ti2_s := 60.0, td2_s := 0.0,
             kp3 := 1.0, ti3_s := 45.0, td3_s := 0.0);
 
-  (* 20) 位置式 PID（影子塔温回路）：程序给定 SP + 坏值保持 PV +
-         调度参数，p/i/d 分项可观测；联锁 track 强制 0 *)
+  (* 20) Positional PID (shadow tower-temperature loop): program setpoint SP + bad-value-held
+         PV + scheduled parameters, observable p/i/d; interlock forces 0 via track *)
   pidp_temp(pv := temp_held, sp := rs_sp,
             kp := gsch_temp.kp_out, ti_s := gsch_temp.ti_out_s,
             td_s := gsch_temp.td_out_s, t_dfilt_s := 2.0,
@@ -3227,41 +3324,42 @@ PROGRAM demo_main
             ff := 0.0, track := ilk_trip, track_value := 0.0);
   heat_out_pos := pidp_temp.out;
 
-  (* 21) 手操站：自动透传位置式 PID 输出（限速 20 %/s），手动直给；
-         balance 切回自动无扰 *)
+  (* 21) Manual station: in auto pass through the positional PID output (rate-limited
+         20 %/s), in manual set directly; balance gives a bumpless return to auto *)
   msta_temp(auto_in := heat_out_pos, auto := msta_auto,
             manual_out := msta_man_out, bias := 0.0, rate := 20.0,
             out_min := 0.0, out_max := 100.0, balance := TRUE,
             dt_s := scan_s);
   heat_out := msta_temp.out;
 
-  (* 22) 步进 PID（观察用）：同回路驱动无阀位反馈的电动执行机构，
-         全行程 60 s，最小脉宽 0.5 s、死区 1 %，行程估计 pos_est *)
+  (* 22) Step PID (for observation): the same loop driving a motorized actuator without
+         position feedback, full travel 60 s, minimum pulse 0.5 s, deadband 1 %, travel estimate pos_est *)
   pid3s_temp(pv := temp_held, sp := rs_sp,
              kp := 1.5, ti_s := 60.0, td_s := 0.0, dt_s := scan_s,
              motor_time_s := 60.0, min_pulse_s := 0.5,
              deadband_pct := 1.0, auto := TRUE,
              man_open := FALSE, man_close := FALSE, pos_fb := -1.0);
 
-  (* 23) 双向搅拌电机：正/反按钮，联锁停车优先，换向闭锁 2 s；
-         反馈用输出回送仿真（一拍滞后，永不超时） *)
+  (* 23) Bidirectional agitator motor: forward/reverse buttons, interlock stop has
+         priority, reversal interlock 2 s; feedback uses output-echo simulation (one-scan
+         lag, never times out) *)
   mrev_agit(cmd_fwd := agit_fwd_btn, cmd_rev := agit_rev_btn,
             stop := ilk_trip, fb_fwd := agit_fb_f, fb_rev := agit_fb_r,
             fb_timeout_s := 5.0, reversal_delay_s := 2.0,
             reset := ilk_reset, dt_s := scan_s);
-  agit_fb_f := mrev_agit.q_fwd; (* 仿真反馈：输出回送（下一拍生效） *)
+  agit_fb_f := mrev_agit.q_fwd; (* simulated feedback: output echo (effective next scan) *)
   agit_fb_r := mrev_agit.q_rev;
 
-  (* 24) 电动补水阀：补水需求开/撤销关（联锁强制关），30 s 仿真行程
-         驱动双限位；行程超时限 60 s *)
+  (* 24) Motorized make-up valve: make-up demand opens / withdrawal closes (interlock
+         forces close), a 30 s simulated travel drives the dual limits; travel-timeout limit 60 s *)
   mov_fill(cmd_open := fill_open AND NOT ilk_trip,
            cmd_close := NOT fill_open OR ilk_trip,
            cmd_stop := FALSE, zso := mov_zso, zsc := mov_zsc,
            travel_s := 60.0, reset := ilk_reset, dt_s := scan_s);
-  mov_q_open  := mov_fill.q_open;  (* 先拷局部再作 IF 条件（坑 8） *)
+  mov_q_open  := mov_fill.q_open;  (* copy to a local first, then use as an IF condition (gotcha 8) *)
   mov_q_close := mov_fill.q_close;
   IF mov_q_open THEN
-    mov_sim_pos := mov_sim_pos + 100.0 * scan_s / 30.0; (* 30 s 全行程仿真 *)
+    mov_sim_pos := mov_sim_pos + 100.0 * scan_s / 30.0; (* 30 s full-travel simulation *)
   ELSIF mov_q_close THEN
     mov_sim_pos := mov_sim_pos - 100.0 * scan_s / 30.0;
   END_IF;
@@ -3273,13 +3371,13 @@ PROGRAM demo_main
   mov_zso := mov_sim_pos >= 100.0;
   mov_zsc := mov_sim_pos <= 0.0;
 
-  (* 25) 定量下料：目标 100 kg，精段 15 kg、落差 2 kg；仿真流量
-         粗 8 / 精 1.5 kg/s（上一拍阀态回送，含一拍滞后） *)
+  (* 25) Batch dosing: target 100 kg, fine stage 15 kg, in-flight 2 kg; simulated flow
+         coarse 8 / fine 1.5 kg/s (valve state echoed from the previous scan, with a one-scan lag) *)
   dose_lime(start := dose_start, abort := dose_abort,
             flow := dose_flow, target := 100.0,
             fine_qty := 15.0, inflight := 2.0,
             dt_s := scan_s, reset := batch_reset);
-  dose_q_coar := dose_lime.q_coarse; (* 先拷局部再作 IF 条件（坑 8） *)
+  dose_q_coar := dose_lime.q_coarse; (* copy to a local first, then use as an IF condition (gotcha 8) *)
   dose_q_fine := dose_lime.q_fine;
   dose_flow := 0.0;
   IF dose_q_coar THEN
@@ -3288,8 +3386,8 @@ PROGRAM demo_main
     dose_flow := 1.5;
   END_IF;
 
-  (* 26) 气体温压补偿：进气量按工况 150 kPa(g)/45 ℃ 折设计条件
-         （DP 开方式，mode 0）→ 标况进气量 *)
+  (* 26) Gas pressure/temperature compensation: correct the inlet-gas flow from operating
+         150 kPa(g)/45 degC to design conditions (square-root DP, mode 0) -> standard-condition inlet-gas flow *)
   comp_gas(q_raw := gas_flow, p_gauge_kpa := 150.0, t_c := 45.0,
            p_ref_kpa_abs := 201.325, t_ref_c := 20.0,
            atm_kpa := 101.325, mode := 0.0);

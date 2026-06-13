@@ -1,45 +1,49 @@
 (*
-  FB_DOSE — 定量下料/定量给料（粗/精两段 + 落差补偿）。
+  FB_DOSE — batch dosing / batch feeding (coarse/fine two stages + in-flight compensation).
 
-  ≈ 标准定量加料块（dosing / batch weighing，coarse-fine 两速加料
-  + in-flight 落差提前关），配料秤/定量给料控制的惯用块。
+  ~ Standard dosing block (dosing / batch weighing, coarse-fine two-speed feeding +
+  early in-flight cutoff), the customary block for batch-scale / batch-feed control.
 
-  用途：料仓向秤斗/反应釜定量加料：粗加料快速接近目标，精加料
-  收口，按落差（关阀后仍在途的物料）提前关精阀，沉降后给出
-  完成与过冲量。流量输入可来自称重微分或流量计。
+  Purpose: dosing material from a silo into a weigh hopper / reactor: coarse feed
+  approaches the target quickly, fine feed trims, the fine valve closes early by the
+  in-flight amount (the material still in flight after the valve closes), and after
+  settling the completion and overshoot are reported. The flow input may come from a
+  weight derivative or a flowmeter.
 
-  行为：
-    start 上升沿（空闲且未完成、abort 未压下时）开新批：qty 清零，
-    进入加料段。加料/沉降期间累积 qty := qty + flow * dt_s
-    （flow <= 0 不计，落料完成的判据之一）。
-      粗段：qty < target - fine_qty → q_coarse = TRUE（粗精两阀同开）；
-      精段：qty < target - inflight → q_fine = TRUE；到点关精阀
-      （落差 inflight 即在途量预留），进入沉降段。
-      沉降段：等 flow <= 0 或固定 2 s（先到为准）→ done := TRUE，
-      overshoot := qty - target（在途料落完后的实际过冲）。
-    abort 电平有效：立即停双阀、退出加料/沉降，qty 保留（盘点用），
-    done 不置位。
-    done 后 start 无效，须 reset（电平有效）清 qty/done/overshoot
-    开下一批。
-    假定 fine_qty >= inflight >= 0（粗阀先关、精阀后关）；
-    done 之后的滴漏不再计入 qty。
-    dt_s <= 0 → 本周期保持不动作（命令沿照常记忆）。
+  Behavior:
+    start rising edge (when idle, not complete, and abort not pressed) begins a new
+    batch: qty cleared, enter the feed stage. During feeding/settling, accumulate
+    qty := qty + flow * dt_s (flow <= 0 not counted, one of the criteria for material
+    fully landed).
+      Coarse stage: qty < target - fine_qty -> q_coarse = TRUE (both coarse and fine valves open);
+      Fine stage: qty < target - inflight -> q_fine = TRUE; at the point, close the fine
+      valve (the in-flight reserve inflight is the in-flight amount held back) and enter
+      the settling stage.
+      Settling stage: wait for flow <= 0 or a fixed 2 s (whichever first) -> done := TRUE,
+      overshoot := qty - target (the actual overshoot once the in-flight material has landed).
+    abort level-active: stop both valves immediately, exit feeding/settling, qty
+    retained (for stocktaking), done not set.
+    After done, start has no effect; reset (level-active) is required to clear
+    qty/done/overshoot and begin the next batch.
+    Assumes fine_qty >= inflight >= 0 (coarse valve closes first, fine valve closes after);
+    dribble after done is no longer counted into qty.
+    dt_s <= 0 -> hold this scan, no action (command edges still remembered).
 
-  输入：
-    start    BOOL  启动（上升沿开新批）
-    abort    BOOL  中止（电平有效：停阀保量）
-    flow     REAL  瞬时流量 单位/s（称重微分或流量计）
-    target   REAL  目标量（与 flow 积分同单位）
-    fine_qty REAL  精加料段量（剩这么多时关粗阀）
-    inflight REAL  落差/在途量（剩这么多时关精阀）
-    dt_s     REAL  采样周期 s
-    reset    BOOL  批复位（电平有效：清 qty/done/overshoot）
-  输出：
-    q_coarse  BOOL  粗加料阀
-    q_fine    BOOL  精加料阀
-    qty       REAL  本批累计量
-    done      BOOL  本批完成（沉降后置位，保持到 reset）
-    overshoot REAL  完成后实际 - 目标（落差整定依据）
+  Inputs:
+    start    BOOL  start (rising edge begins a new batch)
+    abort    BOOL  abort (level-active: stop valves, retain quantity)
+    flow     REAL  instantaneous flow units/s (weight derivative or flowmeter)
+    target   REAL  target quantity (same unit as the flow integral)
+    fine_qty REAL  fine-feed-stage quantity (close the coarse valve with this much remaining)
+    inflight REAL  in-flight amount (close the fine valve with this much remaining)
+    dt_s     REAL  sample period s
+    reset    BOOL  batch reset (level-active: clear qty/done/overshoot)
+  Outputs:
+    q_coarse  BOOL  coarse-feed valve
+    q_fine    BOOL  fine-feed valve
+    qty       REAL  this batch's accumulated quantity
+    done      BOOL  this batch complete (set after settling, held until reset)
+    overshoot REAL  actual - target after completion (basis for tuning the in-flight amount)
 *)
 FUNCTION_BLOCK FB_DOSE
   VAR_INPUT
@@ -60,10 +64,10 @@ FUNCTION_BLOCK FB_DOSE
     overshoot : REAL;
   END_VAR
   VAR
-    dosing     : BOOL; (* 加料段（粗/精） *)
-    settling   : BOOL; (* 沉降等待段 *)
-    settle_t   : REAL; (* 沉降计时 s *)
-    prev_start : BOOL; (* 启动上升沿记忆 *)
+    dosing     : BOOL; (* feed stage (coarse/fine) *)
+    settling   : BOOL; (* settling-wait stage *)
+    settle_t   : REAL; (* settling timer s *)
+    prev_start : BOOL; (* start rising-edge memory *)
   END_VAR
 
   IF reset THEN
@@ -80,14 +84,14 @@ FUNCTION_BLOCK FB_DOSE
   END_IF;
 
   IF abort THEN
-    (* 中止：停阀退段，qty 保留，done 不置位 *)
+    (* Abort: stop valves and exit the stage, qty retained, done not set *)
     dosing   := FALSE;
     settling := FALSE;
     q_coarse := FALSE;
     q_fine   := FALSE;
   END_IF;
 
-  (* start 上升沿且空闲且未完成 → 开新批 *)
+  (* start rising edge, idle and not complete -> begin a new batch *)
   IF start AND NOT prev_start AND NOT abort
      AND NOT dosing AND NOT settling AND NOT done THEN
     dosing    := TRUE;
@@ -98,10 +102,10 @@ FUNCTION_BLOCK FB_DOSE
   prev_start := start;
 
   IF dt_s <= 0.0 THEN
-    RETURN; (* 采样周期非法：保持 *)
+    RETURN; (* invalid sample period: hold *)
   END_IF;
 
-  (* 加料/沉降期间累积流量（负流量不计） *)
+  (* Accumulate flow during feeding/settling (negative flow not counted) *)
   IF (dosing OR settling) AND flow > 0.0 THEN
     qty := qty + flow * dt_s;
   END_IF;
@@ -110,7 +114,7 @@ FUNCTION_BLOCK FB_DOSE
     q_coarse := qty < target - fine_qty;
     q_fine   := qty < target - inflight;
     IF NOT q_fine THEN
-      (* 到落差预留点：关精阀进沉降段 *)
+      (* At the in-flight reserve point: close the fine valve and enter the settling stage *)
       q_coarse := FALSE;
       dosing   := FALSE;
       settling := TRUE;

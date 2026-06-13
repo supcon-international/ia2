@@ -1,27 +1,31 @@
 (*
-  FB_INTERLOCK8 — 8 路联锁汇总 + 首出（first-out）记录。
+  FB_INTERLOCK8 — 8-channel interlock summary + first-out recording.
 
-  ≈ 联锁汇总 + 首出捕捉（first-out annunciation，参考 ISA-18.1 首出窗概念）。
+  ~ Interlock summary + first-out capture (first-out annunciation, after the ISA-18.1 first-out-window concept).
 
-  用途：机组联锁跳车原因追溯：多条件汇总成一个跳闸位，并锁存最先
-  动作的那一路，事后定位跳车根因（首出之后的连锁性动作不覆盖记录）。
-  行为：
-    有效条件 ax := cx AND enablex（enablex 默认 TRUE；置 FALSE = 旁路该路）。
-    tripped := 任一有效条件 OR (已锁存 AND NOT reset)
-    ——条件在则常报；条件全清后保持，直到 reset（等效"reset 且全清"
-    才能复位；条件未清时按 reset 无效）。
-    首出捕获：tripped 由 FALSE→TRUE 的那一拍记录当时动作的最小路号
-    （同拍多路同动取小号）。联锁保持期间后续动作不改写首出；
-    复位成功（tripped 回 FALSE）时 first_out 清 0。
-    cx 语义：TRUE = 该条件已动作（跳闸方向）。常闭型信号请在外部取反。
+  Purpose: trip-cause tracing for a unit interlock: summarize multiple conditions into a
+  single trip bit and latch the channel that acted first, to locate the trip root cause
+  afterward (consequential actions after the first-out do not overwrite the record).
+  Behavior:
+    Effective condition ax := cx AND enablex (enablex default TRUE; setting FALSE = bypass that channel).
+    tripped := any effective condition OR (latched AND NOT reset)
+    -- while any condition exists the alarm stays on; after all conditions clear it is
+    held until reset (equivalent to "reset AND all clear" to reset; reset has no effect
+    while a condition is uncleared).
+    First-out capture: the scan where tripped goes FALSE->TRUE records the lowest channel
+    number acting at that moment (on a tie, the lowest number). During the interlock hold,
+    later actions do not overwrite the first-out; on a successful reset (tripped returns
+    FALSE) first_out is cleared to 0.
+    cx semantics: TRUE = that condition has acted (trip direction). Invert normally-closed
+    signals externally.
 
-  输入：
-    c1..c8           BOOL  联锁条件（TRUE = 动作/越限）
-    enable1..enable8 BOOL  各路投用（默认 TRUE；FALSE = 旁路）
-    reset            BOOL  复位（电平有效；仅条件全清后生效）
-  输出：
-    tripped   BOOL  联锁动作（锁存）
-    first_out INT   首出路号 1..8，0 = 无
+  Inputs:
+    c1..c8           BOOL  interlock conditions (TRUE = acted/over-limit)
+    enable1..enable8 BOOL  per-channel in service (default TRUE; FALSE = bypass)
+    reset            BOOL  reset (level-active; effective only after all conditions clear)
+  Outputs:
+    tripped   BOOL  interlock acted (latched)
+    first_out INT   first-out channel number 1..8, 0 = none
 *)
 FUNCTION_BLOCK FB_INTERLOCK8
   VAR_INPUT
@@ -48,7 +52,7 @@ FUNCTION_BLOCK FB_INTERLOCK8
     first_out : INT;
   END_VAR
   VAR
-    a1    : BOOL; (* 投用后的有效条件 *)
+    a1    : BOOL; (* effective condition after in-service gating *)
     a2    : BOOL;
     a3    : BOOL;
     a4    : BOOL;
@@ -57,7 +61,7 @@ FUNCTION_BLOCK FB_INTERLOCK8
     a7    : BOOL;
     a8    : BOOL;
     any_c : BOOL;
-    was   : BOOL; (* 上一拍 tripped，捕获首出沿 *)
+    was   : BOOL; (* previous-scan tripped, to capture the first-out edge *)
   END_VAR
 
   a1 := c1 AND enable1;
@@ -74,7 +78,7 @@ FUNCTION_BLOCK FB_INTERLOCK8
   tripped := any_c OR (tripped AND NOT reset);
 
   IF tripped AND NOT was THEN
-    (* 新跳闸事件：记录首出（同拍多路取最小号） *)
+    (* New trip event: record the first-out (on a tie, the lowest number) *)
     IF a1 THEN
       first_out := 1;
     ELSIF a2 THEN
@@ -93,6 +97,6 @@ FUNCTION_BLOCK FB_INTERLOCK8
       first_out := 8;
     END_IF;
   ELSIF NOT tripped THEN
-    first_out := 0; (* 复位成功清首出 *)
+    first_out := 0; (* successful reset clears the first-out *)
   END_IF;
 END_FUNCTION_BLOCK

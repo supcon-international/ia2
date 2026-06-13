@@ -1,25 +1,26 @@
 (*
-  FB_RUNTIME — 设备运行小时 + 启动次数统计。
+  FB_RUNTIME — equipment run-hours + start-count statistics.
 
-  ≈ 设备运行统计（累计运行小时 + 启动次数），维护保养数据标配。
+  ~ Equipment run statistics (accumulated run hours + start count), standard
+  maintenance data.
 
-  用途：泵/风机磨损均衡（hours 接 FB_DUTY2 的 hours_a/b，配 alt_mode=1）、
-  维保到期提醒、启停频度统计。
-  行为：
-    running 为 TRUE 期间 hours := hours + dt_s/3600；
-    running 上升沿 starts := starts + 1；
-    reset 电平有效，两者清零（优先，复位周期不累计）。
-    实例可由调用方放 VAR RETAIN 块下断电保持（同 FB_TOTALIZER 注意事项：
-    IA2 retain 按 i32 存取，REAL 小时数的保持精度受此限制；starts 为
-    整数计数不受影响）。
+  Purpose: pump/fan wear balancing (feed hours to FB_DUTY2's hours_a/b with alt_mode=1),
+  maintenance-due reminders, start/stop frequency statistics.
+  Behavior:
+    while running is TRUE, hours := hours + dt_s/3600;
+    on a running rising edge, starts := starts + 1;
+    reset level-active clears both (priority, no accumulation during a reset scan).
+    The caller may place the instance under VAR RETAIN for retention across power loss
+    (same caveat as FB_TOTALIZER: IA2 retain stores as i32, so the retention precision
+    of the REAL hours is limited by this; starts is an integer count and is unaffected).
 
-  输入：
-    running BOOL  设备运行中（接运行反馈，必要时前置 FB_DEBOUNCE）
-    reset   BOOL  清零（电平有效，优先；检修换泵后用）
-    dt_s    REAL  采样周期 s
-  输出：
-    hours  REAL  累计运行小时
-    starts DINT  累计启动次数
+  Inputs:
+    running BOOL  equipment running (feed the run feedback, debounce with FB_DEBOUNCE if needed)
+    reset   BOOL  clear (level-active, priority; used after maintenance / pump replacement)
+    dt_s    REAL  sample period s
+  Outputs:
+    hours  REAL  accumulated run hours
+    starts DINT  accumulated start count
 *)
 FUNCTION_BLOCK FB_RUNTIME
   VAR_INPUT
@@ -32,7 +33,7 @@ FUNCTION_BLOCK FB_RUNTIME
     starts : DINT;
   END_VAR
   VAR
-    prev_run : BOOL; (* 上升沿记忆 *)
+    prev_run : BOOL; (* rising-edge memory *)
   END_VAR
 
   IF reset THEN
