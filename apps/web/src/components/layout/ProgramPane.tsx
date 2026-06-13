@@ -204,14 +204,14 @@ export function ProgramPane() {
       )}
       <div className="flex min-h-0 flex-1">
         <div className="min-h-0 min-w-0 flex-1">
-          {/* Editor dispatch by POU language:
-              - ST  → Monaco editor (full authoring).
-              - LD  → SVG ladder editor (full graphical authoring +
-                      JSON fallback when the file is mid-edit).
-              - FBD → SVG block diagram (read-only viewer for now —
-                      authoring still goes through the JSON, with
-                      `cs check` / `cs transpile` as the agent loop).
-                      Phase 3c will add drag-to-place editing. */}
+          {/* Editor dispatch by POU language. All four are full
+              graphical/text editors with a JSON (or text) fallback
+              while the file is mid-edit:
+              - ST  → Monaco editor.
+              - LD  → SVG ladder editor.
+              - FBD → SVG block diagram (drag to reposition, port-to-
+                      port wiring, add/delete blocks, edit pin bindings).
+              - SFC → SVG sequential-function-chart editor. */}
           {currentPou.declarations[0]?.language === "ld" ? (
             <LDEditor
               value={source}

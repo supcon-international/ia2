@@ -589,7 +589,13 @@ function ActionList({
                   {a.qualifier}
                 </span>
                 <pre className="max-w-xs whitespace-pre-wrap px-2 py-0.5 font-mono text-[11px] text-foreground">
-                  {a.body || <span className="italic text-muted-foreground">empty body</span>}
+                  {a.body || (
+                    // An empty body compiles to a transpile error — flag
+                    // it as something to fill, not a neutral placeholder.
+                    <span className="italic text-destructive/80">
+                      empty — add an ST statement
+                    </span>
+                  )}
                 </pre>
               </button>
             </li>
@@ -1069,14 +1075,18 @@ function ActionBodyInput({
       value={draft}
       onChange={(e) => setDraft(e.target.value)}
       onBlur={() => {
-        if (draft !== value) onCommit(draft)
+        // Trim so a whitespace-only body becomes "" — flagged on the
+        // canvas as empty — rather than a body that looks blank but
+        // smuggles spaces past the eye and fails to compile.
+        const next = draft.trim()
+        if (next !== value) onCommit(next)
       }}
       onKeyDown={(e) => {
         if (e.key === "Enter") (e.target as HTMLInputElement).blur()
       }}
       placeholder="ST statement, e.g. inlet := TRUE"
       className="h-7 w-64 font-mono text-xs"
-      title="Inline ST executed under this qualifier"
+      title="Inline ST executed under this qualifier (required — an empty body fails to compile)"
     />
   )
 }

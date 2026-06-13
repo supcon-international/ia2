@@ -14,7 +14,13 @@
  *    stack of snapshots — built in if we want it.
  */
 
-import { fbByType, fbInputs, fbBoolOutputs, suggestInstanceName } from "./ld-fbs"
+import {
+  fbByType,
+  fbInputs,
+  fbBoolOutputs,
+  fbOutputs,
+  suggestInstanceName,
+} from "./ld-fbs"
 import type { FbdBlock } from "@/types/generated/FbdBlock"
 import type { FbdInputBinding } from "@/types/generated/FbdInputBinding"
 import type { FbdInputSource } from "@/types/generated/FbdInputSource"
@@ -315,7 +321,18 @@ export function findBlock(prog: FbdProgram, id: string): FbdBlock | undefined {
 }
 
 /** All BOOL outputs of a given block, derived from the FB type's
- *  pin definitions. Used by the wire-drop UI to filter source pins. */
+ *  pin definitions. */
 export function blockBoolOutputs(block: FbdBlock): string[] {
   return fbBoolOutputs(block.fb_type)
+}
+
+/** ALL outputs of a given block (any type), derived from the FB type's
+ *  pin definitions. FBD wires carry whatever the pin's type is — the
+ *  transpiler and `connectWire` don't restrict to BOOL — so the editor
+ *  renders and lets you wire every output: a PID's REAL `out`, a
+ *  timer's `ET`, not only the BOOL ones. Falls back to `["Q"]` for an
+ *  unknown FB type so a block can still be placed and wired. */
+export function blockOutputs(block: FbdBlock): string[] {
+  const outs = fbOutputs(block.fb_type).map((p) => p.pin)
+  return outs.length > 0 ? outs : ["Q"]
 }

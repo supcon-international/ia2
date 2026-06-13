@@ -32,7 +32,7 @@ import { checkProgram } from "@/lib/api"
 import { DiagnosticsBanner } from "@/components/editor/DiagnosticsBanner"
 import {
   addBlock,
-  blockBoolOutputs,
+  blockOutputs,
   connectWire,
   parseProgram,
   removeBlock,
@@ -218,7 +218,7 @@ export function FBDEditor({
       {diagnostics.length > 0 && (
         <DiagnosticsBanner
           diagnostics={diagnostics}
-          formatLocation={(d) => describeLocation(d.fbd_location)}
+          formatLocation={(d) => describeLocation(d.fbd_location, prog.blocks)}
         />
       )}
       <div className="flex-1 overflow-auto bg-background">
@@ -656,10 +656,13 @@ function FbdCanvas({
             const to = layout.blockById.get(b.id)
             if (!from || !to) return null
             const targetPinIdx = b.inputs.findIndex((x) => x.pin === inp.pin)
-            const sourcePinIdx = approxOutputPinIndex(prog.blocks, src.block_id, src.pin)
             // Wires terminate at the STUB dots, not at the block edge.
+            // Source Y uses the SAME placement BlockGlyph gives the
+            // output dots (see outputPinCy) — the input-row pitch does
+            // not apply to the right side, so a multi-output source must
+            // leave each wire from its own dot.
             const x1 = from.x + from.w + STUB_LEN
-            const y1 = from.y + HEADER_H + sourcePinIdx * PIN_ROW_H + PIN_ROW_H / 2
+            const y1 = outputPinCy(prog.blocks, from, src.block_id, src.pin)
             const x2 = to.x - STUB_LEN
             const y2 = to.y + HEADER_H + targetPinIdx * PIN_ROW_H + PIN_ROW_H / 2
             const dx = Math.max(20, (x2 - x1) / 2)
@@ -714,7 +717,7 @@ function FbdCanvas({
             e.stopPropagation()
             if (readOnly) return
             const lay = layout.blockById.get(b.id)!
-            const outs = blockBoolOutputs(b)
+            const outs = blockOutputs(b)
             const pinIdx = outs.indexOf(pin)
             const total = Math.max(outs.length, 1)
             const yOffset =
@@ -760,9 +763,8 @@ function FbdCanvas({
       {prog.outputs.map((o, i) => {
         const from = layout.blockById.get(o.from_block)
         if (!from) return null
-        const srcPinIdx = approxOutputPinIndex(prog.blocks, o.from_block, o.from_pin)
         const x1 = from.x + from.w + STUB_LEN
-        const y1 = from.y + HEADER_H + srcPinIdx * PIN_ROW_H + PIN_ROW_H / 2
+        const y1 = outputPinCy(prog.blocks, from, o.from_block, o.from_pin)
         const x2 = x1 + 40
         const srcBlock = prog.blocks.find((b) => b.id === o.from_block)
         const wireKey = srcBlock ? `${srcBlock.instance}.${o.from_pin}` : null
@@ -814,7 +816,7 @@ function BlockGlyph({
   onPointerDown: (e: React.PointerEvent) => void
   onOutputPinPointerDown: (pin: string, e: React.PointerEvent) => void
 }) {
-  const boolOutputs = blockBoolOutputs(block)
+  const outputs = blockOutputs(block)
   // Industrial-FBD convention (Codesys / TIA / Step7):
   //   - **Instance name** sits ABOVE the block (regular weight, small).
   //     It's the variable name; the rest of the program references it.
@@ -964,11 +966,11 @@ function BlockGlyph({
       {/* Output pins on the right side. Same pattern as inputs:
           pin name INSIDE right-aligned, bold, with a connector stub
           (short line + dot) reaching outside the box. Each dot is a
-          drag handle for the wire-creation gesture. Non-BOOL outputs
-          (ET / CV) are also rendered as labels but without a drag
-          stub — they can't feed a BOOL network so they don't get
-          wires here. */}
-      {(boolOutputs.length > 0 ? boolOutputs : ["Q"]).map((pin, i, arr) => {
+          drag handle for the wire-creation gesture — EVERY output is
+          wireable (a PID's REAL `out`, a timer's `ET`, a BOOL `Q`),
+          since the transpiler doesn't restrict wires to a BOOL
+          network. */}
+      {outputs.map((pin, i, arr) => {
         const cy = layout.y + HEADER_H + ((i + 0.5) * (layout.h - HEADER_H)) / arr.length
         const live = liveValues
           ? liveValues.bools[`${block.instance}.${pin}`] === true
@@ -1040,7 +1042,7 @@ function BlockDetail({
 }) {
   const def = fbByType(block.fb_type)
   const inputDefs = fbInputs(block.fb_type)
-  const outputs = blockBoolOutputs(block)
+  const outputs = blockOutputs(block)
   const varsByType = (iecType: string) =>
     prog.variables.filter((v) => v.type === iecType).map((v) => v.name)
 
@@ -1230,7 +1232,7 @@ function PinOperandPicker({
               onChange({
                 kind: "block",
                 block_id: src.id,
-                pin: blockBoolOutputs(src)[0] ?? "Q",
+                pin: blockOutputs(src)[0] ?? "Q",
               })
             }
           }
@@ -1256,7 +1258,7 @@ function PinOperandPicker({
                 kind: "block",
                 block_id: id,
                 pin:
-                  blockBoolOutputs(blockOptions.find((b) => b.id === id)!)[0] ??
+                  blockOutputs(blockOptions.find((b) => b.id === id)!)[0] ??
                   "Q",
               })
             }
@@ -1286,7 +1288,7 @@ function PinOperandPicker({
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {blockBoolOutputs(
+              {blockOutputs(
                 blockOptions.find((b) => b.id === value.block_id) ??
                   blockOptions[0]!,
               ).map((p) => (
@@ -1396,7 +1398,7 @@ function AddOutputBinding({
   const [variable, setVariable] = useState(unbound[0])
   const [blockId, setBlockId] = useState(blocks[0]?.id ?? "")
   const block = blocks.find((b) => b.id === blockId) ?? blocks[0]
-  const outputs = block ? blockBoolOutputs(block) : ["Q"]
+  const outputs = block ? blockOutputs(block) : ["Q"]
   const [pin, setPin] = useState(outputs[0] ?? "Q")
   useEffect(() => {
     if (!unbound.includes(variable)) setVariable(unbound[0])
@@ -1481,13 +1483,20 @@ function indexDiagnostics(diags: CheckDiagnostic[]): DiagIndex {
   return { byBlock, byVariable }
 }
 
-function describeLocation(loc: FbdLocation | null | undefined): string {
+function describeLocation(
+  loc: FbdLocation | null | undefined,
+  blocks: FbdBlock[],
+): string {
   if (!loc) return "—"
   switch (loc.kind) {
     case "variable":
       return `var ${loc.name}`
-    case "block":
-      return `block ${loc.block_id}`
+    case "block": {
+      // Show the instance name the user actually reads on the canvas
+      // (e.g. `flt`), not the internal block_id (`b_lag`).
+      const b = blocks.find((bb) => bb.id === loc.block_id)
+      return b ? `block ${b.instance} (${b.fb_type})` : `block ${loc.block_id}`
+    }
     case "output":
       return `output ${loc.variable}`
   }
@@ -1501,14 +1510,25 @@ function describeLocation(loc: FbdLocation | null | undefined): string {
 //   Helpers
 // =================================================================
 
-function approxOutputPinIndex(
+/** Vertical centre of a block's output dot, matching EXACTLY how
+ *  BlockGlyph lays the dots out (see "Output pins on the right side"):
+ *  bool outputs spread evenly down the box body by their index in the
+ *  output list, fallback `["Q"]` when a block exposes no BOOL output.
+ *  The wire source endpoint must use this so each wire leaves its own
+ *  dot — the previous `inputs.length / 2` heuristic on the input-row
+ *  pitch drew every wire of a multi-output block (TON Q/ET, CTU Q/CV)
+ *  from the box midpoint, visually detached from the dots. */
+function outputPinCy(
   blocks: FbdBlock[],
+  layout: BlockLayout,
   blockId: string,
-  _pin: string,
+  pin: string,
 ): number {
   const b = blocks.find((bb) => bb.id === blockId)
-  if (!b) return 0
-  return Math.max(0, Math.floor(b.inputs.length / 2))
+  const outs = b ? blockOutputs(b) : []
+  const arr = outs.length > 0 ? outs : ["Q"]
+  const idx = Math.max(0, arr.indexOf(pin))
+  return layout.y + HEADER_H + ((idx + 0.5) * (layout.h - HEADER_H)) / arr.length
 }
 
 function powerClass(powered: boolean | null): string {
