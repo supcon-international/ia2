@@ -1,8 +1,9 @@
-# Inovance SV660N 伺服驱动（EtherCAT, CiA 402）。
-# 实测来源：SV660N 台架（servo_ec 项目）——连接、DC SYNC0 进 OP、
-# CSP 位置环数据往返均验证过。PDI 偏移对应下列 4 通道的默认
-# PDO assign（0x1600/0x1A00 默认映射）；现场若改写 PDO 映射需
-# 相应调整 pdi_byte_offset。
+# Inovance SV660N servo drive (EtherCAT, CiA 402).
+# Validated on the SV660N bench (servo_ec project): connection,
+# DC SYNC0 -> OP, and CSP position-loop data round-trip all confirmed.
+# The PDI offsets below match the default PDO assignment (0x1600/0x1A00
+# default mapping) of these 4 channels; if the field device remaps its
+# PDOs, adjust pdi_byte_offset accordingly.
 name = "InoSV660N"
 protocol = "ethercat"
 description = "Inovance SV660N servo drive — CiA 402, CSP; requires DC SYNC0 to reach OP"

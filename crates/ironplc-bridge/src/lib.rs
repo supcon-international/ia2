@@ -268,8 +268,8 @@ fn build_combined_project_source(
 }
 
 /// Compile one container per `tasks.toml` PROGRAM instance — the
-/// multi-PROGRAM execution model from ADR-0001 ("每 PROGRAM 实例一个
-/// Container + 一个 VM，单 scan 线程轮转调度").
+/// multi-PROGRAM execution model from ADR-0001 ("one Container + one VM
+/// per PROGRAM instance, round-robin scheduled on a single scan thread").
 ///
 /// Each unit's library is assembled at the AST level:
 ///   1. the instance's own `ProgramDeclaration`, hoisted to the front —

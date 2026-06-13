@@ -1,85 +1,108 @@
-# ADR-0001: ironplc / IA2 职责边界
+# ADR-0001: ironplc / IA2 responsibility boundary
 
-状态：已采纳（2026-06-13）
+Status: Accepted (2026-06-13)
 
-## 背景
+## Context
 
-IA2 通过 vendored submodule 使用 ironplc（parser / analyzer / codegen /
-container / vm / dsl）。盘点结论：
+IA2 uses ironplc (parser / analyzer / codegen / container / vm / dsl) via a
+vendored submodule. Audit findings:
 
-- `crates/ironplc-bridge` 是**唯一**直接 import ironplc 的 crate（lsp-launcher
-  仅调 `ironplc-cli::lsp::start()`）。server / cli / runtime 只见 bridge 的
-  `Container` / `ProgramHandle` / `VarSnapshot` 等类型，无泄漏。
-- vendored ironplc 此前为**未修改的上游**（pinned 31c40c69, v0.212.0 线）。
-- 但 bridge 在四处 paper over 上游缺口，且从未把"谁负责什么"写成决策：
-  1. codegen 不填 `container.task_table` → VM `next_due_us()` 永远 None，
-     bridge 自己以 tasks.toml 的 interval sleep 调度（单一节拍）；
-  2. VM `find_program()` 只执行容器里第一个 PROGRAM → server 拒绝
-     多 PROGRAM 的 tasks.toml；
-  3. codegen 丢失 `VAR RETAIN` 限定符 → bridge 在 codegen 前走 AST 提取
-     retain 变量名；
-  4. VM 写 API 仅 `write_variable(i32)` → LREAL 输入映射被跳过、RETAIN
-     对 64 位类型截断。
+- `crates/ironplc-bridge` is the **only** crate that imports ironplc
+  directly (lsp-launcher merely calls `ironplc-cli::lsp::start()`).
+  server / cli / runtime see only the bridge's `Container` /
+  `ProgramHandle` / `VarSnapshot` types — no leakage.
+- The vendored ironplc was previously **unmodified upstream** (pinned
+  31c40c69, v0.212.0 line).
+- But the bridge papers over upstream gaps in four places, and "who owns
+  what" was never written down as a decision:
+  1. codegen doesn't populate `container.task_table` → the VM's
+     `next_due_us()` is always None, so the bridge schedules with its own
+     tasks.toml-interval sleep (a single cadence);
+  2. the VM's `find_program()` executes only the first PROGRAM in a
+     container → the server used to reject multi-PROGRAM `tasks.toml`;
+  3. codegen drops the `VAR RETAIN` qualifier → the bridge extracts retain
+     variable names from the AST before codegen;
+  4. the VM write API was only `write_variable(i32)` → LREAL input mapping
+     was skipped and RETAIN truncated 64-bit types.
 
-## 决策：边界原则
+## Decision: boundary principle
 
-**ironplc 负责"语言"：IEC 61131-3 文本 → 可执行单元的一个扫描周期。**
-**IA2 负责"工程"：把 N 个可执行单元编排成一座工厂的控制层。**
+**ironplc owns "the language": IEC 61131-3 text → one scan cycle of an
+executable unit.**
+**IA2 owns "the engineering": orchestrating N executable units into a
+plant's control layer.**
 
-| 能力 | 归属 | 形态 |
+| Capability | Owner | Form |
 |---|---|---|
-| 解析 / 语义分析 / 问题码 + RST 文档 | ironplc | bridge 透传 `CheckDiagnostic` |
-| 字节码容器 + 调试段 | ironplc | bridge 只读（`build_var_debug_map`） |
-| VM：执行一个容器的一个 scan（`run_round`）、变量读写 | ironplc | bridge 持有 `VmRunning` |
-| LSP server（语法/符号/语义着色） | ironplc | lsp-launcher 拉起；**诊断不走 LSP**（单文件视角），走 IA2 项目感知 `/api/check` |
-| CONFIGURATION 合成（tasks.toml → IEC 文本） | IA2 bridge | `synthesize_configuration` |
-| 任务调度（多任务节拍、多 PROGRAM 编排） | **IA2 bridge** | 见下"多 PROGRAM 设计" |
-| RETAIN 提取 + 持久化 + 恢复 | IA2 bridge | AST 提取 + `retain.rs` 盘上格式 |
-| I/O：设备、通道、映射、failsafe、watchdog | IA2（iocore/iomap-*） | VM 无感知 |
-| 工程模型：项目/库/Edge/部署/IDE/HTTP API | IA2 | — |
+| Parse / semantic analysis / problem codes + RST docs | ironplc | bridge passes `CheckDiagnostic` through |
+| Bytecode container + debug section | ironplc | bridge reads only (`build_var_debug_map`) |
+| VM: execute one container's one scan (`run_round`), variable read/write | ironplc | bridge holds `VmRunning` |
+| LSP server (syntax / symbols / semantic tokens) | ironplc | lsp-launcher starts it; **diagnostics do NOT go through the LSP** (single-file view), they go through IA2's project-aware `/api/check` |
+| CONFIGURATION synthesis (tasks.toml → IEC text) | IA2 bridge | `synthesize_configuration` |
+| Task scheduling (multi-task cadence, multi-PROGRAM orchestration) | **IA2 bridge** | see "multi-PROGRAM design" below |
+| RETAIN extraction + persistence + restore | IA2 bridge | AST extraction + `retain.rs` on-disk format |
+| I/O: devices, channels, mappings, failsafe, watchdog | IA2 (iocore / iomap-*) | the VM is unaware of it |
+| Engineering model: projects / libraries / Edge / deploy / IDE / HTTP API | IA2 | — |
 
-判据：凡 IEC 61131-3 标准文本定义的语义（语法、类型、单 POU 执行）归
-ironplc；凡"标准之外让它成为产品"的（调度策略、持久化格式、硬件、
-多项目、IDE）归 IA2。**不把工程概念塞进 vendor，也不在 IA2 重新实现
-语言。**
+Criterion: anything the IEC 61131-3 standard text defines (syntax, types,
+single-POU execution) belongs to ironplc; anything that "makes it a
+product beyond the standard" (scheduling policy, persistence format,
+hardware, multi-project, IDE) belongs to IA2. **Don't push engineering
+concepts into the vendor, and don't reimplement the language in IA2.**
 
-## 决策：vendor 策略（fork + 最小补丁注册表）
+## Decision: vendor strategy (fork + minimal-patch registry)
 
-submodule 指向 fork `supcon-international/ironplc`，分支 `ia2-patches`，
-基于上游 pinned commit。补丁准入：**只接受"上游理应提供的窄 API"**，
-不接受任何 IA2 业务语义。每个补丁登记于下表并以 PR 形式回馈上游；
-上游合并后 rebase 掉对应补丁。
+The submodule points at the fork `supcon-international/ironplc`, branch
+`ia2-patches`, based on the upstream pinned commit. Patch admission rule:
+**only narrow APIs upstream ought to provide** — never any IA2 business
+semantics. Each patch is registered in the table below and offered back
+upstream as a PR; once upstream merges it, the corresponding patch is
+rebased out.
 
-| # | 补丁 | 动机 | 上游 PR |
+| # | Patch | Motivation | Upstream PR |
 |---|---|---|---|
-| 1 | `vm: write_variable_raw(VarIndex, u64)`（d06a646c） | `read_variable_raw` 有 u64 读但无对称写；RETAIN 恢复与 64 位 I/O 映射需要无截断写入 | 待提 |
+| 1 | `vm: write_variable_raw(VarIndex, u64)` (d06a646c) | `read_variable_raw` has a u64 read but no symmetric write; RETAIN restore and 64-bit I/O mapping need a non-truncating write | pending |
 
-升级流程：`git fetch upstream && git rebase upstream/main ia2-patches`，
-补丁冲突即重新评估是否仍需要。
+Upgrade flow: `git fetch upstream && git rebase upstream/main ia2-patches`;
+a conflicting patch is re-evaluated for whether it is still needed.
 
-## 决策：多 PROGRAM / 多任务在 IA2 侧实现
+## Decision: multi-PROGRAM / multi-task implemented on the IA2 side
 
-不等上游 task_table codegen。bridge 改为 **每 PROGRAM 实例一个
-Container + 一个 VM，单 scan 线程轮转调度**：
+Rather than wait for upstream task_table codegen, the bridge runs **one
+Container + one VM per PROGRAM instance, round-robin scheduled on a single
+scan thread**. This is implemented (commit fc4addd):
 
-- 编译：每个 `tasks.toml` program 条目单独 `compile_isolated_source`
-  （基建已存在）；每容器独立 debug 段 → 多实例变量名缺失问题
-  （上游 debug_section 只命名第一个实例）随之消失。
-- 调度：每任务独立 `next_due` 锚点；线程每轮执行所有到期任务绑定的
-  VM 的 `run_round`，再睡到最近 due。优先级 = 同刻到期时的执行顺序。
-- I/O 路由：`Mapping.application` 字段（已存在）选择目标 VM；设备仍由
-  scan 线程独占，多 VM 同线程轮转，无并发问题。
-- 快照：变量名带实例前缀 `instance.variable`，跨 VM 合并。
-- 约束：多 PROGRAM 模式下不支持跨 PROGRAM 的 GLOBAL VAR 共享
-  （分容器隔离了地址空间）；`/api/project/validate` 检测并报错。
-- 硬件控制权不变：server 全局同时只允许一个项目运行。
+- **Compile**: each `tasks.toml` program entry gets its own container,
+  assembled at the AST level — the target `ProgramDeclaration` hoisted to
+  the front (ironplc's codegen compiles the first PROGRAM it finds) + every
+  non-PROGRAM declaration from all POU files (cross-file FBs resolve) + a
+  synthesized single-task CONFIGURATION. Foreign PROGRAM declarations are
+  excluded, so each unit's debug map stays free of other programs'
+  variables (this also dissolves the "debug_section only names the first
+  instance" problem) and a second PROGRAM in one file becomes schedulable.
+- **Schedule**: each unit has its own `next_due` anchor from its task
+  interval; the thread runs every unit whose deadline is due, then sleeps
+  to the nearest. Priority then declaration order breaks same-tick ties.
+- **I/O routing**: `Mapping.application` selects the target unit
+  (case-insensitive instance match); a bare/unknown application falls back
+  to the first owning unit, warning only when N > 1. Devices stay
+  thread-owned and units share them sequentially — no concurrency.
+- **Snapshots** merge across units; a name colliding between units renders
+  as `instance.variable`, while single-unit projects keep bare names.
+- **RETAIN** keys gain the instance prefix when N > 1; bare keys migrate
+  on load.
+- **Constraint**: cross-PROGRAM `VAR_GLOBAL` sharing is not supported
+  (separate containers isolate the address spaces); `/api/run` and
+  `/api/project/validate` detect it and return a clear error.
+- Hardware authority is unchanged: the server runs one project at a time.
 
-若上游未来落地 task_table + 多 PROGRAM 容器语义，bridge 可把"轮转多
-VM"退化为"单容器多任务"，对上层 API 无感。
+If upstream later lands task_table + multi-PROGRAM container semantics, the
+bridge can collapse "round-robin many VMs" back to "one container, many
+tasks" with no change to the layers above.
 
-## 后续（上游候选）
+## Follow-ups (upstream candidates)
 
-1. PR：`write_variable_raw`（补丁 #1）。
-2. Issue/PR：codegen 填充 `container.task_table`（VM 的 scheduler.rs
-   骨架已在）。
-3. Issue：debug_section 为每个 PROGRAM 实例命名变量。
+1. PR: `write_variable_raw` (patch #1).
+2. Issue/PR: have codegen populate `container.task_table` (the VM's
+   `scheduler.rs` skeleton is already there).
+3. Issue: have the debug_section name variables per PROGRAM instance.
