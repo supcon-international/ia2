@@ -56,7 +56,7 @@ import {
   updateVariable,
   type NodePath,
 } from "@/lib/ld-edit"
-import { fbByType, fbInputs, fbOutputs, groupedFbs } from "@/lib/ld-fbs"
+import { fbByType, fbInputs, fbOutputs, fbPinHint, groupedFbs } from "@/lib/ld-fbs"
 import { useRuntime } from "@/state/runtime"
 import type { LdCoilKind } from "@/types/generated/LdCoilKind"
 import type { LdNode } from "@/types/generated/LdNode"
@@ -2179,7 +2179,7 @@ function FbCallEditFields({
             <SelectGroup key={group.label}>
               <SelectLabel>{group.label}</SelectLabel>
               {group.fbs.map((fb) => (
-                <SelectItem key={fb.type} value={fb.type}>
+                <SelectItem key={fb.type} value={fb.type} title={fbPinHint(fb)}>
                   {fb.type}
                 </SelectItem>
               ))}
@@ -2325,7 +2325,7 @@ function FbInsertPicker({
           <SelectGroup key={group.label}>
             <SelectLabel>{group.label}</SelectLabel>
             {group.fbs.map((fb) => (
-              <SelectItem key={fb.type} value={fb.type}>
+              <SelectItem key={fb.type} value={fb.type} title={fbPinHint(fb)}>
                 <span className="font-mono">{fb.type}</span>
                 <span className="ml-2 text-muted-foreground">
                   {fb.label.replace(`${fb.type} — `, "")}

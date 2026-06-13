@@ -44,7 +44,7 @@ import {
   setBlockPosition,
   setOutputBinding,
 } from "@/lib/fbd-edit"
-import { fbByType, fbInputs, groupedFbs } from "@/lib/ld-fbs"
+import { fbByType, fbInputs, fbPinHint, groupedFbs } from "@/lib/ld-fbs"
 import { cn } from "@/lib/utils"
 import { Input } from "@/components/ui/input"
 import {
@@ -336,7 +336,7 @@ function Toolbar({
             <SelectGroup key={group.label}>
               <SelectLabel>{group.label}</SelectLabel>
               {group.fbs.map((fb) => (
-                <SelectItem key={fb.type} value={fb.type}>
+                <SelectItem key={fb.type} value={fb.type} title={fbPinHint(fb)}>
                   <span className="font-mono">{fb.type}</span>
                   <span className="ml-2 text-muted-foreground">
                     {fb.label.replace(`${fb.type} — `, "")}
@@ -1063,7 +1063,7 @@ function BlockDetail({
             <SelectGroup key={group.label}>
               <SelectLabel>{group.label}</SelectLabel>
               {group.fbs.map((fb) => (
-                <SelectItem key={fb.type} value={fb.type}>
+                <SelectItem key={fb.type} value={fb.type} title={fbPinHint(fb)}>
                   {fb.type}
                 </SelectItem>
               ))}

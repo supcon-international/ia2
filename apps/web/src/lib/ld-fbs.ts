@@ -286,6 +286,15 @@ export function buildProjectFbDefs(
   })
 }
 
+/** One-line `in1, in2 → out1, out2` pin summary for palette tooltips,
+ *  so you can see a block's interface before placing it. */
+export function fbPinHint(fb: FbDef): string {
+  const ins = fb.pins.filter((p) => p.direction === "input").map((p) => p.pin)
+  const outs = fb.pins.filter((p) => p.direction === "output").map((p) => p.pin)
+  const inStr = ins.join(", ") || "—"
+  return outs.length ? `${inStr} → ${outs.join(", ")}` : inStr
+}
+
 /** Look up an FB by its IEC type name (builtin or project). Case-sensitive. */
 export function fbByType(type: string): FbDef | undefined {
   return STANDARD_FBS.find((fb) => fb.type === type) ?? PROJECT_FBS.find((fb) => fb.type === type)

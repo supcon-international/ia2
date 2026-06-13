@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef } from "react"
 
 import { fetchSymbols } from "@/lib/api"
 import { useDarkMode } from "@/lib/dark-mode"
+import { groupedFbs } from "@/lib/ld-fbs"
 import type { CheckDiagnostic } from "@/types/generated/CheckDiagnostic"
 import type { VariableInfo } from "@/types/generated/VariableInfo"
 import {
@@ -80,9 +81,26 @@ export function STEditor({ value, onChange, diagnostics, readOnly = false }: Pro
                 : Kind.Variable
           return make(s.name, kind, `${s.direction} : ${s.type_name}`)
         })
+        // Library / project FUNCTION_BLOCK types — so writing
+        // `inst : FB_P…` completes to FB_PID with the block's one-line
+        // doc. Resolved live (the registry fills in as the project tree
+        // loads), Standard builtins already come through `builtins`.
+        const fbTypeSuggestions = groupedFbs()
+          .filter((g) => g.label !== "Standard")
+          .flatMap((g) =>
+            g.fbs.map((fb) => ({
+              label: fb.type,
+              kind: Kind.Class,
+              insertText: fb.type,
+              detail: fb.library ? `library · ${fb.library}` : "project FB",
+              documentation: fb.description,
+              range,
+            })),
+          )
         return {
           suggestions: [
             ...varSuggestions,
+            ...fbTypeSuggestions,
             ...keywords.map((k) => make(k, Kind.Keyword, detailKeyword)),
             ...typeKeywords.map((t) =>
               make(t, Kind.TypeParameter, detailType),

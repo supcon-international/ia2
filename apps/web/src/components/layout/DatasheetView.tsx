@@ -90,6 +90,15 @@ export function DatasheetView({
           </div>
         )}
 
+        {/* Usage hint — how to actually place / call the block */}
+        <div className="mt-6 rounded-md border border-border bg-muted/30 px-3 py-2 text-[13px] text-muted-foreground">
+          <span className="font-medium text-foreground">Use it: </span>
+          add it from the <span className="font-mono">+ Block</span> palette in
+          an FBD or LD editor, or declare{" "}
+          <span className="font-mono">inst : {sheet.name};</span> and call{" "}
+          <span className="font-mono">inst(…)</span> in ST.
+        </div>
+
         {/* Folded ST source */}
         <div className="mt-6 border-t border-border pt-3">
           <button
