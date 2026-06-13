@@ -1,0 +1,16 @@
+<svg viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="IA2">
+  <!-- IA2 mark: a digital control pulse (PLC scan / signal edge) in the
+       brand green over a dark rounded tile. Pure shapes so it stays
+       crisp from 16px favicon to 512px PWA icon. -->
+  <rect width="256" height="256" rx="58" fill="#14181c" />
+  <path
+    d="M36 166 H92 V94 H164 V166 H220"
+    fill="none"
+    stroke="#1fbe6c"
+    stroke-width="24"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <circle cx="36" cy="166" r="13" fill="#1fbe6c" />
+  <circle cx="220" cy="166" r="13" fill="#1fbe6c" />
+</svg>
