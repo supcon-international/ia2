@@ -141,10 +141,44 @@ pub(crate) fn validate_channel_shapes(channels: &[EthercatChannel]) -> Result<()
     }
 }
 
+/// Reject malformed `init_sdo` entries at connect, before the bus thread
+/// spawns: width must be one of the expedited-transfer sizes, and the
+/// value must fit that width (as either a signed or unsigned quantity).
+pub(crate) fn validate_init_sdo(slaves: &[EthercatSlave]) -> Result<(), String> {
+    let mut problems: Vec<String> = Vec::new();
+    for slave in slaves {
+        for cmd in &slave.init_sdo {
+            let fits = match cmd.bits {
+                8 => (-(1 << 7)..(1i64 << 8)).contains(&cmd.value),
+                16 => (-(1 << 15)..(1i64 << 16)).contains(&cmd.value),
+                32 => (-(1 << 31)..(1i64 << 32)).contains(&cmd.value),
+                other => {
+                    problems.push(format!(
+                        "slave {} init_sdo {:#06x}:{:02x}: bits must be 8, 16, or 32 (got {other})",
+                        slave.index, cmd.index, cmd.sub_index
+                    ));
+                    continue;
+                }
+            };
+            if !fits {
+                problems.push(format!(
+                    "slave {} init_sdo {:#06x}:{:02x}: value {} does not fit in {} bits",
+                    slave.index, cmd.index, cmd.sub_index, cmd.value, cmd.bits
+                ));
+            }
+        }
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join("; "))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use project::EthercatDataType;
+    use project::{EthercatDataType, EthercatSdoInit};
 
     fn slave(index: u16, name: &str, vendor_id: u32, product_id: u32) -> EthercatSlave {
         EthercatSlave {
@@ -152,6 +186,24 @@ mod tests {
             name: name.into(),
             vendor_id,
             product_id,
+            dc_sync: None,
+            init_sdo: vec![],
+        }
+    }
+
+    fn slave_with_sdo(value: i64, bits: u8) -> EthercatSlave {
+        EthercatSlave {
+            index: 0,
+            name: "sv660n".into(),
+            vendor_id: 0,
+            product_id: 0,
+            dc_sync: None,
+            init_sdo: vec![EthercatSdoInit {
+                index: 0x6060,
+                sub_index: 0,
+                value,
+                bits,
+            }],
         }
     }
 
@@ -339,5 +391,28 @@ mod tests {
             channel("word", 0, EthercatPdoDirection::TxPdo, 2, 0, 16),
         ];
         assert!(validate_channel_shapes(&good).is_ok());
+    }
+
+    // ---- init_sdo -----------------------------------------------------------
+
+    #[test]
+    fn init_sdo_accepts_in_range_values() {
+        // 0x6060 = 8 (CSP), the canonical use.
+        assert!(validate_init_sdo(&[slave_with_sdo(8, 8)]).is_ok());
+        // Unsigned top of range and signed bottom both fit each width.
+        assert!(validate_init_sdo(&[slave_with_sdo(255, 8)]).is_ok());
+        assert!(validate_init_sdo(&[slave_with_sdo(-128, 8)]).is_ok());
+        assert!(validate_init_sdo(&[slave_with_sdo(0xFFFF_FFFF, 32)]).is_ok());
+        assert!(validate_init_sdo(&[slave_with_sdo(i32::MIN as i64, 32)]).is_ok());
+        // No init_sdo at all is trivially fine.
+        assert!(validate_init_sdo(&[slave(0, "io", 0, 0)]).is_ok());
+    }
+
+    #[test]
+    fn init_sdo_rejects_bad_width_and_overflow() {
+        assert!(validate_init_sdo(&[slave_with_sdo(8, 24)]).is_err());
+        assert!(validate_init_sdo(&[slave_with_sdo(256, 8)]).is_err());
+        assert!(validate_init_sdo(&[slave_with_sdo(-129, 8)]).is_err());
+        assert!(validate_init_sdo(&[slave_with_sdo(0x1_0000_0000, 32)]).is_err());
     }
 }

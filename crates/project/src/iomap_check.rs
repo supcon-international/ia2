@@ -343,6 +343,7 @@ mod tests {
                 nic: "_sim".into(),
                 cycle_us: 1_000,
                 dc_sync: EthercatDcSync::Off,
+                dc_static_sync_iterations: 0,
                 slaves: vec![],
                 channels: vec![
                     ch("tx_status", EthercatPdoDirection::TxPdo),

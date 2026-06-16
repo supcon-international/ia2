@@ -158,11 +158,14 @@ mod tests {
             nic: SIM_NIC.into(),
             cycle_us: 1_000,
             dc_sync: project::EthercatDcSync::Off,
+            dc_static_sync_iterations: 0,
             slaves: vec![EthercatSlave {
                 index: 0,
                 name: "EL2008".into(),
                 vendor_id: 0,
                 product_id: 0,
+                dc_sync: None,
+                init_sdo: vec![],
             }],
             channels: vec![
                 EthercatChannel {

@@ -45,7 +45,9 @@ use ethercrab::std::ethercat_now;
 use ethercrab::subdevice_group::DcConfiguration;
 use ethercrab::{DcSync, MainDevice, MainDeviceConfig, PduStorage, Timeouts};
 use iocore::{ChannelValue, HealthTracker, HealthTransition, IoDevice, IoError};
-use project::{EthercatChannel, EthercatConfig, EthercatDcSync, EthercatPdoDirection};
+use project::{
+    EthercatChannel, EthercatConfig, EthercatDcSync, EthercatPdoDirection, EthercatSlave,
+};
 
 use crate::bits;
 use crate::validate;
@@ -256,6 +258,7 @@ impl RealEthercat {
         // Shape problems (zero-length / misaligned entries) are knowable
         // before touching the bus — reject them before spawning anything.
         validate::validate_channel_shapes(&config.channels).map_err(IoError::Connect)?;
+        validate::validate_init_sdo(&config.slaves).map_err(IoError::Connect)?;
 
         let channels: HashMap<String, EthercatChannel> = config
             .channels
@@ -271,6 +274,8 @@ impl RealEthercat {
         let nic = config.nic.clone();
         let cycle_us = config.cycle_us.max(100); // hard floor: don't melt the CPU
         let dc_sync = config.dc_sync;
+        let dc_static_sync_iterations = config.dc_static_sync_iterations;
+        let slaves = config.slaves.clone();
         let shared = WorkerShared {
             pdi: pdi.clone(),
             shutdown: shutdown.clone(),
@@ -281,7 +286,17 @@ impl RealEthercat {
 
         let thread = thread::Builder::new()
             .name(thread_name)
-            .spawn(move || smol_main(&nic, cycle_us, dc_sync, shared, init_tx))
+            .spawn(move || {
+                smol_main(
+                    &nic,
+                    cycle_us,
+                    dc_sync,
+                    dc_static_sync_iterations,
+                    &slaves,
+                    shared,
+                    init_tx,
+                )
+            })
             .map_err(|e| IoError::Connect(format!("spawn ethercat thread: {e}")))?;
 
         // Wait for the worker to report success or failure. The init walk
@@ -500,10 +515,13 @@ fn note_txrx_failure<E: std::fmt::Debug>(health: &mut HealthTracker, error: &E) 
 /// The entire ethercrab session lives inside this function — bus walk,
 /// state-machine transition to OP, and the cyclic exchange loop. Runs on
 /// its own thread under `smol::block_on` to drive `async-io`.
+#[allow(clippy::too_many_arguments)]
 fn smol_main(
     nic: &str,
     cycle_us: u32,
     dc_sync: EthercatDcSync,
+    dc_static_sync_iterations: u32,
+    slaves: &[EthercatSlave],
     shared: WorkerShared,
     init_tx: mpsc::SyncSender<InitResult>,
 ) {
@@ -547,14 +565,15 @@ fn smol_main(
             mailbox_response: Duration::from_millis(1000),
             ..Default::default()
         },
-        // dc_static_sync_iterations defaults to 10_000 in ethercrab 0.7.1,
-        // which fires that many FRMW(0x0910) frames during init for static
-        // drift compensation. On a single-SubDevice / short-bus / non-RT
-        // setup any one of those frames timing out aborts init with
-        // Timeout(Pdu). We don't drive DC-synchronous motion yet, so skip
-        // this phase. Matches ethercrab's own examples/discover.rs.
+        // Configurable because the right value depends on the bus: 0
+        // (our default) skips the init-time FRMW burst entirely — on a
+        // short bus / non-RT host any one of those frames timing out
+        // aborts init with Timeout(Pdu) (ethercrab's own default of
+        // 10_000 is what made single-SubDevice bring-up fail). Longer DC
+        // buses that care about clock convergence at OP-entry can raise
+        // it from the device config.
         MainDeviceConfig {
-            dc_static_sync_iterations: 0,
+            dc_static_sync_iterations,
             ..MainDeviceConfig::default()
         },
     ));
@@ -589,6 +608,50 @@ fn smol_main(
                 return;
             }
         };
+
+        // Per-SubDevice startup SDO writes (PRE-OP, mailboxes are up).
+        // Runs before the PDO-mapping dump below so the logged layout
+        // reflects any remapping done here. A failed write aborts init:
+        // these are things like 0x6060 = 8 (CSP) — silently running a
+        // drive in the wrong mode is worse than not starting.
+        for (pos, sd) in group.iter(&maindevice).enumerate() {
+            let Some(cfg) = slaves.iter().find(|s| s.index == pos as u16) else {
+                continue;
+            };
+            for cmd in &cfg.init_sdo {
+                let res = match cmd.bits {
+                    8 => {
+                        sd.sdo_write(cmd.index, cmd.sub_index, cmd.value as u8)
+                            .await
+                    }
+                    16 => {
+                        sd.sdo_write(cmd.index, cmd.sub_index, cmd.value as u16)
+                            .await
+                    }
+                    // validate_init_sdo limited bits to {8, 16, 32}.
+                    _ => {
+                        sd.sdo_write(cmd.index, cmd.sub_index, cmd.value as u32)
+                            .await
+                    }
+                };
+                match res {
+                    Ok(()) => tracing::info!(
+                        slave = pos,
+                        obj = format!("{:#06x}:{:02x}", cmd.index, cmd.sub_index),
+                        value = cmd.value,
+                        bits = cmd.bits,
+                        "init sdo write"
+                    ),
+                    Err(e) => {
+                        let _ = init_tx.send(InitResult::Err(format!(
+                            "init sdo write {:#06x}:{:02x} = {} ({} bits) on slave {pos}: {e:?}",
+                            cmd.index, cmd.sub_index, cmd.value, cmd.bits
+                        )));
+                        return;
+                    }
+                }
+            }
+        }
 
         // One-time: read + log the CoE PDO mapping (0x1C12 RxPDO-assign /
         // 0x1C13 TxPDO-assign -> 0x16xx / 0x1Axx entries). Surfaces the exact
@@ -629,15 +692,37 @@ fn smol_main(
 
         let sync0 = Duration::from_micros(cycle_us as u64);
 
-        match dc_sync {
+        // Effective DC mode per SubDevice: per-slave override if listed in
+        // the config, else the device-level default. The bus takes the DC
+        // path when any SubDevice ends up Sync0 — SubDevices left Off
+        // aren't flagged, and ethercrab's configure_dc_sync skips unflagged
+        // ones, so plain IO couplers free-run inside a DC bus.
+        let effective_dc = |pos: u16| {
+            slaves
+                .iter()
+                .find(|s| s.index == pos)
+                .and_then(|s| s.dc_sync)
+                .unwrap_or(dc_sync)
+        };
+        let subdevice_count = group.iter(&maindevice).count() as u16;
+        let bus_dc = if (0..subdevice_count).any(|p| effective_dc(p) == EthercatDcSync::Sync0) {
+            EthercatDcSync::Sync0
+        } else {
+            EthercatDcSync::Off
+        };
+
+        match bus_dc {
             EthercatDcSync::Sync0 => {
-                // Servo drives (e.g. Inovance SV660N) need DC SYNC0 to reach
-                // OP. Enable SYNC0 on every SubDevice, configure the group
-                // DC, then *request* OP and cycle tx_rx_dc until all OP — a
-                // blocking into_op() doesn't pump PDI, so the drive's
-                // SyncManager watchdog would trip during SAFE-OP -> OP.
-                for mut subdevice in group.iter_mut(&maindevice) {
-                    subdevice.set_dc_sync(DcSync::Sync0);
+                // Servo drives (e.g. Inovance SV660N) need DC SYNC0 to
+                // reach OP. Flag SYNC0 on the SubDevices that want it,
+                // configure the group DC, then *request* OP and cycle
+                // tx_rx_dc until all OP — a blocking into_op() doesn't pump
+                // PDI, so the drive's SyncManager watchdog would trip
+                // during SAFE-OP -> OP.
+                for (pos, mut subdevice) in group.iter_mut(&maindevice).enumerate() {
+                    if effective_dc(pos as u16) == EthercatDcSync::Sync0 {
+                        subdevice.set_dc_sync(DcSync::Sync0);
+                    }
                 }
                 let group = match group.into_pre_op_pdi(&maindevice).await {
                     Ok(g) => g,
