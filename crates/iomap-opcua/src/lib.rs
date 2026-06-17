@@ -34,6 +34,16 @@ use opcua::types::{
 };
 use project::{OpcuaAccess, OpcuaAuth, OpcuaChannel, OpcuaConfig, OpcuaDataType};
 
+/// Upper bound on the initial connect + seed read. `session_retry_limit`
+/// is `-1` (reconnect forever — the DCS outlives us), so
+/// `wait_for_connection()` never returns while the endpoint is down. We
+/// must NOT block the runtime's scan-loop startup on one southbound link:
+/// if the DCS / gateway isn't up within this window, `connect` returns a
+/// device with an empty mirror and the background poll task + session
+/// retry populate it once the endpoint comes up. Bounded so a momentarily
+/// unreachable endpoint can't wedge the whole runtime.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Resolved channel — NodeId parsed once at connect.
 #[derive(Clone)]
 struct ResolvedChannel {
@@ -98,30 +108,65 @@ impl OpcuaDevice {
             }
         };
 
-        let (session, event_loop) = client
-            .connect_to_matching_endpoint(endpoint, identity)
-            .await
-            .map_err(|e| IoError::Connect(format!("opcua connect {}: {e}", config.endpoint_url)))?;
+        // Bounded initial connect. `session_retry_limit` is -1 (reconnect
+        // forever — the DCS outlives us), so `connect_to_matching_endpoint`
+        // blocks indefinitely while the endpoint is down, retrying the
+        // transport internally. We must NOT let one unreachable southbound
+        // link wedge the whole runtime's scan-loop startup, so bound it:
+        // on timeout (or a hard connect error) we return `IoError::Connect`
+        // and `connect_devices` skips this device and starts the scan loop
+        // with the rest — exactly how an unreachable Modbus slave is
+        // handled. A reachable endpoint connects well within the window.
+        let (session, event_loop) = match tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            client.connect_to_matching_endpoint(endpoint, identity),
+        )
+        .await
+        {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => {
+                return Err(IoError::Connect(format!(
+                    "opcua connect {}: {e}",
+                    config.endpoint_url
+                )))
+            }
+            Err(_) => {
+                return Err(IoError::Connect(format!(
+                    "opcua endpoint {} unreachable within {}s",
+                    config.endpoint_url,
+                    CONNECT_TIMEOUT.as_secs()
+                )))
+            }
+        };
 
         let event_loop_task = tokio::spawn(event_loop.run());
-        session
-            .wait_for_connection()
-            .await
-            .then_some(())
-            .ok_or_else(|| {
-                IoError::Connect(format!("opcua session to {} failed", config.endpoint_url))
-            })?;
-
         let mirror = Arc::new(RwLock::new(HashMap::new()));
-
-        // Seed the mirror with one synchronous bulk read so the first
-        // scan round sees real values (and bad NodeIds surface now, at
-        // connect, not silently later).
         let readable: Vec<ResolvedChannel> = channels.values().cloned().collect();
-        let seeded = bulk_read(&session, &readable).await?;
+
+        // Confirm the session is live and seed the mirror with one bulk
+        // read (so the first scan round sees real values and missing
+        // NodeIds surface now). Bounded too — connect_to_matching_endpoint
+        // returning OK means the transport is up, so this is fast.
+        let seed = tokio::time::timeout(CONNECT_TIMEOUT, async {
+            if !session.wait_for_connection().await {
+                return Err(IoError::Connect(format!(
+                    "opcua session to {} failed",
+                    config.endpoint_url
+                )));
+            }
+            bulk_read(&session, &readable).await
+        })
+        .await
+        .map_err(|_| {
+            IoError::Connect(format!(
+                "opcua session to {} did not become ready within {}s",
+                config.endpoint_url,
+                CONNECT_TIMEOUT.as_secs()
+            ))
+        })??;
         {
             let mut m = mirror.write().expect("mirror poisoned");
-            for (name, value) in seeded {
+            for (name, value) in seed {
                 m.insert(name, value);
             }
         }
