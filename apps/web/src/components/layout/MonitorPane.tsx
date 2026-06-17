@@ -696,10 +696,7 @@ function renderValue(cat: VarCategory, v: VarValue): string {
     case "fb":
       return "instance"
     case "text":
-      // ironplc currently puts a numeric slot value here (the body lives
-      // in a separate layout table). Surface that we know it's a string
-      // but can't show contents — beats lying.
-      return "(string)"
+      return v.value
     default:
       return v.value
   }
