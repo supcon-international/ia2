@@ -543,9 +543,20 @@ pub struct EthercatConfig {
     #[serde(default = "default_cycle_us")]
     pub cycle_us: u32,
     /// Distributed-clock mode. `Off` (free-run) by default; set to `sync0`
-    /// for servo drives that need DC to reach OP.
+    /// for servo drives that need DC to reach OP. Individual SubDevices can
+    /// override this via `EthercatSlave.dc_sync` — a mixed bus (servo +
+    /// plain IO coupler) sets `sync0` here and `off` on the coupler, or
+    /// `off` here and `sync0` on the drive.
     #[serde(default)]
     pub dc_sync: EthercatDcSync,
+    /// Iterations of ethercrab's static drift compensation during init — a
+    /// burst of FRMW frames that converges SubDevice clocks before SYNC0
+    /// starts. 0 (default) skips it: short buses come up fine without it,
+    /// and on a non-RT host one lost frame mid-burst aborts init with
+    /// Timeout(Pdu). Raise it (1000–10000) on longer DC buses where clock
+    /// convergence at OP-entry matters.
+    #[serde(default)]
+    pub dc_static_sync_iterations: u32,
     /// Bus topology — describes the SubDevices the MainDevice expects to
     /// find on the ring. Order matters: the `index` here is the auto-
     /// incremented 0-based position on the bus, matching how ethercrab
@@ -580,6 +591,36 @@ pub struct EthercatSlave {
     /// 32-bit product code from ESI/SII. 0 when unknown.
     #[serde(default)]
     pub product_id: u32,
+    /// Per-SubDevice DC override. `None` inherits the device-level
+    /// `dc_sync`. The bus runs the DC path whenever any SubDevice ends up
+    /// `sync0`; SubDevices left at `off` free-run inside that DC bus.
+    #[serde(default)]
+    pub dc_sync: Option<EthercatDcSync>,
+    /// CoE SDO writes applied in PRE-OP on every connect, in listed order,
+    /// before PDO mapping is read and before the SAFE-OP transition.
+    /// This is how drives whose setup doesn't persist in EEPROM get
+    /// configured — e.g. the SV660N needs 0x6060 = 8 (CSP) written at
+    /// each power-up, and PDO remapping (0x1C12/0x1C13) also goes here.
+    #[serde(default)]
+    pub init_sdo: Vec<EthercatSdoInit>,
+}
+
+/// One CoE SDO write executed during PRE-OP at connect. Expedited
+/// transfer only (≤ 4 bytes), which covers mode selection, PDO
+/// remapping, and the rest of the usual startup list.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct EthercatSdoInit {
+    /// CoE object index (e.g. 0x6060 for Modes of Operation).
+    pub index: u16,
+    /// Sub-index within the object.
+    #[serde(default)]
+    pub sub_index: u8,
+    /// Value, written little-endian at `bits` width. Negative values are
+    /// two's-complement; unsigned values up to the width's max also fit.
+    pub value: i64,
+    /// Width of the write on the wire: 8, 16, or 32.
+    pub bits: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

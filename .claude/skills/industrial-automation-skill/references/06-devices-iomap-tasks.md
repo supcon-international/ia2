@@ -92,13 +92,20 @@ The adapter does NOT issue one request per channel. At connect it merges channel
   "nic": "_sim",
   "cycle_us": 1000,
   "dc_sync": "off",
+  "dc_static_sync_iterations": 0,
   "slaves": [
     { "index": 0, "name": "EK1100", "vendor_id": 2, "product_id": 72100946 },
-    { "index": 1, "name": "EL2008", "vendor_id": 2, "product_id": 131608658 }
+    {
+      "index": 1, "name": "SV660N", "vendor_id": 1048576, "product_id": 786701,
+      "dc_sync": "sync0",
+      "init_sdo": [
+        { "index": 24672, "sub_index": 0, "value": 8, "bits": 8 }
+      ]
+    }
   ],
   "channels": [
     {
-      "name": "do_0", "slave_index": 1, "direction": "rx_pdo",
+      "name": "do_0", "slave_index": 0, "direction": "rx_pdo",
       "pdo_index": 28672, "sub_index": 1, "bit_length": 1,
       "data_type": "bool", "pdi_byte_offset": 0, "pdi_bit_offset": 0
     }
@@ -107,7 +114,10 @@ The adapter does NOT issue one request per channel. At connect it merges channel
 ```
 
 - `nic`: `"_sim"` (or `""`) → in-memory simulator, runs anywhere (macOS dev, CI). Any real interface name (`"eth0"`, `"en7"`) → real `ethercrab` master. **Real mode is Linux + `CAP_NET_RAW` only.**
-- `dc_sync` (default `"off"`): Distributed-clock mode. `"off"` = free-run (right for IO couplers / simple slaves). `"sync0"` = enable the SYNC0 pulse (period = `cycle_us`) — **servo drives like the Inovance SV660N need this to reach OP**; without it the SAFE-OP→OP transition times out. Don't set `sync0` on slaves that don't support DC (it'll fail to configure).
+- `dc_sync` (default `"off"`): bus-level Distributed-clock mode. `"off"` = free-run (right for IO couplers / simple slaves). `"sync0"` = enable the SYNC0 pulse (period = `cycle_us`) — **servo drives like the Inovance SV660N need this to reach OP**; without it the SAFE-OP→OP transition times out.
+- `slaves[].dc_sync` (optional, default = inherit the bus-level `dc_sync`): per-SubDevice override for **mixed buses**. A coupler+IO **and** a servo on one ring: leave the bus `"off"` and set just the servo's slave to `"sync0"` (or vice-versa). The bus takes the DC path whenever *any* slave ends up `"sync0"`; slaves left `"off"` free-run inside that DC bus, so a coupler that can't do DC won't block OP.
+- `dc_static_sync_iterations` (default `0`): iterations of ethercrab's init-time static-drift compensation (a burst of FRMW frames). `0` skips it — short buses come up fine, and on a non-RT host one lost frame mid-burst aborts init with `Timeout(Pdu)`. Raise to `1000`–`10000` on longer DC buses where clock convergence at OP-entry matters.
+- `slaves[].init_sdo` (optional): CoE SDO writes applied in **PRE-OP on every connect**, in order, before PDO mapping is read and before SAFE-OP. This is how drives whose setup doesn't persist in EEPROM get configured each power-up — e.g. the SV660N needs `0x6060 = 8` (CSP mode) every boot, and PDO remapping (`0x1C12`/`0x1C13` → `0x16xx`/`0x1Axx`) goes here too. Each entry: `index` (CoE object), `sub_index`, `value` (signed/unsigned, fits `bits`), `bits` (`8` | `16` | `32`). A failed write aborts init — silently running a drive in the wrong mode is worse than not starting. *(Note the JSON uses decimal: `24672` = `0x6060`.)*
 - `direction`: `tx_pdo` (slave→master, i.e. an **input** to your program) | `rx_pdo` (master→slave, an **output**).
 - `data_type`: `bool` `u8` `i8` `u16` `i16` `u32` `i32` `real`.
 - `pdi_byte_offset` / `pdi_bit_offset`: where this entry sits in the slave's process-data image. **Required for real hardware**; you read these off the slave's ESI/datasheet. Sim mode ignores them. `bit_length < 8` channels (digital I/O packed into a byte) use the bit offset.

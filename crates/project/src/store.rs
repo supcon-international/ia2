@@ -1330,6 +1330,7 @@ fn default_config_for(protocol: Protocol) -> ProtocolConfig {
             nic: default_ethercat_nic().into(),
             cycle_us: 1_000,
             dc_sync: crate::types::EthercatDcSync::Off,
+            dc_static_sync_iterations: 0,
             slaves: vec![],
             channels: vec![],
         }),
