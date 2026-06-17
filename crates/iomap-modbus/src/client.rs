@@ -338,7 +338,11 @@ fn plan_spans(channels: &[ModbusChannel]) -> Vec<Span> {
             let end = addr.saturating_add(len);
             match current.as_mut() {
                 Some(span)
-                    if addr <= span.start + span.count + MAX_SPAN_GAP
+                    if addr
+                        <= span
+                            .start
+                            .saturating_add(span.count)
+                            .saturating_add(MAX_SPAN_GAP)
                         && end - span.start <= max =>
                 {
                     span.count = span.count.max(end - span.start);
@@ -802,6 +806,25 @@ mod tests {
         assert_eq!(spans[0].count, 8); // 0..=7
         assert_eq!(spans[1].start, 1000);
         assert_eq!(spans[1].count, 1);
+    }
+
+    #[test]
+    fn spans_plan_without_overflow_at_top_of_address_space() {
+        // Registers densely packed near the top of the 16-bit address space
+        // (gaps ≤ MAX_SPAN_GAP) used to overflow `span.start + span.count +
+        // MAX_SPAN_GAP` (u16): debug builds panicked, release wrapped and
+        // mis-merged. With saturating adds the plan is computed cleanly.
+        let chans = vec![
+            reg("a", 65500, ModbusDataType::U16, ModbusWordOrder::HiLo),
+            reg("b", 65507, ModbusDataType::U16, ModbusWordOrder::HiLo),
+            reg("c", 65535, ModbusDataType::U16, ModbusWordOrder::HiLo),
+        ];
+        let spans = plan_spans(&chans); // must not panic
+                                        // 65500 and 65507 are within MAX_SPAN_GAP → one span; 65535 is a
+                                        // 28-register gap away → its own span.
+        assert_eq!(spans.len(), 2, "{spans:?}");
+        assert_eq!(spans[0].start, 65500);
+        assert_eq!(spans[1].start, 65535);
     }
 
     #[test]
