@@ -725,6 +725,11 @@ function EthercatDeviceEditor({
           name: `slave_${nextIndex}`,
           vendor_id: 0,
           product_id: 0,
+          // Per-slave DC override (null = inherit device dc_sync) and
+          // startup SDO writes — default to "none" so a plain coupler
+          // needs no extra config; servos set these via the JSON editor.
+          dc_sync: null,
+          init_sdo: [],
         },
       ],
     })
