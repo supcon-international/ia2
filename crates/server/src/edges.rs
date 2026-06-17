@@ -511,6 +511,16 @@ pub async fn deploy_to_edge(
     })
 }
 
+/// Quote `s` as a single shell word using single quotes, which disable
+/// all expansion. Unlike Rust's `{:?}` Debug formatting — whose
+/// double-quote escaping still lets `$(…)` / backticks run — this is safe
+/// for interpolating arbitrary values into a remote shell script. An
+/// embedded single quote is closed, escaped, and reopened (`'\''`), the
+/// same trick `post_edge_runtime` uses for the curl body.
+fn sh_squote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
 /// Build the shell snippet that runs on the edge. Reads the project
 /// tarball from stdin, extracts into a timestamped version dir, swaps
 /// the `current` symlink atomically (rename(2) of a temp symlink), and
@@ -522,16 +532,23 @@ fn remote_deploy_script(
     binary_basename: Option<&str>,
 ) -> String {
     let bin_swap = match binary_basename {
-        Some(name) => format!(
-            "if [ -f \"$DEST/{name}\" ]; then\n  chmod +x \"$DEST/{name}\"\n  mv \"$DEST/{name}\" \"$DEST/runtime\"\nfi\n",
-            name = name,
-        ),
+        Some(name) => {
+            let bin = sh_squote(name);
+            format!(
+                "if [ -f \"$DEST/\"{bin} ]; then\n  chmod +x \"$DEST/\"{bin}\n  mv \"$DEST/\"{bin} \"$DEST/runtime\"\nfi\n",
+            )
+        }
         None => String::new(),
     };
+    // Single-quote every value that lands in the remote script. `{:?}`
+    // (Debug) is NOT shell quoting: it escapes `"`/`\` but leaves `$(…)`
+    // and backticks live inside the resulting double-quoted assignment.
+    let install_dir = sh_squote(install_dir);
+    let project_basename = sh_squote(project_basename);
     format!(
         r#"set -euo pipefail
-INSTALL_DIR={install_dir:?}
-PROJECT={project_basename:?}
+INSTALL_DIR={install_dir}
+PROJECT={project_basename}
 TS=$(date -u +%Y-%m-%dT%H-%M-%SZ)
 DEST="$INSTALL_DIR/versions/$TS"
 mkdir -p "$DEST"
@@ -684,4 +701,30 @@ fn first_line(s: &str) -> &str {
         .find(|l| !l.trim().is_empty())
         .unwrap_or("")
         .trim_end()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sh_squote_neutralizes_command_substitution() {
+        assert_eq!(sh_squote("/opt/ia2"), "'/opt/ia2'");
+        // `$(…)` and backticks are inert inside single quotes.
+        assert_eq!(sh_squote("/opt/$(reboot)"), "'/opt/$(reboot)'");
+        // an embedded single quote is closed, escaped, reopened.
+        assert_eq!(sh_squote("a'b"), r"'a'\''b'");
+    }
+
+    #[test]
+    fn deploy_script_keeps_metachars_single_quoted() {
+        let s = remote_deploy_script("/opt/$(reboot)", "proj$(touch /tmp/x)", Some("rt`whoami`"));
+        // Dangerous values appear only inside single-quoted words, so the
+        // remote shell treats them as literals rather than evaluating them.
+        assert!(s.contains("INSTALL_DIR='/opt/$(reboot)'"), "{s}");
+        assert!(s.contains("PROJECT='proj$(touch /tmp/x)'"), "{s}");
+        assert!(s.contains(r"'rt`whoami`'"), "{s}");
+        // The pre-fix bug: the value inside a double-quoted assignment.
+        assert!(!s.contains(r#"INSTALL_DIR="/opt/$(reboot)""#), "{s}");
+    }
 }
