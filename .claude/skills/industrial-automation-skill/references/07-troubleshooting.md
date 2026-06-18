@@ -64,6 +64,17 @@ Each entry: the symptom you'll see, the cause, the fix.
 **Cause:** they want control back.
 **Fix:** stop. Don't reopen a session and keep going. Ask what they want.
 
+## EtherCAT (real mode)
+
+### `init_single_group: Timeout(Pdu)` and/or `failed to decode raw PDU data`
+The NIC isn't dedicated to EtherCAT. On NetworkManager hosts the usual cause is NM still managing the port — its periodic DHCP/activation corrupts raw L2 frames and flaps the link. Set the interface `unmanaged` and confirm hardware offloads are off (see `docs/edge-deploy.md` → *Dedicate the NIC to EtherCAT*). Use a separate NIC from your SSH/management link.
+
+### Bus discovers the SubDevice but never reaches OP; drive shows a comm fault (e.g. `EE`-class)
+A servo can wedge in a half-configured state after an init that aborted mid-configuration. **Power-cycle the drive**, let its panel reach idle, then start the runtime once cleanly. Also confirm the drive has `dc_sync = "sync0"` (servo drives need DC SYNC0 to reach OP) — set it per-device, or per-SubDevice on a mixed servo + IO bus.
+
+### `init sdo write … : object does not exist in the object directory`
+An `init_sdo` entry targets a CoE object the drive doesn't have. A failed startup SDO aborts init by design (better than silently running a mis-configured drive) — drop or fix that entry. Example: the Inovance SV660N has no `0x6080` (max motor speed); cap torque via `0x6072` and limit speed in your program instead.
+
 ## Known limits (not bugs — design constraints today)
 
 - **One PROGRAM per run.** ironplc codegen limitation. Multi-PROGRAM scheduling is rejected with a clear error.
