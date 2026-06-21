@@ -144,6 +144,39 @@ this PDO entry within the SubDevice's input or output PDI region. The
 device editor surfaces these alongside the CoE `pdo_index` / `sub_index`
 fields. They default to 0 for back-compat with sim-only configs.
 
+### Dedicate the NIC to EtherCAT
+
+EtherCAT is raw Layer-2 with no IP. The interface must be left alone by
+the OS network stack and have hardware offloads off — otherwise frames
+get corrupted and you'll see `init_single_group: Timeout(Pdu)` at startup
+and `failed to decode raw PDU data` mid-run.
+
+On a NetworkManager host (most Ubuntu/Debian edges) this is the common
+gotcha: NM keeps the EtherCAT port "managed", and its periodic
+DHCP/activation puts non-EtherCAT traffic on the wire and flaps the link
+out from under the master. **Set the port unmanaged:**
+
+```sh
+# one-off (until reboot or NM restart)
+sudo nmcli device set enp2s0 managed no
+# persistent
+printf '[keyfile]\nunmanaged-devices=interface-name:enp2s0\n' \
+  | sudo tee /etc/NetworkManager/conf.d/99-ethercat.conf
+sudo systemctl reload NetworkManager
+sudo ip link set enp2s0 up      # raw L2 needs the link up — no IP
+```
+
+Also disable the NIC's hardware offloads — checksum / segmentation
+offload mangles raw L2 frames:
+
+```sh
+sudo ethtool -K enp2s0 rx off tx off gso off gro off lro off tso off
+```
+
+(Some may report `[fixed]` and can't be changed — that's fine; verify
+with `ethtool -k enp2s0`.) Use a **separate NIC** for EtherCAT from the
+one carrying your SSH / management traffic.
+
 ## Caveats
 
 - **No EtherCAT hardware on the dev machine**: leave `nic = "_sim"`. The
@@ -156,7 +189,11 @@ fields. They default to 0 for back-compat with sim-only configs.
 - **Real-time**: stock Linux gives soft-RT only; scan jitter is in the
   millisecond range. Acceptable for 10–100 ms cycles, not for sub-ms
   hard real-time control.
-- **DC sync / ESI auto-mapping**: not implemented yet. The cyclic loop
-  uses ethercrab's free-running exchange, and PDO byte offsets must be
-  hand-authored. Adequate for digital I/O and slow analog; not for
-  motion control. Future work.
+- **DC distributed clocks**: supported via `dc_sync = "sync0"` (per device,
+  with an optional per-SubDevice override for mixed servo + IO buses) —
+  servo drives need it to reach OP. Startup CoE writes go through
+  `init_sdo` (e.g. `0x6060 = 8` for CSP). CiA 402 CSP motion, including
+  electronic gearing, has been run on real hardware.
+- **ESI auto-mapping**: not implemented. PDO byte offsets are hand-authored
+  — read them off the connect-time PDO-mapping log (the runtime dumps each
+  `0x1C12`/`0x1C13` entry with its object index and byte offset).
