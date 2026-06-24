@@ -3625,6 +3625,7 @@ dependencies = [
  "axum",
  "clap",
  "futures-util",
+ "iomap-ethercat",
  "iomap-modbus",
  "ironplc-bridge",
  "libc",

@@ -22,6 +22,7 @@ thiserror.workspace = true
 clap.workspace = true
 
 ironplc-bridge = { path = "../ironplc-bridge" }
+iomap-ethercat = { path = "../iomap-ethercat" }
 project = { path = "../project" }
 iomap-modbus = { path = "../iomap-modbus" }
 toml.workspace = true

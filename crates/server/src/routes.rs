@@ -28,9 +28,9 @@ use ironplc_bridge::{
     VariableInfo,
 };
 use project::{
-    default_projects_dir, load_last_opened, save_last_opened, Device, Edge, IoMap, MigrationReport,
-    Pou, PouFile, PouLanguage, PouType, ProgramInstance, ProjectListing, ProjectManifest,
-    ProjectStore, ProjectTree, Protocol, Task, Tasks,
+    default_projects_dir, load_last_opened, save_last_opened, Device, Edge, EthercatBringup, IoMap,
+    MigrationReport, Pou, PouFile, PouLanguage, PouType, ProgramInstance, ProjectListing,
+    ProjectManifest, ProjectStore, ProjectTree, Protocol, ProtocolConfig, Task, Tasks,
 };
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -894,6 +894,89 @@ pub async fn update_device(
         MutationDetail::DeviceUpserted { name },
     );
     Ok(Json(RunResponse { ok: true }))
+}
+
+/// Body for `POST /api/devices/{name}/esi-assemble`: the module idents the
+/// coupler reports (object `0xF050`), in slot order. Hex or decimal on the
+/// CLI side; plain `u32` here.
+#[derive(Debug, Deserialize)]
+pub struct EsiAssembleRequest {
+    pub detected: Vec<u32>,
+}
+
+/// Assemble a modular EtherCAT coupler's channels from its ESI file +
+/// detected modules, and write them onto the device.
+///
+/// The device must be EtherCAT with `bringup = esi_modular`; its `esi_path`
+/// is read from the project directory, the process image is assembled (see
+/// the `esi` crate), and the resulting channels REPLACE the device's
+/// channel list — the ESI is authoritative for a modular coupler, so the
+/// channels are derived, not hand-entered. Returns the updated device.
+pub async fn esi_assemble_device(
+    State(state): State<AppState>,
+    project: ProjectName,
+    AxumPath(name): AxumPath<String>,
+    Json(req): Json<EsiAssembleRequest>,
+) -> Result<Json<Device>, ApiError> {
+    let updated = with_project(&state, &project, |store| {
+        let mut device = store.read_device(&name)?;
+
+        let cfg = match &device.config {
+            ProtocolConfig::Ethercat(c) => c,
+            _ => {
+                return Err(ApiError::BadRequest(format!(
+                    "device '{name}' is not an EtherCAT device"
+                )))
+            }
+        };
+        let esi_path = match &cfg.bringup {
+            EthercatBringup::EsiModular { esi_path } => esi_path.clone(),
+            EthercatBringup::Auto => {
+                return Err(ApiError::BadRequest(format!(
+                    "device '{name}' bring-up is `auto`; set it to `esi_modular` first"
+                )))
+            }
+        };
+        if esi_path.trim().is_empty() {
+            return Err(ApiError::BadRequest(format!(
+                "device '{name}' has no ESI file path set"
+            )));
+        }
+
+        // Resolve the project-relative ESI path under the project root,
+        // rejecting traversal outside it.
+        let full = store.root().join(&esi_path);
+        if !full.starts_with(store.root()) {
+            return Err(ApiError::BadRequest(format!(
+                "ESI path '{esi_path}' escapes the project directory"
+            )));
+        }
+        let xml = std::fs::read_to_string(&full)
+            .map_err(|e| ApiError::BadRequest(format!("cannot read ESI file '{esi_path}': {e}")))?;
+
+        let channels = iomap_ethercat::assemble_channels(&xml, &req.detected)
+            .map_err(|e| ApiError::BadRequest(format!("ESI assembly failed: {e}")))?;
+
+        if let ProtocolConfig::Ethercat(c) = &mut device.config {
+            c.channels = channels;
+        }
+        store.write_device(&device)?;
+        Ok(device)
+    })?;
+
+    emit_mutation(
+        &state,
+        &project,
+        topic::DEVICES,
+        MutationDetail::DeviceUpserted { name: name.clone() },
+    );
+    emit_mutation(
+        &state,
+        &project,
+        topic::device(&name),
+        MutationDetail::DeviceUpserted { name },
+    );
+    Ok(Json(updated))
 }
 
 pub async fn delete_device(

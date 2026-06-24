@@ -230,6 +230,12 @@ async fn main() -> anyhow::Result<()> {
                 .put(routes::update_device)
                 .delete(routes::delete_device),
         )
+        // Assemble a modular EtherCAT coupler's channels from its ESI +
+        // the modules it reports (0xF050).
+        .route(
+            "/api/devices/{name}/esi-assemble",
+            post(routes::esi_assemble_device),
+        )
         // Edges (deploy targets)
         .route("/api/edges", post(routes::create_edge))
         .route("/api/edges/folders", post(routes::create_edge_folder))

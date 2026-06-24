@@ -124,6 +124,23 @@ The adapter does NOT issue one request per channel. At connect it merges channel
 - `pdo_index` / `sub_index`: CoE object dictionary coordinates — informational/documentation in this version; the cyclic exchange uses the byte/bit offsets.
 - **Capacity**: the master is sized for plant-scale buses — up to **128 subdevices / 4 KiB process image** per device (a 1000-point AI/AO/DI/DO project uses ~660 B). One device = one NIC = one bus; use multiple devices for multiple NICs.
 
+### Bring-up mode (`bringup`)
+
+Default is `{ "mode": "auto" }` — discover process data from the device's runtime CoE PDO-assignment objects (`0x1C12`/`0x1C13`). That works for fixed-PDO servos and slices.
+
+**ESI-driven modular couplers** (whose assembled module PDOs never appear over runtime CoE — `0x1C12` read-only, `0xF030` absent) need `{ "mode": "esi_modular", "esi_path": "esi/coupler.xml" }`. The process image is built from the device's ESI (.xml) file + the modules it reports (object `0xF050`), not hand-entered. Workflow:
+
+```bash
+# 1. drop the vendor ESI into the project: <project>/esi/coupler.xml
+# 2. create the device with bringup = esi_modular (esi_path is project-relative)
+# 3. assemble channels from the ESI + the modules present, in slot order:
+cs device esi-assemble coupler --idents 0x10,0x20,0x30   # hex or decimal
+```
+
+`esi-assemble` parses the ESI, looks each detected ident up in the module table, concatenates the modules' PDO entries into the input/output images (tracking byte/bit offsets), and **replaces** the device's `channels` with the result — so the UI shows them and iomap can bind them. The idents come from the coupler's `0xF050` scan or the modules you physically installed. Channel names are `m<slot>_<entry>` (slot-namespaced so duplicate module types stay unique).
+
+> Real-bus cyclic I/O for `esi_modular` (master-programmed SyncManager/FMMU + logical-RW exchange) is validated against the physical coupler separately; the parsing, assembly, and offline channel authoring above are hardware-independent and the recommended way to author + verify the layout first (run it in `nic: "_sim"` to exercise the program against the assembled channels).
+
 ---
 
 ## IoMap

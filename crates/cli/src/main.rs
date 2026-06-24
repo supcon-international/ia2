@@ -531,6 +531,21 @@ enum DeviceCmd {
         #[arg(long, default_value = "http://127.0.0.1:3001")]
         server: String,
     },
+    /// Assemble a modular EtherCAT coupler's channels from its ESI file
+    /// (the device's `bringup.esi_path`) + the modules it reports. The
+    /// device must be EtherCAT with `bringup = esi_modular`. The detected
+    /// module idents you pass (slot order) REPLACE the device's channel
+    /// list — for a modular coupler the ESI is authoritative.
+    EsiAssemble {
+        name: String,
+        /// Comma-separated module idents in slot order — hex (`0x10`) or
+        /// decimal (`16`). Read these off the coupler's `0xF050` scan, or
+        /// the modules you've physically installed.
+        #[arg(long)]
+        idents: String,
+        #[arg(long, default_value = "http://127.0.0.1:3001")]
+        server: String,
+    },
 }
 
 // =================================================================
@@ -1520,7 +1535,48 @@ fn cmd_device(cmd: DeviceCmd) -> Result<i32> {
             println!("{}", serde_json::to_string_pretty(&resp)?);
             Ok(0)
         }
+        DeviceCmd::EsiAssemble {
+            name,
+            idents,
+            server,
+        } => {
+            let detected = idents
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(parse_module_ident)
+                .collect::<Result<Vec<u32>>>()?;
+            let body = serde_json::json!({ "detected": detected });
+            let resp = post_json(
+                &format!("{server}/api/devices/{}/esi-assemble", url_encode(&name)),
+                &body,
+            )?;
+            // Summarize the assembled channels. The Device JSON is flat —
+            // protocol fields (including `channels`) sit at the top level.
+            let n = resp
+                .get("channels")
+                .and_then(|c| c.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            println!(
+                "✓ assembled {n} channels from ESI for '{name}' ({} modules)",
+                detected.len()
+            );
+            println!("{}", serde_json::to_string_pretty(&resp)?);
+            Ok(0)
+        }
     }
+}
+
+/// Parse a module ident in `0x..` hex or decimal form.
+fn parse_module_ident(s: &str) -> Result<u32> {
+    let t = s.trim();
+    let parsed = if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        u32::from_str_radix(h, 16)
+    } else {
+        t.parse::<u32>()
+    };
+    parsed.map_err(|e| anyhow::anyhow!("bad module ident {s:?}: {e}"))
 }
 
 // =================================================================
@@ -2292,6 +2348,9 @@ fn announce_target(cmd: &Command) -> Option<(&str, &'static str)> {
         Command::Device(DeviceCmd::Create { server, .. }) => Some((server, "device create")),
         Command::Device(DeviceCmd::Set { server, .. }) => Some((server, "device set")),
         Command::Device(DeviceCmd::Delete { server, .. }) => Some((server, "device delete")),
+        Command::Device(DeviceCmd::EsiAssemble { server, .. }) => {
+            Some((server, "device esi-assemble"))
+        }
 
         Command::Edge(EdgeCmd::List { server, .. }) => Some((server, "edge list")),
         Command::Edge(EdgeCmd::Get { server, .. }) => Some((server, "edge get")),

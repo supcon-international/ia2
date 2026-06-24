@@ -845,6 +845,59 @@ function EthercatDeviceEditor({
                 configure.
               </span>
             </div>
+            <Field label="Bring-up">
+              <Select
+                value={draft.bringup?.mode ?? "auto"}
+                onValueChange={(v) =>
+                  update({
+                    bringup:
+                      v === "esi_modular"
+                        ? {
+                            mode: "esi_modular",
+                            esi_path:
+                              draft.bringup?.mode === "esi_modular"
+                                ? draft.bringup.esi_path
+                                : "",
+                          }
+                        : { mode: "auto" },
+                  })
+                }
+              >
+                <SelectTrigger className="h-9 w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="auto">Auto (CoE PDO discovery)</SelectItem>
+                  <SelectItem value="esi_modular">ESI modular</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+            {draft.bringup?.mode === "esi_modular" && (
+              <Field label="ESI file (project-relative)">
+                <Input
+                  value={draft.bringup.esi_path}
+                  placeholder="esi/coupler.xml"
+                  onChange={(e) =>
+                    update({
+                      bringup: { mode: "esi_modular", esi_path: e.target.value },
+                    })
+                  }
+                />
+              </Field>
+            )}
+            {draft.bringup?.mode === "esi_modular" && (
+              <div className="col-span-2 flex items-start gap-2 text-[11px] text-muted-foreground">
+                <Info className="mt-0.5 size-3 shrink-0" />
+                <span>
+                  <span className="font-mono">ESI modular</span> builds the
+                  process image from the device's ESI file + the modules it
+                  reports at <span className="font-mono">0xF050</span> — for
+                  modular couplers whose module PDOs never appear over runtime
+                  CoE. Channels are assembled from the ESI rather than
+                  hand-entered.
+                </span>
+              </div>
+            )}
           </div>
         </section>
 
