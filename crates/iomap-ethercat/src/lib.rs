@@ -16,6 +16,7 @@
 //! them identically with Modbus devices.
 
 mod bits;
+mod esi_map;
 mod real;
 mod sim;
 mod validate;
@@ -23,6 +24,13 @@ mod validate;
 use async_trait::async_trait;
 use iocore::{ChannelValue, IoDevice, IoError};
 use project::EthercatConfig;
+
+/// Assemble a modular coupler's channel list from its ESI XML + detected
+/// module idents (see [`esi_map::assemble_channels`]). Re-exported so the
+/// discovery layer (bridge / server) can turn an imported ESI + a `0xF050`
+/// scan into bindable channels without depending on the `esi` crate
+/// directly.
+pub use esi_map::assemble_channels;
 
 /// Sentinel NIC name that selects the in-memory sim path. Anything else
 /// is treated as a real network interface name.
@@ -156,6 +164,7 @@ mod tests {
     fn sim_config_with_two_outputs_and_one_input() -> EthercatConfig {
         EthercatConfig {
             nic: SIM_NIC.into(),
+            bringup: project::EthercatBringup::Auto,
             cycle_us: 1_000,
             dc_sync: project::EthercatDcSync::Off,
             dc_static_sync_iterations: 0,

@@ -1328,6 +1328,7 @@ fn default_config_for(protocol: Protocol) -> ProtocolConfig {
         }),
         Protocol::Ethercat => ProtocolConfig::Ethercat(crate::types::EthercatConfig {
             nic: default_ethercat_nic().into(),
+            bringup: crate::types::EthercatBringup::Auto,
             cycle_us: 1_000,
             dc_sync: crate::types::EthercatDcSync::Off,
             dc_static_sync_iterations: 0,

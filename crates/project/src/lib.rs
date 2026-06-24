@@ -37,12 +37,12 @@ pub use paths::{
 pub use sfc::{SfcAction, SfcProgram, SfcQualifier, SfcStep, SfcTransition};
 pub use store::{is_library_slug, MigrationReport, ProjectStore, LIBRARY_SLUG_PREFIX};
 pub use types::{
-    Device, Direction, Edge, EthercatChannel, EthercatConfig, EthercatDataType, EthercatDcSync,
-    EthercatPdoDirection, EthercatSdoInit, EthercatSlave, IoMap, Mapping, ModbusChannel,
-    ModbusChannelKind, ModbusConfig, ModbusDataBits, ModbusDataType, ModbusParity, ModbusRtuParams,
-    ModbusStopBits, ModbusTcpParams, ModbusTransport, ModbusWordOrder, MqttNorthbound,
-    NorthboundConfig, OpcuaAccess, OpcuaAuth, OpcuaChannel, OpcuaConfig, OpcuaDataType,
-    OpcuaSecurity, Pou, PouDecl, PouFile, PouFileSource, PouLanguage, PouType, ProgramInstance,
-    ProjectListing, ProjectManifest, ProjectTree, ProjectTreeSkeleton, Protocol, ProtocolConfig,
-    Task, Tasks,
+    Device, Direction, Edge, EthercatBringup, EthercatChannel, EthercatConfig, EthercatDataType,
+    EthercatDcSync, EthercatPdoDirection, EthercatSdoInit, EthercatSlave, IoMap, Mapping,
+    ModbusChannel, ModbusChannelKind, ModbusConfig, ModbusDataBits, ModbusDataType, ModbusParity,
+    ModbusRtuParams, ModbusStopBits, ModbusTcpParams, ModbusTransport, ModbusWordOrder,
+    MqttNorthbound, NorthboundConfig, OpcuaAccess, OpcuaAuth, OpcuaChannel, OpcuaConfig,
+    OpcuaDataType, OpcuaSecurity, Pou, PouDecl, PouFile, PouFileSource, PouLanguage, PouType,
+    ProgramInstance, ProjectListing, ProjectManifest, ProjectTree, ProjectTreeSkeleton, Protocol,
+    ProtocolConfig, Task, Tasks,
 };

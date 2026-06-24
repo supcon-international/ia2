@@ -1225,6 +1225,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "esi"
+version = "0.0.1"
+dependencies = [
+ "quick-xml",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ethercrab"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1944,6 +1953,7 @@ name = "iomap-ethercat"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "esi",
  "ethercrab",
  "iocore",
  "project",
@@ -3055,6 +3065,16 @@ name = "quick-error"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1d01941d82fa2ab50be1e79e6714289dd7cde78eba4c074bc5a4374f650dfe0"
+
+[[package]]
+name = "quick-xml"
+version = "0.40.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2474bd2e5029e7ccb6abb2ba48cf2383a333851dedf495901544281590c7da7f"
+dependencies = [
+ "memchr",
+ "serde",
+]
 
 [[package]]
 name = "quote"

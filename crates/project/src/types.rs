@@ -531,6 +531,29 @@ pub enum EthercatDcSync {
     Sync0,
 }
 
+/// How the EtherCAT layer brings a device's bus to OP and discovers its
+/// process data.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum EthercatBringup {
+    /// Read the device's runtime CoE PDO-assignment objects
+    /// (`0x1C12`/`0x1C13`) to discover the process image. The default;
+    /// works for fixed-PDO servos and slices that publish their mapping
+    /// over CoE.
+    #[default]
+    Auto,
+    /// ESI-driven modular bring-up: build the process image from the
+    /// device's ESI (.xml) file + the modules it reports at `0xF050`,
+    /// programming SyncManagers/FMMUs directly. For modular couplers whose
+    /// assembled module PDOs never appear over runtime CoE (`0x1C12`
+    /// read-only, `0xF030` absent), so auto-discovery has nothing to read.
+    EsiModular {
+        /// Project-relative path to the device's ESI (.xml) file.
+        esi_path: String,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct EthercatConfig {
@@ -538,6 +561,10 @@ pub struct EthercatConfig {
     /// Persisted so the IDE can preserve the user's intent even on hosts
     /// where the NIC isn't currently up.
     pub nic: String,
+    /// Bring-up strategy. `Auto` (CoE PDO-assignment discovery) by default;
+    /// `EsiModular` for modular couplers that need ESI-driven assembly.
+    #[serde(default)]
+    pub bringup: EthercatBringup,
     /// SYNC0 cycle time in microseconds (also the free-run scan period when
     /// `dc_sync` is `Off`). Defaults to 1 ms (1 kHz).
     #[serde(default = "default_cycle_us")]

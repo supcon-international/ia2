@@ -341,6 +341,7 @@ mod tests {
             name: name.into(),
             config: ProtocolConfig::Ethercat(EthercatConfig {
                 nic: "_sim".into(),
+                bringup: Default::default(),
                 cycle_us: 1_000,
                 dc_sync: EthercatDcSync::Off,
                 dc_static_sync_iterations: 0,

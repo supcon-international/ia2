@@ -1,0 +1,17 @@
+[package]
+name = "esi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Standalone EtherCAT Slave Information (ESI / ETG.2000) parser + modular
+# process-image assembler. Deliberately has NO fieldbus dependency
+# (no ethercrab, no project) so the whole ESI subset can be parsed and the
+# process image assembled and unit-tested entirely off-hardware. The
+# `iomap-ethercat` crate maps this crate's neutral output onto its own
+# channel/PDI types at the boundary.
+[dependencies]
+serde.workspace = true
+quick-xml.workspace = true
+thiserror.workspace = true
