@@ -47,7 +47,7 @@ Now just ask your agent to build a PLC program — it will author ST / LD / FBD 
 | **`apps/web/`** | React 19 + Vite + TanStack Router + Tailwind 4 | The IDE itself. ST / LD / FBD / SFC editors, runtime Monitor, project tree, IO mapping. Single SPA, serves identically in the desktop shell and the dev `vite` browser. |
 | **`crates/server/`** | Rust + axum + tower | HTTP backend (port 3001 dev, random in desktop). REST + SSE. Owns the project, dispatches to ironplc-bridge, schedules tasks. |
 | **`crates/cli/`** | Rust + clap + ureq | The `cs` binary — agent-first command-line. Static analysis, project CRUD, runtime debug. See `cs --help`. |
-| **`crates/ironplc-bridge/`** | Rust | Wraps vendored [ironplc](https://github.com/ironplc/ironplc) compiler + VM. Adds LD / FBD / SFC → ST transpilers + diagnostics enrichment. |
+| **`crates/ironplc-bridge/`** | Rust | Wraps [ironplc](https://github.com/ironplc/ironplc) compiler + VM. Adds LD / FBD / SFC → ST transpilers + diagnostics enrichment. |
 | **`crates/runtime/`** | Rust | Headless edge runtime (`ia2-runtime` binary). Same scan loop as the IDE-side bridge, plus a small HTTP monitor (health / status / logs / discover) the server reaches over SSH — no LSP, no CORS, no REST project API. Designed for Linux edge boxes. |
 | **`crates/project/`** | Rust | On-disk project schema (POU files, devices, edges, iomap, tasks). |
 | **`crates/iomap-modbus/` `iomap-ethercat/` `iomap-opcua/`** | Rust | I/O adapters: Modbus TCP **and RTU/serial** (tokio-modbus + tokio-serial), EtherCAT (ethercrab), **OPC UA client** (async-opcua) for supervising an existing DCS. Edge runtime publishes **northbound MQTT** (rumqttc) to supOS/Tier0. |
@@ -224,4 +224,4 @@ Read `MEMORY/principles.md` first if you're contributing. The headline:
 
 ## License
 
-Apache-2.0. Vendored `ironplc/` is also Apache-2.0.
+Apache-2.0. As the beautiful upstream `ironplc/` software developed by Mr.Garret Fick is also Apache-2.0.
