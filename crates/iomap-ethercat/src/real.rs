@@ -236,6 +236,22 @@ enum InitResult {
 
 impl RealEthercat {
     pub async fn connect(name: String, config: &EthercatConfig) -> Result<Self, IoError> {
+        // ESI-modular real-bus cyclic bring-up (master-programmed
+        // SyncManager/FMMU + logical-RW exchange, bypassing the auto
+        // PDO-assignment path) is validated against the physical coupler
+        // before it ships — we don't run un-hardware-verified EtherCAT
+        // cyclic I/O on a live control bus. The ESI parse/assembly and the
+        // offline channel authoring (`cs device esi-assemble`) work today;
+        // author + verify the program in sim (`nic: "_sim"`) meanwhile.
+        if matches!(config.bringup, project::EthercatBringup::EsiModular { .. }) {
+            return Err(IoError::Connect(
+                "ESI-modular real-bus bring-up is not yet wired (issue #11): assemble channels \
+                 with `cs device esi-assemble` and validate the program in sim (nic \"_sim\") — \
+                 the real-bus SM/FMMU/LRW path lands after per-coupler hardware validation"
+                    .into(),
+            ));
+        }
+
         // Validate channels up front (same shape as sim).
         let known_slaves: std::collections::HashSet<u16> =
             config.slaves.iter().map(|s| s.index).collect();
