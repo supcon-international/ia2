@@ -321,6 +321,94 @@ pub async fn list_projects() -> Json<Vec<ProjectListing>> {
     Json(scan_projects())
 }
 
+/// One sub-directory in a filesystem-browse listing.
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct FsEntry {
+    pub name: String,
+    pub path: String,
+    /// `true` when this directory is itself an IA2 project (contains
+    /// `project.toml`), so the UI can offer to open it directly.
+    pub is_project: bool,
+}
+
+/// A browsable directory: where we are, the parent to go up to, and the
+/// child directories. Used by the "Open project" folder picker — a browser
+/// can't surface a native OS path dialog, so the local server (which has
+/// filesystem access) lists directories for the UI to navigate.
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct FsListing {
+    pub path: String,
+    pub parent: Option<String>,
+    /// `true` when `path` itself is an IA2 project directory.
+    pub is_project: bool,
+    pub entries: Vec<FsEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BrowseQuery {
+    /// Absolute directory to list. Empty/missing → the default projects
+    /// directory (`~/Documents/IA2`).
+    pub path: Option<String>,
+}
+
+/// List the sub-directories of `path` (default: the projects dir) for the
+/// Open-project folder picker. Directories only — never file contents — and
+/// dotfiles are hidden. A non-existent / non-directory path falls back to
+/// the projects dir so the picker always lands somewhere sane.
+pub async fn fs_browse(Query(q): Query<BrowseQuery>) -> Json<FsListing> {
+    let dir = match q.path.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(p) => {
+            let pb = PathBuf::from(p);
+            if pb.is_dir() {
+                pb
+            } else {
+                default_projects_dir()
+            }
+        }
+        None => default_projects_dir(),
+    };
+
+    let parent = dir
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty());
+
+    let mut entries = Vec::new();
+    if let Ok(rd) = fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_dir() {
+                continue;
+            }
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                continue; // hide dotfiles
+            }
+            let is_project = p.join("project.toml").exists();
+            entries.push(FsEntry {
+                name,
+                path: p.to_string_lossy().to_string(),
+                is_project,
+            });
+        }
+    }
+    // Project dirs first, then alphabetical.
+    entries.sort_by(|a, b| {
+        b.is_project
+            .cmp(&a.is_project)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+
+    Json(FsListing {
+        is_project: dir.join("project.toml").exists(),
+        path: dir.to_string_lossy().to_string(),
+        parent,
+        entries,
+    })
+}
+
 pub async fn create_project(
     State(state): State<AppState>,
     Json(req): Json<CreateProjectRequest>,

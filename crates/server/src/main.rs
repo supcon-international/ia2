@@ -182,6 +182,9 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/projects/open", post(routes::open_project))
         .route("/api/projects/close", post(routes::close_project))
+        // Server-side directory browser for the Open-project folder picker
+        // (a browser can't surface a native OS path dialog).
+        .route("/api/fs/browse", get(routes::fs_browse))
         // Returns every project the server currently has open, plus
         // which one is the active fallback. The multi-window IDE
         // calls this on new-window to populate its project picker.

@@ -6,6 +6,7 @@ import type { DeployReport } from "@/types/generated/DeployReport"
 import type { Device } from "@/types/generated/Device"
 import type { Edge } from "@/types/generated/Edge"
 import type { EdgeProbe } from "@/types/generated/EdgeProbe"
+import type { FsListing } from "@/types/generated/FsListing"
 import type { IoMap } from "@/types/generated/IoMap"
 import type { ProjectInfo } from "@/types/generated/ProjectInfo"
 import type { MigrationResponse } from "@/types/generated/MigrationResponse"
@@ -88,6 +89,13 @@ export async function fetchProject(): Promise<ProjectTree | null> {
 
 export async function fetchProjects(): Promise<ProjectListing[]> {
   return jsonOrThrow(await apiFetch(`/api/projects`), "GET /api/projects")
+}
+
+/** Browse a server-side directory for the Open-project folder picker.
+ * Pass no path to start at the default projects dir. */
+export async function browseFs(path?: string): Promise<FsListing> {
+  const q = path ? `?path=${encodeURIComponent(path)}` : ""
+  return jsonOrThrow(await apiFetch(`/api/fs/browse${q}`), `GET /api/fs/browse${q}`)
 }
 
 /** List projects currently OPEN on the server (multi-window picker
