@@ -314,6 +314,37 @@ pub struct ModbusRtuParams {
     /// Modicon / many Chinese inverters actually ship.
     #[serde(default)]
     pub parity: ModbusParity,
+    /// RS485 half-duplex direction control. `None` (default) opens the
+    /// port in plain serial mode — correct for USB adapters with automatic
+    /// (auto-direction) transceivers. `Some` enables the kernel RS485 mode
+    /// (Linux `TIOCSRS485`) so the driver toggles RTS/DE around each frame;
+    /// required by adapters whose transmitter is *RTS-gated* — without it
+    /// the master never actually drives the bus and every request times out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rs485: Option<ModbusRs485>,
+}
+
+/// Linux RS485 (`TIOCSRS485`) direction-control settings for an RTU port.
+/// Only applied on Linux; ignored (with a warning) elsewhere.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ModbusRs485 {
+    /// RTS/DE is asserted *high* while transmitting (`SER_RS485_RTS_ON_SEND`)
+    /// — the common case. Set false for adapters that drive on RTS *low*
+    /// (uses `SER_RS485_RTS_AFTER_SEND` instead).
+    #[serde(default = "default_true")]
+    pub rts_on_send: bool,
+    /// Keep the receiver enabled during transmit (`SER_RS485_RX_DURING_TX`).
+    /// 2-wire adapters echo the master's own bytes; enable so the stack can
+    /// see/skip the echo rather than the kernel muting RX.
+    #[serde(default)]
+    pub rx_during_tx: bool,
+    /// RTS settle delay *before* the frame, in milliseconds (driver enable).
+    #[serde(default)]
+    pub delay_rts_before_send_ms: u32,
+    /// RTS settle delay *after* the frame, in milliseconds (turnaround to RX).
+    #[serde(default)]
+    pub delay_rts_after_send_ms: u32,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS, PartialEq, Eq, Default)]
