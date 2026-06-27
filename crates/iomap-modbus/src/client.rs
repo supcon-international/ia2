@@ -32,6 +32,8 @@ use project::{
     ModbusChannel, ModbusChannelKind, ModbusConfig, ModbusDataBits, ModbusDataType, ModbusParity,
     ModbusStopBits, ModbusTransport, ModbusWordOrder,
 };
+#[cfg(target_os = "linux")]
+use project::ModbusRs485;
 use tokio::sync::{mpsc, oneshot};
 use tokio_modbus::client::{rtu, tcp, Context, Reader, Writer};
 use tokio_modbus::Slave;
@@ -297,9 +299,73 @@ async fn establish(
                     device = p.serial_device
                 ))
             })?;
+            if let Some(rs485) = &p.rs485 {
+                #[cfg(target_os = "linux")]
+                apply_rs485_linux(&stream, rs485).map_err(|e| {
+                    IoError::Connect(format!(
+                        "enabling RS485 mode on {device}: {e}",
+                        device = p.serial_device
+                    ))
+                })?;
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let _ = rs485;
+                    tracing::warn!(
+                        device = %p.serial_device,
+                        "rs485 config ignored: TIOCSRS485 is Linux-only"
+                    );
+                }
+            }
             Ok(rtu::attach_slave(stream, Slave(slave_id)))
         }
     }
+}
+
+/// Enable Linux RS485 mode (`TIOCSRS485`) on the freshly-opened serial fd so
+/// the UART driver toggles RTS/DE around each frame. Required for RTS-gated
+/// RS485 transceivers (common on cheap USB-485 dongles): without it the
+/// transmitter never engages and every Modbus request times out — the byte
+/// stream looks correct in software but nothing is driven onto the bus.
+#[cfg(target_os = "linux")]
+fn apply_rs485_linux(stream: &SerialStream, cfg: &ModbusRs485) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+
+    // linux/serial.h: `struct serial_rs485` is 8 x u32.
+    #[repr(C)]
+    struct SerialRs485 {
+        flags: u32,
+        delay_rts_before_send: u32,
+        delay_rts_after_send: u32,
+        _padding: [u32; 5],
+    }
+    const SER_RS485_ENABLED: u32 = 1 << 0;
+    const SER_RS485_RTS_ON_SEND: u32 = 1 << 1;
+    const SER_RS485_RTS_AFTER_SEND: u32 = 1 << 2;
+    const SER_RS485_RX_DURING_TX: u32 = 1 << 4;
+    const TIOCSRS485: libc::c_ulong = 0x542F;
+
+    let mut flags = SER_RS485_ENABLED;
+    flags |= if cfg.rts_on_send {
+        SER_RS485_RTS_ON_SEND
+    } else {
+        SER_RS485_RTS_AFTER_SEND
+    };
+    if cfg.rx_during_tx {
+        flags |= SER_RS485_RX_DURING_TX;
+    }
+    let rs = SerialRs485 {
+        flags,
+        delay_rts_before_send: cfg.delay_rts_before_send_ms,
+        delay_rts_after_send: cfg.delay_rts_after_send_ms,
+        _padding: [0; 5],
+    };
+    // SAFETY: the fd is open for the duration of the call and `&rs` is a
+    // valid, correctly-sized `struct serial_rs485` argument for TIOCSRS485.
+    let rc = unsafe { libc::ioctl(stream.as_raw_fd(), TIOCSRS485, &rs) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// How many addressable units (registers or bits) a channel occupies.

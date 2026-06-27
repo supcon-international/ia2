@@ -19,3 +19,8 @@ async-trait.workspace = true
 
 iocore = { path = "../iocore" }
 project = { path = "../project" }
+
+# RS485 direction control (TIOCSRS485) is a raw ioctl on the serial fd —
+# Linux-only, so the dep is target-gated. serialport 4.x exposes no rs485 API.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
