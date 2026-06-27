@@ -52,6 +52,7 @@ The transport is a **tagged union** on `kind`. This is the post-RTU schema; old 
 - `stop_bits`: `one` | `two` (default `one`).
 - `parity`: `none` | `even` | `odd` (default `none`).
 - The RTU defaults are 8-N-1, so a minimal `{ "kind":"rtu", "serial_device":"…", "baud_rate":9600 }` is valid input — the other three fields fill in.
+- `rs485` (optional, default off): **Linux half-duplex direction control** (`TIOCSRS485`). Add it when an RTU port opens fine but every request times out with baud/parity/slave/wiring all correct — a **RTS-gated** USB-485 adapter never drives the bus in plain serial mode (the connect error now says so explicitly). Shape: `{ "rts_on_send": true, "rx_during_tx": false, "delay_rts_before_send_ms": 0, "delay_rts_after_send_ms": 0 }`. `rts_on_send` false = drive on RTS *low*; `rx_during_tx` true tolerates 2-wire echo; the delays are turnaround settle times. Linux-only (no-op + warning elsewhere); omit entirely for auto-direction adapters. If it's still silent after enabling, the adapter/coupler itself is suspect — prove the bus with a known-good auto-direction dongle or a separate Modbus master.
 
 ### Channel `kind` semantics
 | kind | Modbus function | read | write |

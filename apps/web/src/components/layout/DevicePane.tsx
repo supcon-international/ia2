@@ -452,6 +452,7 @@ function ModbusTransportEditor({
           data_bits: transport.data_bits,
           stop_bits: transport.stop_bits,
           parity: transport.parity,
+          rs485: transport.rs485,
         }
       : {
           serial_device: defaultSerialPath(),
@@ -459,6 +460,7 @@ function ModbusTransportEditor({
           data_bits: "eight" as ModbusDataBits,
           stop_bits: "one" as ModbusStopBits,
           parity: "none" as ModbusParity,
+          rs485: null,
         },
   )
 
@@ -474,6 +476,7 @@ function ModbusTransportEditor({
         data_bits: transport.data_bits,
         stop_bits: transport.stop_bits,
         parity: transport.parity,
+        rs485: transport.rs485,
       })
     }
   }, [transport])
@@ -617,16 +620,126 @@ function ModbusTransportEditor({
               </SelectContent>
             </Select>
           </Field>
+          <Field label="RS485 direction (Linux)">
+            <Select
+              value={transport.rs485 ? "on" : "off"}
+              onValueChange={(v) =>
+                onTransport({
+                  ...transport,
+                  rs485:
+                    v === "on"
+                      ? (transport.rs485 ?? {
+                          rts_on_send: true,
+                          rx_during_tx: false,
+                          delay_rts_before_send_ms: 0,
+                          delay_rts_after_send_ms: 0,
+                        })
+                      : null,
+                })
+              }
+            >
+              <SelectTrigger className="h-9 w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="off">Off (auto-direction)</SelectItem>
+                <SelectItem value="on">On (RTS-gated adapter)</SelectItem>
+              </SelectContent>
+            </Select>
+          </Field>
+          {transport.rs485 && (
+            <>
+              <Field label="RTS on send">
+                <Select
+                  value={transport.rs485.rts_on_send ? "high" : "low"}
+                  onValueChange={(v) =>
+                    onTransport({
+                      ...transport,
+                      rs485: { ...transport.rs485!, rts_on_send: v === "high" },
+                    })
+                  }
+                >
+                  <SelectTrigger className="h-9 w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="high">High while TX</SelectItem>
+                    <SelectItem value="low">Low while TX</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field label="RX during TX">
+                <Select
+                  value={transport.rs485.rx_during_tx ? "on" : "off"}
+                  onValueChange={(v) =>
+                    onTransport({
+                      ...transport,
+                      rs485: {
+                        ...transport.rs485!,
+                        rx_during_tx: v === "on",
+                      },
+                    })
+                  }
+                >
+                  <SelectTrigger className="h-9 w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="off">Off</SelectItem>
+                    <SelectItem value="on">On (echo-tolerant)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+              <Field label="RTS delay before (ms)">
+                <Input
+                  type="number"
+                  min={0}
+                  value={transport.rs485.delay_rts_before_send_ms}
+                  onChange={(e) =>
+                    onTransport({
+                      ...transport,
+                      rs485: {
+                        ...transport.rs485!,
+                        delay_rts_before_send_ms: Math.max(
+                          0,
+                          Number(e.target.value) || 0,
+                        ),
+                      },
+                    })
+                  }
+                />
+              </Field>
+              <Field label="RTS delay after (ms)">
+                <Input
+                  type="number"
+                  min={0}
+                  value={transport.rs485.delay_rts_after_send_ms}
+                  onChange={(e) =>
+                    onTransport({
+                      ...transport,
+                      rs485: {
+                        ...transport.rs485!,
+                        delay_rts_after_send_ms: Math.max(
+                          0,
+                          Number(e.target.value) || 0,
+                        ),
+                      },
+                    })
+                  }
+                />
+              </Field>
+            </>
+          )}
           <div className="col-span-2 mt-1 flex items-start gap-2 text-[11px] text-muted-foreground">
             <Info className="mt-0.5 size-3 shrink-0" />
             <span>
-              On macOS the device path usually looks like{" "}
-              <span className="font-mono">/dev/cu.usbserial-*</span>; on Linux{" "}
-              <span className="font-mono">/dev/ttyUSB0</span>; on Windows{" "}
-              <span className="font-mono">COM3</span>. Run{" "}
-              <span className="font-mono">ls /dev/cu.*</span> (macOS) /{" "}
-              <span className="font-mono">dmesg | tail</span> (Linux) to see
-              what your USB-RS485 adapter exposes.
+              Device path: macOS{" "}
+              <span className="font-mono">/dev/cu.usbserial-*</span>, Linux{" "}
+              <span className="font-mono">/dev/ttyUSB0</span>, Windows{" "}
+              <span className="font-mono">COM3</span>. Turn{" "}
+              <span className="font-mono">RS485 direction</span> on (Linux only)
+              if requests time out with correct baud/parity/wiring — RTS-gated
+              USB-485 adapters never drive the bus in plain serial mode.
             </span>
           </div>
         </div>

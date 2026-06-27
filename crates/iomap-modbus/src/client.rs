@@ -28,12 +28,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use iocore::{ChannelValue, HealthTracker, HealthTransition, IoDevice, IoError};
+#[cfg(target_os = "linux")]
+use project::ModbusRs485;
 use project::{
     ModbusChannel, ModbusChannelKind, ModbusConfig, ModbusDataBits, ModbusDataType, ModbusParity,
     ModbusStopBits, ModbusTransport, ModbusWordOrder,
 };
-#[cfg(target_os = "linux")]
-use project::ModbusRs485;
 use tokio::sync::{mpsc, oneshot};
 use tokio_modbus::client::{rtu, tcp, Context, Reader, Writer};
 use tokio_modbus::Slave;
@@ -208,10 +208,11 @@ impl ModbusDevice {
 
         // Seed the mirror with one full poll so the first scan round sees
         // real values — and so an unreachable slave fails the connect
-        // loudly instead of silently serving zeros.
+        // loudly instead of silently serving zeros. A bare RTU timeout here
+        // is annotated with the RS485 hint (issue #13).
         poll_once(&mut client, &spans, &config.channels, &mirror, timeout)
             .await
-            .map_err(XferError::into_io)?;
+            .map_err(|e| annotate_rtu_connect_failure(&config.transport, e.into_io()))?;
 
         let healthy = Arc::new(AtomicBool::new(true));
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
@@ -321,6 +322,77 @@ async fn establish(
     }
 }
 
+/// `struct serial_rs485` flag bits and control-byte assembly (linux/serial.h).
+/// Kept platform-independent (not `cfg(linux)`-gated) so the bit logic is
+/// unit-testable on any host; only the ioctl that consumes it is Linux-only.
+/// `allow(dead_code)`: the constants + `flags()` are consumed by
+/// `apply_rs485_linux` (Linux only) and the tests, so a non-Linux lib build
+/// legitimately sees them unused.
+#[allow(dead_code)]
+mod rs485 {
+    use project::ModbusRs485;
+
+    pub const SER_RS485_ENABLED: u32 = 1 << 0;
+    pub const SER_RS485_RTS_ON_SEND: u32 = 1 << 1;
+    pub const SER_RS485_RTS_AFTER_SEND: u32 = 1 << 2;
+    pub const SER_RS485_RX_DURING_TX: u32 = 1 << 4;
+
+    /// Build the `flags` word for `struct serial_rs485` from the config:
+    /// always ENABLED; RTS asserted high on send (`RTS_ON_SEND`) or low
+    /// (`RTS_AFTER_SEND`); optionally keep RX on during TX.
+    pub fn flags(cfg: &ModbusRs485) -> u32 {
+        let mut f = SER_RS485_ENABLED;
+        f |= if cfg.rts_on_send {
+            SER_RS485_RTS_ON_SEND
+        } else {
+            SER_RS485_RTS_AFTER_SEND
+        };
+        if cfg.rx_during_tx {
+            f |= SER_RS485_RX_DURING_TX;
+        }
+        f
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use project::ModbusRs485;
+
+        fn cfg(rts_on_send: bool, rx_during_tx: bool) -> ModbusRs485 {
+            ModbusRs485 {
+                rts_on_send,
+                rx_during_tx,
+                delay_rts_before_send_ms: 0,
+                delay_rts_after_send_ms: 0,
+            }
+        }
+
+        #[test]
+        fn rts_on_send_sets_on_send_bit() {
+            let f = flags(&cfg(true, false));
+            assert_eq!(f, SER_RS485_ENABLED | SER_RS485_RTS_ON_SEND);
+            assert_eq!(f & SER_RS485_RTS_AFTER_SEND, 0);
+        }
+
+        #[test]
+        fn rts_low_sets_after_send_bit() {
+            let f = flags(&cfg(false, false));
+            assert_eq!(f, SER_RS485_ENABLED | SER_RS485_RTS_AFTER_SEND);
+            assert_eq!(f & SER_RS485_RTS_ON_SEND, 0);
+        }
+
+        #[test]
+        fn rx_during_tx_adds_its_bit() {
+            let f = flags(&cfg(true, true));
+            assert!(f & SER_RS485_RX_DURING_TX != 0);
+            assert_eq!(
+                f,
+                SER_RS485_ENABLED | SER_RS485_RTS_ON_SEND | SER_RS485_RX_DURING_TX
+            );
+        }
+    }
+}
+
 /// Enable Linux RS485 mode (`TIOCSRS485`) on the freshly-opened serial fd so
 /// the UART driver toggles RTS/DE around each frame. Required for RTS-gated
 /// RS485 transceivers (common on cheap USB-485 dongles): without it the
@@ -338,23 +410,13 @@ fn apply_rs485_linux(stream: &SerialStream, cfg: &ModbusRs485) -> std::io::Resul
         delay_rts_after_send: u32,
         _padding: [u32; 5],
     }
-    const SER_RS485_ENABLED: u32 = 1 << 0;
-    const SER_RS485_RTS_ON_SEND: u32 = 1 << 1;
-    const SER_RS485_RTS_AFTER_SEND: u32 = 1 << 2;
-    const SER_RS485_RX_DURING_TX: u32 = 1 << 4;
+    // Wrong size → the ioctl reads/writes out of bounds; catch it at compile
+    // time rather than corrupting kernel state.
+    const _: () = assert!(std::mem::size_of::<SerialRs485>() == 32);
     const TIOCSRS485: libc::c_ulong = 0x542F;
 
-    let mut flags = SER_RS485_ENABLED;
-    flags |= if cfg.rts_on_send {
-        SER_RS485_RTS_ON_SEND
-    } else {
-        SER_RS485_RTS_AFTER_SEND
-    };
-    if cfg.rx_during_tx {
-        flags |= SER_RS485_RX_DURING_TX;
-    }
     let rs = SerialRs485 {
-        flags,
+        flags: rs485::flags(cfg),
         delay_rts_before_send: cfg.delay_rts_before_send_ms,
         delay_rts_after_send: cfg.delay_rts_after_send_ms,
         _padding: [0; 5],
@@ -366,6 +428,33 @@ fn apply_rs485_linux(stream: &SerialStream, cfg: &ModbusRs485) -> std::io::Resul
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// Turn the classic RTS-gated silent failure (issue #13) into a loud,
+/// actionable error. An RTU port that opens fine but whose seed poll gets
+/// no valid response — every request times out / only direction-switch
+/// noise comes back — is, on a `transport.rs485 = None` config, very often
+/// a USB-485 adapter whose transmitter is RTS-gated: in plain serial mode
+/// the master never drives the bus. Append that hint so the user isn't left
+/// staring at a bare timeout with correct baud/parity/wiring.
+fn annotate_rtu_connect_failure(transport: &ModbusTransport, err: IoError) -> IoError {
+    let rtu_without_rs485 = matches!(transport, ModbusTransport::Rtu(p) if p.rs485.is_none());
+    let IoError::Transport(msg) = &err else {
+        return err;
+    };
+    let symptom = msg.contains("timed out")
+        || msg.contains("Incomplete")
+        || msg.contains("CRC")
+        || msg.contains("Broken pipe");
+    if rtu_without_rs485 && symptom {
+        return IoError::Transport(format!(
+            "{msg} — the RTU port opened but no valid response came back. If your USB-485 \
+             adapter is RTS-gated (its transmitter is driven by RTS/DE), the master never \
+             drives the bus in plain serial mode: set `transport.rs485` (Linux TIOCSRS485). \
+             Otherwise verify baud / parity / slave id / A-B polarity / common ground."
+        ));
+    }
+    err
 }
 
 /// How many addressable units (registers or bits) a channel occupies.
@@ -847,6 +936,76 @@ impl IoDevice for ModbusDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use project::{ModbusRs485, ModbusRtuParams, ModbusTcpParams};
+
+    fn rtu(rs485: Option<ModbusRs485>) -> ModbusTransport {
+        ModbusTransport::Rtu(ModbusRtuParams {
+            serial_device: "/dev/ttyUSB0".into(),
+            baud_rate: 9600,
+            data_bits: Default::default(),
+            stop_bits: Default::default(),
+            parity: Default::default(),
+            rs485,
+        })
+    }
+
+    #[test]
+    fn rtu_timeout_without_rs485_gets_the_hint() {
+        let err = annotate_rtu_connect_failure(
+            &rtu(None),
+            IoError::Transport("request timed out after 1000ms".into()),
+        );
+        let IoError::Transport(m) = err else {
+            panic!("expected Transport")
+        };
+        assert!(m.contains("RTS-gated"), "hint missing: {m}");
+        assert!(m.contains("transport.rs485"), "config pointer missing: {m}");
+    }
+
+    #[test]
+    fn rtu_timeout_with_rs485_already_set_is_not_annotated() {
+        let original = "request timed out after 1000ms";
+        let err = annotate_rtu_connect_failure(
+            &rtu(Some(ModbusRs485 {
+                rts_on_send: true,
+                rx_during_tx: false,
+                delay_rts_before_send_ms: 0,
+                delay_rts_after_send_ms: 0,
+            })),
+            IoError::Transport(original.into()),
+        );
+        let IoError::Transport(m) = err else {
+            panic!("expected Transport")
+        };
+        assert_eq!(m, original, "should not annotate when rs485 is already set");
+    }
+
+    #[test]
+    fn tcp_timeout_is_not_annotated_with_rs485_hint() {
+        let original = "connect to 1.2.3.4:502 timed out after 1000ms";
+        let err = annotate_rtu_connect_failure(
+            &ModbusTransport::Tcp(ModbusTcpParams {
+                host: "1.2.3.4".into(),
+                port: 502,
+            }),
+            IoError::Transport(original.into()),
+        );
+        let IoError::Transport(m) = err else {
+            panic!("expected Transport")
+        };
+        assert_eq!(m, original, "TCP must not get the RS485 hint");
+    }
+
+    #[test]
+    fn non_timeout_rtu_error_is_left_alone() {
+        // A modbus exception is a real reply — the link works; no RS485 hint.
+        let original = "modbus exception: IllegalDataAddress";
+        let err = annotate_rtu_connect_failure(&rtu(None), IoError::Transport(original.into()));
+        let IoError::Transport(m) = err else {
+            panic!("expected Transport")
+        };
+        assert_eq!(m, original);
+    }
 
     fn reg(name: &str, addr: u16, dt: ModbusDataType, wo: ModbusWordOrder) -> ModbusChannel {
         ModbusChannel {
