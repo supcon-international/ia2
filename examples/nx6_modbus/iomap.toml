@@ -1,0 +1,75 @@
+# Bind PROGRAM main variables to coupler channels.
+# The runtime matches by variable name (lowercase, unqualified);
+# `application` names the POU.
+
+# --- inputs: DI word + 4 AI channels ---
+[[mappings]]
+application = "main"
+variable = "di_word"
+direction = "input"
+device = "coupler"
+channel = "di_word"
+
+[[mappings]]
+application = "main"
+variable = "ai1"
+direction = "input"
+device = "coupler"
+channel = "ai1"
+
+[[mappings]]
+application = "main"
+variable = "ai2"
+direction = "input"
+device = "coupler"
+channel = "ai2"
+
+[[mappings]]
+application = "main"
+variable = "ai3"
+direction = "input"
+device = "coupler"
+channel = "ai3"
+
+[[mappings]]
+application = "main"
+variable = "ai4"
+direction = "input"
+device = "coupler"
+channel = "ai4"
+
+# --- outputs: DO word + 4 AO channels ---
+[[mappings]]
+application = "main"
+variable = "do_word"
+direction = "output"
+device = "coupler"
+channel = "do_word"
+
+[[mappings]]
+application = "main"
+variable = "ao1"
+direction = "output"
+device = "coupler"
+channel = "ao1"
+
+[[mappings]]
+application = "main"
+variable = "ao2"
+direction = "output"
+device = "coupler"
+channel = "ao2"
+
+[[mappings]]
+application = "main"
+variable = "ao3"
+direction = "output"
+device = "coupler"
+channel = "ao3"
+
+[[mappings]]
+application = "main"
+variable = "ao4"
+direction = "output"
+device = "coupler"
+channel = "ao4"
