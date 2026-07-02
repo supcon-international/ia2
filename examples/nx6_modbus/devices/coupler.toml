@@ -1,0 +1,97 @@
+# ZHICAN NX6-1261-RTU Modbus-RTU coupler + 4 modules
+# (ID16N 16DI / OD16N 16DO / AD4V-D 4AI / DA4VC-D 4AO)
+#
+# The coupler only supports holding registers with FC 3/6/16, so every
+# channel is kind = "holding_register". `address` is the 0-based protocol
+# register address (= 4xxxx - 40001).
+#
+# ✅ Output-region map field-verified 2026-07-01 (register writes + metering
+#    every terminal) — it does NOT match the manual's fixed-partition table.
+#    Outputs are packed at the AO region start, and the DA register→terminal
+#    order is shifted by one:
+#      addr 0    (40001)     = ID16N 16DI word          [verified: photo switch]
+#      addr 64-67 (40065-68) = AD4V-D 4AI               [verified: valve feedback = addr 64]
+#      addr 192  (40193)     = OD16N 16DO word          [verified: NOT 40033 as manual says]
+#      addr 193  (40194)     = DA4VC-D → terminal V1/M1 [verified: healthy, valve control]
+#      addr 194  (40195)     = DA4VC-D → terminal V2/M2 [verified: healthy]
+#      addr 195  (40196)     = DA4VC-D → terminal V3/M3 [verified: healthy]
+#      addr 196  (40197)     = DA4VC-D → terminal V0/M0 [⚠️ dead on this unit: writes ok, output stuck at 0V]
+#    Scale: AO/AI both 0-10V ↔ 0-32000 (3200 counts/V). Config region 40321+
+#    left at factory zeros = voltage range; nothing to write.
+#
+# ✅ Link verified 2026-06-30: /dev/ttyUSB0 = FTDI FT232 (0403:6001) with
+#    hardware auto-direction → no [transport.rs485] section needed.
+#    Station 1 / 9600 / 8-E-1; module count (40356) = 4, system error (40389) = 0.
+
+name = "coupler"
+protocol = "modbus"
+slave_id = 1               # matches DIP SW1-6 (this project: 1)
+poll_interval_ms = 50
+
+[transport]
+kind = "rtu"
+serial_device = "/dev/ttyUSB0"   # FTDI FT232 (0403:6001) USB-RS485, auto-direction
+baud_rate = 9600                 # DIP SW7=SW8=OFF = 9600 (verified 2026-06-30)
+data_bits = "eight"
+stop_bits = "one"
+parity = "even"                  # 8-E-1 — do not use "none"
+
+# ---- ID16N: 16 digital inputs (one 16-bit word) ----
+[[channels]]
+name = "di_word"
+kind = "holding_register"
+address = 0                      # 40001 [verified]
+data_type = "u16"
+
+# ---- AD4V-D: 4 analog voltage inputs (0-10V ↔ 0-32000) ----
+[[channels]]
+name = "ai1"
+kind = "holding_register"
+address = 64                     # 40065 = terminal A [verified: valve 0-10V feedback]
+data_type = "i16"
+[[channels]]
+name = "ai2"
+kind = "holding_register"
+address = 65
+data_type = "i16"
+[[channels]]
+name = "ai3"
+kind = "holding_register"
+address = 66
+data_type = "i16"
+[[channels]]
+name = "ai4"
+kind = "holding_register"
+address = 67
+data_type = "i16"
+
+# ---- OD16N: 16 digital outputs (one 16-bit word) ----
+# ⚠️ Measured at addr 192 (40193) — not 40033 as the manual's table claims!
+[[channels]]
+name = "do_word"
+kind = "holding_register"
+address = 192                    # 40193 [verified 2026-07-01]
+data_type = "u16"
+
+# ---- DA4VC-D: 4 analog voltage outputs (0-10V ↔ 0-32000, 3200 counts/V) ----
+# ⚠️ Register→terminal order shifted by one: 193→V1, 194→V2, 195→V3, 196→V0
+[[channels]]
+name = "ao1"
+kind = "holding_register"
+address = 193                    # 40194 → terminal V1/M1 [verified: valve control]
+data_type = "i16"
+[[channels]]
+name = "ao2"
+kind = "holding_register"
+address = 194                    # 40195 → terminal V2/M2 [verified]
+data_type = "i16"
+[[channels]]
+name = "ao3"
+kind = "holding_register"
+address = 195                    # 40196 → terminal V3/M3 [verified]
+data_type = "i16"
+[[channels]]
+name = "ao4"
+kind = "holding_register"
+address = 196                    # 40197 → terminal V0/M0 [⚠️ DAC dead on this unit, stuck at 0V — do not use]
+data_type = "i16"
