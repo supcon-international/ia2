@@ -29,7 +29,8 @@ use axum::{
 };
 use futures_util::stream::Stream;
 use ironplc_bridge::{
-    DeviceReport, DeviceSpec, ProgramHandle, RuntimeMode, RuntimeWriteError, VarSnapshot,
+    DeviceHealth, DeviceReport, DeviceSpec, ProgramHandle, RuntimeMode, RuntimeWriteError,
+    VarSnapshot,
 };
 use project::{ProjectStore, ProtocolConfig};
 use serde::Serialize;
@@ -541,6 +542,14 @@ struct Health {
     status: &'static str,
     uptime_secs: u64,
     scan_count: u64,
+    /// `true` only when every configured device's transport is live.
+    /// `false` means at least one device failed to connect or its
+    /// background link is down — input variables from that device are
+    /// frozen at last-known values, even though `scan_count` keeps
+    /// climbing and `/status` keeps serving snapshots.
+    fieldbus_healthy: bool,
+    /// Per-device breakdown behind `fieldbus_healthy`.
+    devices: Vec<DeviceHealth>,
 }
 
 async fn health(State(state): State<AppState>) -> Json<Health> {
@@ -551,10 +560,13 @@ async fn health(State(state): State<AppState>) -> Json<Health> {
         .as_ref()
         .map(|s| s.scan_count)
         .unwrap_or(0);
+    let devices = state.handle.device_health();
     Json(Health {
         status: "ok",
         uptime_secs: state.start_time.elapsed().as_secs(),
         scan_count,
+        fieldbus_healthy: devices.iter().all(|d| d.healthy),
+        devices,
     })
 }
 
@@ -572,6 +584,10 @@ struct Status {
     /// PROGRAM instances scheduled by the project's tasks.toml.
     program_instances: Vec<String>,
     devices: Vec<String>,
+    /// Live transport health per configured device. A `healthy: false`
+    /// entry means that device's input variables in `last_snapshot` are
+    /// frozen at last-known values (link down or connect failed).
+    device_health: Vec<DeviceHealth>,
     uptime_secs: u64,
     scan_count: u64,
     last_snapshot: Option<VarSnapshot>,
@@ -590,6 +606,7 @@ async fn status(State(state): State<AppState>) -> Json<Status> {
         project: state.project_name.clone(),
         program_instances: state.program_instances.clone(),
         devices: state.devices.clone(),
+        device_health: state.handle.device_health(),
         uptime_secs: state.start_time.elapsed().as_secs(),
         scan_count,
         last_snapshot,

@@ -79,6 +79,25 @@ pub struct DeviceReport {
     pub slaves: Vec<DiscoveredSlave>,
 }
 
+/// Live transport health of one configured device, refreshed by the scan
+/// loop every round from [`IoDevice::is_healthy`]. This is the monitor-layer
+/// consumer that flag was designed for: while a device's background link is
+/// down its inputs keep serving the last-known mirror, and nothing in the
+/// variable values themselves reveals that — only this flag does.
+///
+/// Devices that failed the initial connect appear here too, permanently
+/// `healthy: false`, so a project configured for a device that never came
+/// up is just as visible as one that dropped mid-run.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct DeviceHealth {
+    pub name: String,
+    /// `true` = transport believed good, variable values are live.
+    /// `false` = connect failed or the background link is down; input
+    /// variables are frozen at last-known values.
+    pub healthy: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct DeviceSpec {
     pub name: String,
@@ -177,6 +196,10 @@ pub struct ProgramHandle {
     /// set once after the initial connect pass. Shared so the HTTP layer
     /// can serve /discover without a scan-loop round-trip.
     device_reports: Arc<std::sync::Mutex<Vec<DeviceReport>>>,
+    /// Live per-device transport health, seeded after the connect pass and
+    /// refreshed by the scan loop each round. Shared so the HTTP layer can
+    /// serve health without a scan-loop round-trip.
+    device_health: Arc<std::sync::Mutex<Vec<DeviceHealth>>>,
     /// The scan thread's join handle, shared so `shutdown` can join it
     /// from any clone. `Some` until the first `shutdown` takes it. Joining
     /// is how a caller waits for the always-run failsafe pass + per-device
@@ -338,6 +361,17 @@ impl ProgramHandle {
         self.device_reports
             .lock()
             .map(|r| r.clone())
+            .unwrap_or_default()
+    }
+
+    /// Live per-device transport health (see [`DeviceHealth`]). Empty until
+    /// the initial connect pass completes. A device that failed to connect
+    /// is reported permanently unhealthy; a connected device reflects its
+    /// adapter's [`IoDevice::is_healthy`] as of the last scan round.
+    pub fn device_health(&self) -> Vec<DeviceHealth> {
+        self.device_health
+            .lock()
+            .map(|h| h.clone())
             .unwrap_or_default()
     }
 }
@@ -529,12 +563,14 @@ fn spawn_units_inner(
     let mode = Arc::new(std::sync::Mutex::new(RuntimeMode::Running));
     let forces = Arc::new(std::sync::Mutex::new(HashMap::<String, i32>::new()));
     let device_reports = Arc::new(std::sync::Mutex::new(Vec::<DeviceReport>::new()));
+    let device_health = Arc::new(std::sync::Mutex::new(Vec::<DeviceHealth>::new()));
 
     let stop_clone = stop.clone();
     let snapshot_tx_clone = snapshot_tx.clone();
     let mode_clone = mode.clone();
     let forces_clone = forces.clone();
     let device_reports_clone = device_reports.clone();
+    let device_health_clone = device_health.clone();
 
     let join_handle = std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
@@ -553,6 +589,24 @@ fn spawn_units_inner(
             // or panic), we still own the `devices` vec and can drive
             // every output to its safe state.
             let (mut devices, reports) = acquire_devices(device_source).await;
+            // Seed health from the connect outcomes: configured devices
+            // that failed to connect are permanently unhealthy (they're
+            // not in `devices`, so the per-round refresh never touches
+            // them); connected ones start from their adapter's flag.
+            if let Ok(mut slot) = device_health_clone.lock() {
+                *slot = reports
+                    .iter()
+                    .map(|r| DeviceHealth {
+                        name: r.name.clone(),
+                        healthy: r.connected
+                            && devices
+                                .iter()
+                                .find(|d| d.name() == r.name)
+                                .map(|d| d.is_healthy())
+                                .unwrap_or(false),
+                    })
+                    .collect();
+            }
             if let Ok(mut slot) = device_reports_clone.lock() {
                 *slot = reports;
             }
@@ -574,6 +628,7 @@ fn spawn_units_inner(
                 cmd_rx,
                 mode_clone,
                 forces_clone,
+                device_health_clone,
                 state_path,
             ))
             .catch_unwind()
@@ -627,6 +682,7 @@ fn spawn_units_inner(
         mode,
         forces,
         device_reports,
+        device_health,
         thread: Arc::new(std::sync::Mutex::new(Some(join_handle))),
     }
 }
@@ -859,6 +915,7 @@ async fn run_loop_async(
     mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<RuntimeCommand>,
     mode: Arc<std::sync::Mutex<RuntimeMode>>,
     forces: Arc<std::sync::Mutex<HashMap<String, i32>>>,
+    device_health: Arc<std::sync::Mutex<Vec<DeviceHealth>>>,
     state_path: Option<PathBuf>,
 ) {
     if units.is_empty() {
@@ -1129,6 +1186,18 @@ async fn run_loop_async(
     loop {
         if stop.load(Ordering::Relaxed) {
             break;
+        }
+
+        // Mirror each live device's transport health for the monitor layer.
+        // Cheap: one atomic load per device, and the lock is uncontended
+        // except when an HTTP handler snapshots it. Entries for devices
+        // that never connected aren't in `devices` and stay `false`.
+        if let Ok(mut health) = device_health.lock() {
+            for entry in health.iter_mut() {
+                if let Some(d) = devices.iter().find(|d| d.name() == entry.name) {
+                    entry.healthy = d.is_healthy();
+                }
+            }
         }
 
         // Drain any pending out-of-band commands (variable writes,
@@ -1644,6 +1713,25 @@ mod tests {
         failsafe_called: Arc<AtomicBool>,
         shutdown_called: Arc<AtomicBool>,
         failsafe_before_shutdown: Arc<AtomicBool>,
+        /// Shared health flag so a test can flip transport health
+        /// mid-run and watch it surface through the handle.
+        healthy: Arc<AtomicBool>,
+    }
+
+    impl MockDevice {
+        fn named(name: &str) -> (Self, Arc<AtomicBool>) {
+            let healthy = Arc::new(AtomicBool::new(true));
+            (
+                MockDevice {
+                    name: name.into(),
+                    failsafe_called: Arc::new(AtomicBool::new(false)),
+                    shutdown_called: Arc::new(AtomicBool::new(false)),
+                    failsafe_before_shutdown: Arc::new(AtomicBool::new(false)),
+                    healthy: healthy.clone(),
+                },
+                healthy,
+            )
+        }
     }
 
     #[async_trait::async_trait]
@@ -1671,6 +1759,9 @@ mod tests {
             }
             self.shutdown_called.store(true, Ordering::Relaxed);
             Ok(())
+        }
+        fn is_healthy(&self) -> bool {
+            self.healthy.load(Ordering::Relaxed)
         }
     }
 
@@ -1747,6 +1838,7 @@ mod tests {
             failsafe_called: failsafe_called.clone(),
             shutdown_called: shutdown_called.clone(),
             failsafe_before_shutdown: order_ok.clone(),
+            healthy: Arc::new(AtomicBool::new(true)),
         };
         let devices: Vec<Box<dyn IoDevice>> = vec![Box::new(dev)];
 
@@ -1777,6 +1869,55 @@ mod tests {
             order_ok.load(Ordering::Relaxed),
             "failsafe must precede device shutdown so zeroed outputs flush before the join"
         );
+    }
+
+    /// The handle must mirror a device's live transport health: `true`
+    /// while the adapter reports healthy, `false` within a scan round of
+    /// the adapter flipping (cable pulled / poll loop failing), and back —
+    /// this is the surface /health and /status serve to operators, whose
+    /// only other signal is "variable values stopped changing".
+    #[tokio::test]
+    async fn device_health_mirrors_adapter_flag() {
+        let (dev, healthy) = MockDevice::named("bus0");
+        let handle = spawn_units_inner(
+            vec![single_unit(trivial_container(), 5)],
+            DeviceSource::Prebuilt(vec![Box::new(dev)]),
+            Vec::new(),
+            None,
+        );
+
+        // Wait for the connect pass to seed the health list.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while handle.device_health().is_empty() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let seeded = handle.device_health();
+        assert_eq!(seeded.len(), 1, "one configured device");
+        assert_eq!(seeded[0].name, "bus0");
+        assert!(seeded[0].healthy, "healthy adapter seeds healthy");
+
+        // Flip the adapter's flag; the scan loop refreshes each round.
+        healthy.store(false, Ordering::Relaxed);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while handle.device_health()[0].healthy && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            !handle.device_health()[0].healthy,
+            "unhealthy adapter must surface through the handle"
+        );
+
+        // And recovery propagates too.
+        healthy.store(true, Ordering::Relaxed);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !handle.device_health()[0].healthy && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(handle.device_health()[0].healthy, "recovery must surface");
+
+        tokio::time::timeout(Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("shutdown");
     }
 
     /// F64 device channel → LREAL var → F64 device channel, verifying
@@ -1870,12 +2011,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_is_idempotent() {
-        let dev = MockDevice {
-            name: "mock".into(),
-            failsafe_called: Arc::new(AtomicBool::new(false)),
-            shutdown_called: Arc::new(AtomicBool::new(false)),
-            failsafe_before_shutdown: Arc::new(AtomicBool::new(false)),
-        };
+        let (dev, _healthy) = MockDevice::named("mock");
         let devices: Vec<Box<dyn IoDevice>> = vec![Box::new(dev)];
         let handle = spawn_units_inner(
             vec![single_unit(trivial_container(), 10)],
