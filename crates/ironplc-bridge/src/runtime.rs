@@ -531,7 +531,9 @@ enum DeviceSource {
     Prebuilt(Vec<Box<dyn IoDevice>>),
 }
 
-async fn acquire_devices(source: DeviceSource) -> (Vec<Box<dyn IoDevice>>, Vec<DeviceReport>) {
+async fn acquire_devices(
+    source: DeviceSource,
+) -> (Vec<Box<dyn IoDevice>>, Vec<DeviceReport>, Vec<DeviceSpec>) {
     match source {
         DeviceSource::Specs(specs) => connect_devices(specs).await,
         #[cfg(test)]
@@ -546,7 +548,7 @@ async fn acquire_devices(source: DeviceSource) -> (Vec<Box<dyn IoDevice>>, Vec<D
                     slaves: Vec::new(),
                 })
                 .collect();
-            (devices, reports)
+            (devices, reports, Vec::new())
         }
     }
 }
@@ -566,11 +568,13 @@ fn spawn_units_inner(
     let device_health = Arc::new(std::sync::Mutex::new(Vec::<DeviceHealth>::new()));
 
     let stop_clone = stop.clone();
+    let stop_reconnect = stop.clone();
     let snapshot_tx_clone = snapshot_tx.clone();
     let mode_clone = mode.clone();
     let forces_clone = forces.clone();
     let device_reports_clone = device_reports.clone();
     let device_health_clone = device_health.clone();
+    let device_reports_reconnect = device_reports.clone();
 
     let join_handle = std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread()
@@ -588,11 +592,12 @@ fn spawn_units_inner(
             // that, no matter how the loop exits (clean stop, VM trap,
             // or panic), we still own the `devices` vec and can drive
             // every output to its safe state.
-            let (mut devices, reports) = acquire_devices(device_source).await;
+            let (mut devices, reports, failed_specs) = acquire_devices(device_source).await;
             // Seed health from the connect outcomes: configured devices
-            // that failed to connect are permanently unhealthy (they're
-            // not in `devices`, so the per-round refresh never touches
-            // them); connected ones start from their adapter's flag.
+            // that failed to connect start unhealthy (the per-round
+            // refresh doesn't touch them until a background reconnect
+            // brings them into `devices`); connected ones start from
+            // their adapter's flag.
             if let Ok(mut slot) = device_health_clone.lock() {
                 *slot = reports
                     .iter()
@@ -609,6 +614,37 @@ fn spawn_units_inner(
             }
             if let Ok(mut slot) = device_reports_clone.lock() {
                 *slot = reports;
+            }
+
+            // Devices that failed the initial connect are retried in the
+            // background on a dedicated thread (own runtime, so a slow
+            // EtherCAT bring-up can never stall scan rounds). Reconnected
+            // adapters are handed to the scan loop over this channel; the
+            // loop binds their parked mappings and the per-round health
+            // refresh flips them healthy. If nothing failed, the sender
+            // drops here and try_recv just reports Disconnected forever.
+            let (reconnect_tx, reconnect_rx) =
+                std::sync::mpsc::channel::<Box<dyn IoDevice>>();
+            // Set once the failsafe + per-device shutdown pass below has
+            // finished — the reconnect worker keeps its runtime (and the
+            // adapters' background tasks) alive until then.
+            let drained = Arc::new(AtomicBool::new(false));
+            if !failed_specs.is_empty() {
+                let drained_flag = drained.clone();
+                let spawned = std::thread::Builder::new()
+                    .name("ia2-reconnect".into())
+                    .spawn(move || {
+                        reconnect_worker(
+                            failed_specs,
+                            reconnect_tx,
+                            device_reports_reconnect,
+                            stop_reconnect,
+                            drained_flag,
+                        )
+                    });
+                if let Err(e) = spawned {
+                    tracing::error!(%e, "failed to spawn reconnect thread; unconnected devices stay down");
+                }
             }
 
             // Wrap the scan loop in catch_unwind so a panic in the VM
@@ -629,6 +665,7 @@ fn spawn_units_inner(
                 mode_clone,
                 forces_clone,
                 device_health_clone,
+                reconnect_rx,
                 state_path,
             ))
             .catch_unwind()
@@ -657,6 +694,10 @@ fn spawn_units_inner(
                     tracing::warn!(device = %dev.name(), %e, "device shutdown failed");
                 }
             }
+            // Failsafe + teardown done: release the reconnect worker (it
+            // holds the runtime that late-connected adapters' background
+            // tasks live on, and must outlive the writes above).
+            drained.store(true, Ordering::Relaxed);
             match &result {
                 Ok(()) => tracing::info!(
                     devices = dev_count,
@@ -695,147 +736,270 @@ fn spawn_units_inner(
 /// at shutdown only touches devices that DID connect.
 async fn connect_devices(
     device_specs: Vec<DeviceSpec>,
-) -> (Vec<Box<dyn IoDevice>>, Vec<DeviceReport>) {
+) -> (Vec<Box<dyn IoDevice>>, Vec<DeviceReport>, Vec<DeviceSpec>) {
     let mut devices: Vec<Box<dyn IoDevice>> = Vec::with_capacity(device_specs.len());
     let mut reports: Vec<DeviceReport> = Vec::with_capacity(device_specs.len());
+    let mut failed: Vec<DeviceSpec> = Vec::new();
     for spec in device_specs {
-        match &spec.config {
-            ProtocolConfig::Modbus(cfg) => {
-                match iomap_modbus::ModbusDevice::connect(spec.name.clone(), cfg).await {
-                    Ok(d) => {
-                        // Log the transport-relevant detail so the
-                        // operator sees "tcp 192.168.x.y:502" vs
-                        // "rtu /dev/ttyUSB0 @ 9600" — same line
-                        // pattern, transport-specific payload.
-                        match &cfg.transport {
-                            project::ModbusTransport::Tcp(p) => {
-                                tracing::info!(name = %spec.name, transport = "tcp", host = %p.host, port = p.port, "modbus connected");
-                            }
-                            project::ModbusTransport::Rtu(p) => {
-                                tracing::info!(
-                                    name = %spec.name,
-                                    transport = "rtu",
-                                    device = %p.serial_device,
-                                    baud = p.baud_rate,
-                                    "modbus connected"
-                                );
-                            }
+        let (device, report) = connect_one(&spec).await;
+        match device {
+            Some(d) => devices.push(d),
+            None => failed.push(spec),
+        }
+        reports.push(report);
+    }
+    (devices, reports, failed)
+}
+
+/// Connect a single `DeviceSpec` into a live `IoDevice` adapter plus its
+/// connect report. Shared by the initial connect pass and the background
+/// reconnect worker so both paths produce identical devices and reports.
+async fn connect_one(spec: &DeviceSpec) -> (Option<Box<dyn IoDevice>>, DeviceReport) {
+    match &spec.config {
+        ProtocolConfig::Modbus(cfg) => {
+            match iomap_modbus::ModbusDevice::connect(spec.name.clone(), cfg).await {
+                Ok(d) => {
+                    // Log the transport-relevant detail so the
+                    // operator sees "tcp 192.168.x.y:502" vs
+                    // "rtu /dev/ttyUSB0 @ 9600" — same line
+                    // pattern, transport-specific payload.
+                    match &cfg.transport {
+                        project::ModbusTransport::Tcp(p) => {
+                            tracing::info!(name = %spec.name, transport = "tcp", host = %p.host, port = p.port, "modbus connected");
                         }
-                        devices.push(Box::new(d));
-                        reports.push(DeviceReport {
+                        project::ModbusTransport::Rtu(p) => {
+                            tracing::info!(
+                                name = %spec.name,
+                                transport = "rtu",
+                                device = %p.serial_device,
+                                baud = p.baud_rate,
+                                "modbus connected"
+                            );
+                        }
+                    }
+                    (
+                        Some(Box::new(d) as Box<dyn IoDevice>),
+                        DeviceReport {
                             name: spec.name.clone(),
                             protocol: "modbus".into(),
                             connected: true,
                             error: None,
                             slaves: Vec::new(),
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!(name = %spec.name, %e, "modbus connect failed");
-                        reports.push(DeviceReport {
+                        },
+                    )
+                }
+                Err(e) => {
+                    tracing::warn!(name = %spec.name, %e, "modbus connect failed");
+                    (
+                        None,
+                        DeviceReport {
                             name: spec.name.clone(),
                             protocol: "modbus".into(),
                             connected: false,
                             error: Some(e.to_string()),
                             slaves: Vec::new(),
-                        });
-                    }
+                        },
+                    )
                 }
             }
-            ProtocolConfig::Ethercat(cfg) => {
-                // The EtherCAT bring-up (init_single_group / DC sync) can
-                // lose the first PDU right after a fresh link/bind and fail
-                // with a transient Timeout(Pdu). A failed connect() exits its
-                // worker thread cleanly, so retry a few times with a short
-                // backoff — otherwise one transient timeout leaves the bus
-                // (and the motor) dead until a manual restart.
-                const MAX_ATTEMPTS: u32 = 3;
-                let mut attempt: u32 = 1;
-                let connected = loop {
-                    match iomap_ethercat::EthercatDevice::connect(spec.name.clone(), cfg).await {
-                        Ok(d) => break Ok(d),
-                        Err(e) if attempt < MAX_ATTEMPTS => {
-                            tracing::warn!(
-                                name = %spec.name, attempt, max = MAX_ATTEMPTS, %e,
-                                "ethercat connect failed; retrying after backoff"
-                            );
-                            tokio::time::sleep(Duration::from_millis(800)).await;
-                            attempt += 1;
-                        }
-                        Err(e) => break Err(e),
+        }
+        ProtocolConfig::Ethercat(cfg) => {
+            // The EtherCAT bring-up (init_single_group / DC sync) can
+            // lose the first PDU right after a fresh link/bind and fail
+            // with a transient Timeout(Pdu). A failed connect() exits its
+            // worker thread cleanly, so retry a few times with a short
+            // backoff — otherwise one transient timeout leaves the bus
+            // (and the motor) dead until a manual restart.
+            const MAX_ATTEMPTS: u32 = 3;
+            let mut attempt: u32 = 1;
+            let connected = loop {
+                match iomap_ethercat::EthercatDevice::connect(spec.name.clone(), cfg).await {
+                    Ok(d) => break Ok(d),
+                    Err(e) if attempt < MAX_ATTEMPTS => {
+                        tracing::warn!(
+                            name = %spec.name, attempt, max = MAX_ATTEMPTS, %e,
+                            "ethercat connect failed; retrying after backoff"
+                        );
+                        tokio::time::sleep(Duration::from_millis(800)).await;
+                        attempt += 1;
                     }
-                };
-                match connected {
-                    Ok(d) => {
-                        tracing::info!(name = %spec.name, nic = %cfg.nic, "ethercat connected");
-                        // Pull the discovered topology before boxing the
-                        // device into the trait object.
-                        let slaves = d
-                            .discovered()
-                            .into_iter()
-                            .map(|s| DiscoveredSlave {
-                                index: s.index,
-                                name: s.name,
-                                vendor_id: s.vendor_id,
-                                product_id: s.product_id,
-                                input_bytes: s.input_bytes,
-                                output_bytes: s.output_bytes,
-                            })
-                            .collect();
-                        devices.push(Box::new(d));
-                        reports.push(DeviceReport {
+                    Err(e) => break Err(e),
+                }
+            };
+            match connected {
+                Ok(d) => {
+                    tracing::info!(name = %spec.name, nic = %cfg.nic, "ethercat connected");
+                    // Pull the discovered topology before boxing the
+                    // device into the trait object.
+                    let slaves = d
+                        .discovered()
+                        .into_iter()
+                        .map(|s| DiscoveredSlave {
+                            index: s.index,
+                            name: s.name,
+                            vendor_id: s.vendor_id,
+                            product_id: s.product_id,
+                            input_bytes: s.input_bytes,
+                            output_bytes: s.output_bytes,
+                        })
+                        .collect();
+                    (
+                        Some(Box::new(d) as Box<dyn IoDevice>),
+                        DeviceReport {
                             name: spec.name.clone(),
                             protocol: "ethercat".into(),
                             connected: true,
                             error: None,
                             slaves,
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!(name = %spec.name, %e, "ethercat connect failed");
-                        reports.push(DeviceReport {
+                        },
+                    )
+                }
+                Err(e) => {
+                    tracing::warn!(name = %spec.name, %e, "ethercat connect failed");
+                    (
+                        None,
+                        DeviceReport {
                             name: spec.name.clone(),
                             protocol: "ethercat".into(),
                             connected: false,
                             error: Some(e.to_string()),
                             slaves: Vec::new(),
-                        });
-                    }
+                        },
+                    )
                 }
             }
-            ProtocolConfig::Opcua(cfg) => {
-                match iomap_opcua::OpcuaDevice::connect(spec.name.clone(), cfg).await {
-                    Ok(d) => {
-                        tracing::info!(
-                            name = %spec.name,
-                            endpoint = %cfg.endpoint_url,
-                            tags = cfg.channels.len(),
-                            "opcua connected"
-                        );
-                        devices.push(Box::new(d));
-                        reports.push(DeviceReport {
+        }
+        ProtocolConfig::Opcua(cfg) => {
+            match iomap_opcua::OpcuaDevice::connect(spec.name.clone(), cfg).await {
+                Ok(d) => {
+                    tracing::info!(
+                        name = %spec.name,
+                        endpoint = %cfg.endpoint_url,
+                        tags = cfg.channels.len(),
+                        "opcua connected"
+                    );
+                    (
+                        Some(Box::new(d) as Box<dyn IoDevice>),
+                        DeviceReport {
                             name: spec.name.clone(),
                             protocol: "opcua".into(),
                             connected: true,
                             error: None,
                             slaves: Vec::new(),
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!(name = %spec.name, %e, "opcua connect failed");
-                        reports.push(DeviceReport {
+                        },
+                    )
+                }
+                Err(e) => {
+                    tracing::warn!(name = %spec.name, %e, "opcua connect failed");
+                    (
+                        None,
+                        DeviceReport {
                             name: spec.name.clone(),
                             protocol: "opcua".into(),
                             connected: false,
                             error: Some(e.to_string()),
                             slaves: Vec::new(),
-                        });
-                    }
+                        },
+                    )
                 }
             }
         }
     }
-    (devices, reports)
+}
+
+/// Background retry loop for devices that failed the initial connect.
+///
+/// Runs on its own OS thread with a dedicated single-thread runtime so a
+/// slow bus bring-up (EtherCAT walk, DC sync, TCP timeouts) can never
+/// stall scan rounds. Retries every pending spec with a shared doubling
+/// backoff (1 s → 30 s cap); each success rewrites that device's
+/// /discover report in place and hands the live adapter to the scan
+/// loop, which binds the mappings it parked at startup. Exits when every
+/// spec has connected or the program stops (checked in ≤200 ms slices so
+/// shutdown isn't held up by a long backoff).
+fn reconnect_worker(
+    mut pending: Vec<DeviceSpec>,
+    tx: std::sync::mpsc::Sender<Box<dyn IoDevice>>,
+    reports: Arc<std::sync::Mutex<Vec<DeviceReport>>>,
+    stop: Arc<AtomicBool>,
+    drained: Arc<AtomicBool>,
+) {
+    const BACKOFF_START: Duration = Duration::from_secs(1);
+    const BACKOFF_CAP: Duration = Duration::from_secs(30);
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            tracing::error!(%e, "failed to create reconnect runtime; unconnected devices stay down");
+            return;
+        }
+    };
+    // Everything runs inside one block_on: adapters connected here spawn
+    // their background tasks (Modbus poll loop, OPC-UA session) onto THIS
+    // runtime, and a current-thread runtime only makes progress while it's
+    // being driven — so the worker must keep awaiting for as long as any
+    // device it delivered is in service.
+    rt.block_on(async move {
+        tracing::warn!(
+            devices = pending.len(),
+            "entering background reconnect for devices that failed to connect"
+        );
+        let mut delivered_any = false;
+        let mut backoff = BACKOFF_START;
+        while !pending.is_empty() && !stop.load(Ordering::Relaxed) {
+            let deadline = Instant::now() + backoff;
+            loop {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                tokio::time::sleep(remaining.min(Duration::from_millis(200))).await;
+            }
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let mut still_pending = Vec::with_capacity(pending.len());
+            for spec in pending {
+                let (device, report) = connect_one(&spec).await;
+                match device {
+                    Some(d) => {
+                        tracing::info!(device = %spec.name, "background reconnect succeeded");
+                        if let Ok(mut slot) = reports.lock() {
+                            if let Some(r) = slot.iter_mut().find(|r| r.name == report.name) {
+                                *r = report;
+                            }
+                        }
+                        // Scan loop gone ⇒ nobody left to adopt the device.
+                        if tx.send(d).is_err() {
+                            return;
+                        }
+                        delivered_any = true;
+                    }
+                    None => still_pending.push(spec),
+                }
+            }
+            pending = still_pending;
+            backoff = (backoff * 2).min(BACKOFF_CAP);
+        }
+        if pending.is_empty() {
+            tracing::info!("background reconnect complete; all configured devices connected");
+        }
+        if !delivered_any {
+            return; // nothing spawned onto this runtime; safe to wind down
+        }
+        // Keep driving the delivered adapters' background tasks until the
+        // scan thread reports its failsafe/shutdown pass is DONE (`drained`).
+        // Exiting on `stop` alone would race that pass: dropping this
+        // runtime kills the poll tasks the failsafe writes go through.
+        while !drained.load(Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    });
 }
 
 /// Trip the watchdog after this many consecutive scan deadline overruns
@@ -862,6 +1026,77 @@ struct ResolvedMapping {
     /// LREAL var — crosses as a full 64-bit double via
     /// `write_variable_raw` (the i32 lane would truncate).
     is_lreal: bool,
+}
+
+/// Resolve one iomap `Mapping` against a connected device: route it to a
+/// PROGRAM unit and produce the index-level `ResolvedMapping` the scan
+/// loop consumes. Shared by the startup resolution pass and the mid-run
+/// bind that happens when a device joins after a background reconnect.
+///
+/// Routing: by PROGRAM instance name (`Mapping.application`,
+/// case-insensitive). An empty/unknown application falls back to the
+/// first unit that declares the variable — the exact pre-multi-program
+/// resolution, so legacy iomaps keep working; warns only when there's
+/// real ambiguity (>1 unit). Returns `None` (with a warn) when the
+/// variable can't be routed at all.
+fn resolve_mapping(
+    m: &Mapping,
+    device_index: usize,
+    instances: &[String],
+    var_index_by_name: &[HashMap<String, u16>],
+    debug_maps: &[HashMap<u16, VarDebugInfo>],
+) -> Option<(usize, Direction, ResolvedMapping)> {
+    let n_units = instances.len();
+    let unit_index = match instances
+        .iter()
+        .position(|i| i.eq_ignore_ascii_case(&m.application))
+    {
+        Some(i) => {
+            if !var_index_by_name[i].contains_key(&m.variable) {
+                tracing::warn!(
+                    application = %m.application,
+                    var = %m.variable,
+                    "mapping's variable not declared by its routed instance, skipping"
+                );
+                return None;
+            }
+            i
+        }
+        None => {
+            let Some(i) = (0..n_units).find(|&i| var_index_by_name[i].contains_key(&m.variable))
+            else {
+                tracing::warn!(var = %m.variable, "mapping references unknown variable, skipping");
+                return None;
+            };
+            if n_units > 1 {
+                tracing::warn!(
+                    application = %m.application,
+                    var = %m.variable,
+                    routed_to = %instances[i],
+                    "mapping's application doesn't name a PROGRAM instance; \
+                     falling back to the first unit that declares the variable"
+                );
+            }
+            i
+        }
+    };
+    let var_index = var_index_by_name[unit_index][&m.variable];
+    let type_tag = debug_maps[unit_index]
+        .get(&var_index)
+        .map(|d| d.iec_type_tag)
+        .unwrap_or(0);
+    Some((
+        unit_index,
+        m.direction,
+        ResolvedMapping {
+            device_index,
+            channel: m.channel.clone(),
+            var_index,
+            type_tag,
+            is_real: type_tag == iec_type_tag::REAL,
+            is_lreal: type_tag == iec_type_tag::LREAL,
+        },
+    ))
 }
 
 /// Per-unit scheduling state. Lives in a Vec parallel to `runnings`
@@ -916,6 +1151,7 @@ async fn run_loop_async(
     mode: Arc<std::sync::Mutex<RuntimeMode>>,
     forces: Arc<std::sync::Mutex<HashMap<String, i32>>>,
     device_health: Arc<std::sync::Mutex<Vec<DeviceHealth>>>,
+    reconnect_rx: std::sync::mpsc::Receiver<Box<dyn IoDevice>>,
     state_path: Option<PathBuf>,
 ) {
     if units.is_empty() {
@@ -992,66 +1228,30 @@ async fn run_loop_async(
 
     let mut unit_inputs: Vec<Vec<ResolvedMapping>> = (0..n_units).map(|_| Vec::new()).collect();
     let mut unit_outputs: Vec<Vec<ResolvedMapping>> = (0..n_units).map(|_| Vec::new()).collect();
+    // Mappings whose device isn't connected are parked, not dropped: the
+    // background reconnect worker may still deliver that device mid-run,
+    // at which point they bind exactly like the startup ones below.
+    let mut pending_mappings: Vec<Mapping> = Vec::new();
     for m in mappings {
         let Some(&device_index) = device_index_by_name.get(&m.device) else {
-            tracing::warn!(device = %m.device, "mapping references unknown device, skipping");
+            tracing::warn!(
+                device = %m.device,
+                "mapping references a device that isn't connected; parked until it reconnects"
+            );
+            pending_mappings.push(m);
             continue;
         };
-        // Route by PROGRAM instance name (`Mapping.application`,
-        // case-insensitive). An empty/unknown application falls back
-        // to the first unit that declares the variable — that's the
-        // exact pre-multi-program resolution, so legacy iomaps keep
-        // working; warn only when there's real ambiguity (>1 unit).
-        let unit_index = match instances
-            .iter()
-            .position(|i| i.eq_ignore_ascii_case(&m.application))
-        {
-            Some(i) => {
-                if !var_index_by_name[i].contains_key(&m.variable) {
-                    tracing::warn!(
-                        application = %m.application,
-                        var = %m.variable,
-                        "mapping's variable not declared by its routed instance, skipping"
-                    );
-                    continue;
-                }
-                i
-            }
-            None => {
-                let Some(i) =
-                    (0..n_units).find(|&i| var_index_by_name[i].contains_key(&m.variable))
-                else {
-                    tracing::warn!(var = %m.variable, "mapping references unknown variable, skipping");
-                    continue;
-                };
-                if n_units > 1 {
-                    tracing::warn!(
-                        application = %m.application,
-                        var = %m.variable,
-                        routed_to = %instances[i],
-                        "mapping's application doesn't name a PROGRAM instance; \
-                         falling back to the first unit that declares the variable"
-                    );
-                }
-                i
-            }
-        };
-        let var_index = var_index_by_name[unit_index][&m.variable];
-        let type_tag = debug_maps[unit_index]
-            .get(&var_index)
-            .map(|d| d.iec_type_tag)
-            .unwrap_or(0);
-        let rm = ResolvedMapping {
+        if let Some((unit_index, direction, rm)) = resolve_mapping(
+            &m,
             device_index,
-            channel: m.channel.clone(),
-            var_index,
-            type_tag,
-            is_real: type_tag == iec_type_tag::REAL,
-            is_lreal: type_tag == iec_type_tag::LREAL,
-        };
-        match m.direction {
-            Direction::Input => unit_inputs[unit_index].push(rm),
-            Direction::Output => unit_outputs[unit_index].push(rm),
+            &instances,
+            &var_index_by_name,
+            &debug_maps,
+        ) {
+            match direction {
+                Direction::Input => unit_inputs[unit_index].push(rm),
+                Direction::Output => unit_outputs[unit_index].push(rm),
+            }
         }
     }
     for (i, unit) in units.iter().enumerate() {
@@ -1186,6 +1386,43 @@ async fn run_loop_async(
     loop {
         if stop.load(Ordering::Relaxed) {
             break;
+        }
+
+        // Adopt any devices the background reconnect worker delivered:
+        // append to the device set and bind the mappings that were parked
+        // at startup because this device wasn't there. Runs before the
+        // health refresh so the adopted device flips healthy this round.
+        while let Ok(dev) = reconnect_rx.try_recv() {
+            let name = dev.name().to_string();
+            let device_index = devices.len();
+            devices.push(dev);
+            let mut bound = 0usize;
+            let mut parked = Vec::with_capacity(pending_mappings.len());
+            for m in pending_mappings.drain(..) {
+                if m.device != name {
+                    parked.push(m);
+                    continue;
+                }
+                if let Some((unit_index, direction, rm)) = resolve_mapping(
+                    &m,
+                    device_index,
+                    &instances,
+                    &var_index_by_name,
+                    &debug_maps,
+                ) {
+                    match direction {
+                        Direction::Input => unit_inputs[unit_index].push(rm),
+                        Direction::Output => unit_outputs[unit_index].push(rm),
+                    }
+                    bound += 1;
+                }
+            }
+            pending_mappings = parked;
+            tracing::info!(
+                device = %name,
+                mappings = bound,
+                "device joined after background reconnect; its variables are live"
+            );
         }
 
         // Mirror each live device's transport health for the monitor layer.
@@ -1869,6 +2106,120 @@ mod tests {
             order_ok.load(Ordering::Relaxed),
             "failsafe must precede device shutdown so zeroed outputs flush before the join"
         );
+    }
+
+    /// A device that fails its initial connect must come back through the
+    /// background reconnect worker: /discover flips to connected, health
+    /// flips true, and — the part an operator actually cares about — the
+    /// mapping that was parked at startup binds, so the device's register
+    /// value flows into the PLC variable mid-run without a restart.
+    #[tokio::test]
+    async fn background_reconnect_adopts_failed_device_and_binds_mappings() {
+        use project::{
+            ModbusChannel, ModbusChannelKind, ModbusConfig, ModbusDataType, ModbusTcpParams,
+            ModbusTransport, ModbusWordOrder,
+        };
+
+        // Reserve a port, then close the listener → initial connect refused.
+        let reserved = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve port");
+        let addr = reserved.local_addr().expect("local addr");
+        drop(reserved);
+
+        let spec = DeviceSpec {
+            name: "pm".into(),
+            config: ProtocolConfig::Modbus(ModbusConfig {
+                transport: ModbusTransport::Tcp(ModbusTcpParams {
+                    host: addr.ip().to_string(),
+                    port: addr.port(),
+                }),
+                slave_id: 1,
+                poll_interval_ms: 20,
+                timeout_ms: Some(200),
+                reconnect_backoff_ms: None,
+                channels: vec![ModbusChannel {
+                    name: "hr0".into(),
+                    kind: ModbusChannelKind::HoldingRegister,
+                    address: 0,
+                    data_type: ModbusDataType::U16,
+                    word_order: ModbusWordOrder::HiLo,
+                }],
+            }),
+        };
+        let mapping = Mapping {
+            application: "main".into(),
+            variable: "x".into(),
+            direction: Direction::Input,
+            device: "pm".into(),
+            channel: "hr0".into(),
+        };
+        // `y := x` so the input mapping's value is observable unmodified.
+        let container = crate::compile(
+            "PROGRAM main\n\
+                VAR x : INT; y : INT; END_VAR\n\
+                y := x;\n\
+            END_PROGRAM",
+        )
+        .expect("program compiles");
+
+        let handle = spawn_units_inner(
+            vec![single_unit(container, 10)],
+            DeviceSource::Specs(vec![spec]),
+            vec![mapping],
+            None,
+        );
+
+        // Startup outcome: configured but down, and visibly so.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while handle.device_reports().is_empty() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let reports = handle.device_reports();
+        assert_eq!(reports.len(), 1);
+        assert!(!reports[0].connected, "no endpoint yet — connect must fail");
+        assert!(
+            !handle.device_health()[0].healthy,
+            "failed connect must surface as unhealthy"
+        );
+
+        // Bring a real slave up on the reserved port with hr[0] = 42.
+        let slave = iomap_modbus::DemoSlave::new();
+        slave.holding_registers().lock().expect("hr")[0] = 42;
+        let server = tokio::spawn(iomap_modbus::run_demo_slave(addr, slave));
+
+        // Worker backoff is 1 s, 2 s, 4 s… — well within this budget.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            if handle.device_reports()[0].connected && handle.device_health()[0].healthy {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            handle.device_reports()[0].connected,
+            "background reconnect must flip the /discover report"
+        );
+        assert!(
+            handle.device_health()[0].healthy,
+            "adopted device must go healthy"
+        );
+
+        // The parked mapping must now be live: register 42 → x → y.
+        let mut rx = handle.subscribe();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut seen = false;
+        while Instant::now() < deadline && !seen {
+            let snap = last_snapshot_within(&mut rx, Duration::from_millis(300)).await;
+            seen = var_value(&snap, "x") == "42";
+        }
+        assert!(
+            seen,
+            "register value must flow through the late-bound mapping"
+        );
+
+        tokio::time::timeout(Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("shutdown");
+        server.abort();
     }
 
     /// The handle must mirror a device's live transport health: `true`
