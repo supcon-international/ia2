@@ -17,6 +17,7 @@
 
 mod bits;
 mod esi_map;
+pub mod gear;
 mod real;
 mod sim;
 mod validate;
@@ -211,6 +212,7 @@ mod tests {
                     pdi_bit_offset: 0,
                 },
             ],
+            gear: vec![],
         }
     }
 

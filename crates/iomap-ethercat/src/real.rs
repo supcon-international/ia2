@@ -134,6 +134,47 @@ macro_rules! copy_outputs_to_bus {
     }};
 }
 
+/// In-cycle gear tick: for every configured gear axis, read the follower's
+/// statusword + actual (and the master axis's actual) from the *input*
+/// surface of the previous exchange, run the engine, and overwrite the
+/// follower's target_position bytes on the *output* surface. Runs after
+/// `copy_outputs_to_bus!` so the engine — not the PLC mirror — owns those
+/// bytes on the wire.
+macro_rules! gear_tick {
+    ($group:expr, $maindevice:expr, $engines:expr) => {{
+        for eng in $engines.iter_mut() {
+            let mut master_actual: Option<i32> = None;
+            if let crate::gear::MasterSrc::Axis {
+                slave_index,
+                offset,
+            } = eng.master
+            {
+                for (i, sd) in $group.iter(&$maindevice).enumerate() {
+                    if i as u16 == slave_index {
+                        master_actual = crate::gear::read_i32(&sd.inputs_raw()[..], offset);
+                        break;
+                    }
+                }
+            }
+            for (i, sd) in $group.iter(&$maindevice).enumerate() {
+                if i as u16 == eng.follower_index {
+                    let (sw, actual) = {
+                        let inp = sd.inputs_raw();
+                        (
+                            crate::gear::read_u16(&inp[..], eng.status_off).unwrap_or(0),
+                            crate::gear::read_i32(&inp[..], eng.actual_off).unwrap_or(0),
+                        )
+                    };
+                    let target = eng.tick(sw, actual, master_actual);
+                    let mut out = sd.outputs_raw_mut();
+                    crate::gear::write_i32(&mut out[..], eng.target_off, target);
+                    break;
+                }
+            }
+        }
+    }};
+}
+
 /// Post-cycle: snapshot inputs back into our mirror.
 macro_rules! copy_inputs_from_bus {
     ($group:expr, $maindevice:expr, $pdi:expr) => {{
@@ -177,6 +218,9 @@ const WORKER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 pub struct RealEthercat {
     name: String,
     channels: HashMap<String, EthercatChannel>,
+    /// Slow-plane routing for in-cycle gear parameter channels; consulted
+    /// by read/write_channel before the PDI channel lookup.
+    gear_routing: crate::gear::GearRouting,
     pdi: Arc<Mutex<PdiMirror>>,
     shutdown: Arc<AtomicBool>,
     /// Flipped by the worker (via a drop guard) on every `smol_main`
@@ -202,6 +246,9 @@ struct WorkerShared {
     shutdown: Arc<AtomicBool>,
     stopped: Arc<AtomicBool>,
     healthy: Arc<AtomicBool>,
+    /// In-cycle gear engines (one per configured [[gear]] axis), owned by
+    /// the cyclic worker and ticked between the mirror copy and tx_rx.
+    engines: Vec<crate::gear::GearEngine>,
 }
 
 /// Wait up to `timeout` for the worker to flag `stopped`, then join it.
@@ -276,6 +323,43 @@ impl RealEthercat {
         validate::validate_channel_shapes(&config.channels).map_err(IoError::Connect)?;
         validate::validate_init_sdo(&config.slaves).map_err(IoError::Connect)?;
 
+        // Gear axes: names must not shadow PDO channels (the routing check
+        // in read/write_channel runs first and would silently eat them),
+        // and every referenced slave must exist in the declared topology.
+        for g in &config.gear {
+            for name in [
+                &g.engage_channel,
+                &g.ratio_num_channel,
+                &g.ratio_den_channel,
+                &g.ratio_step_channel,
+                &g.phase_channel,
+                &g.master_vel_channel,
+                &g.max_travel_channel,
+                &g.engaged_channel,
+                &g.trip_channel,
+            ] {
+                if seen_names.contains(name.as_str()) {
+                    return Err(IoError::Connect(format!(
+                        "gear channel '{name}' collides with a PDO channel name"
+                    )));
+                }
+            }
+            if !known_slaves.is_empty() && !known_slaves.contains(&g.slave_index) {
+                return Err(IoError::Connect(format!(
+                    "gear follower references unknown slave_index={}",
+                    g.slave_index
+                )));
+            }
+            if let project::GearMaster::Axis { slave_index, .. } = g.master {
+                if !known_slaves.is_empty() && !known_slaves.contains(&slave_index) {
+                    return Err(IoError::Connect(format!(
+                        "gear master references unknown slave_index={slave_index}"
+                    )));
+                }
+            }
+        }
+        let (engines, gear_routing) = crate::gear::build(&config.gear);
+
         let channels: HashMap<String, EthercatChannel> = config
             .channels
             .iter()
@@ -297,6 +381,7 @@ impl RealEthercat {
             shutdown: shutdown.clone(),
             stopped: stopped.clone(),
             healthy: healthy.clone(),
+            engines,
         };
         let thread_name = format!("ec-{name}");
 
@@ -344,6 +429,47 @@ impl RealEthercat {
                 if let Err(m) = validate::validate_pdi_ranges(&config.channels, &discovered) {
                     problems.push(m);
                 }
+                for g in &config.gear {
+                    let find = |idx: u16| discovered.iter().find(|d| d.index == idx);
+                    match find(g.slave_index) {
+                        Some(d) => {
+                            if g.target_pos_offset as usize + 4 > d.output_bytes as usize {
+                                problems.push(format!(
+                                    "gear follower slave {} target_pos_offset {}+4 exceeds output PDI ({} B)",
+                                    g.slave_index, g.target_pos_offset, d.output_bytes
+                                ));
+                            }
+                            if g.actual_pos_offset as usize + 4 > d.input_bytes as usize
+                                || g.status_word_offset as usize + 2 > d.input_bytes as usize
+                            {
+                                problems.push(format!(
+                                    "gear follower slave {} actual/status offsets exceed input PDI ({} B)",
+                                    g.slave_index, d.input_bytes
+                                ));
+                            }
+                        }
+                        None => problems.push(format!(
+                            "gear follower slave_index {} not on the discovered bus",
+                            g.slave_index
+                        )),
+                    }
+                    if let project::GearMaster::Axis {
+                        slave_index,
+                        actual_pos_offset,
+                    } = g.master
+                    {
+                        match find(slave_index) {
+                            Some(d) if (actual_pos_offset as usize + 4) <= d.input_bytes as usize => {}
+                            Some(d) => problems.push(format!(
+                                "gear master slave {} actual_pos_offset {}+4 exceeds input PDI ({} B)",
+                                slave_index, actual_pos_offset, d.input_bytes
+                            )),
+                            None => problems.push(format!(
+                                "gear master slave_index {slave_index} not on the discovered bus"
+                            )),
+                        }
+                    }
+                }
                 if !problems.is_empty() {
                     // A failed connect must not leak a live cyclic thread
                     // driving the bus: signal it down and join (bounded).
@@ -369,6 +495,7 @@ impl RealEthercat {
                 Ok(Self {
                     name,
                     channels,
+                    gear_routing,
                     pdi,
                     shutdown,
                     stopped,
@@ -412,6 +539,11 @@ impl IoDevice for RealEthercat {
     }
 
     async fn read_channel(&mut self, channel: &str) -> Result<ChannelValue, IoError> {
+        // Gear parameter / feedback channels live in the lock-free shared
+        // params, not the PDI.
+        if let Some(v) = self.gear_routing.read(channel) {
+            return Ok(v);
+        }
         let meta = self
             .channels
             .get(channel)
@@ -438,6 +570,11 @@ impl IoDevice for RealEthercat {
     }
 
     async fn write_channel(&mut self, channel: &str, value: ChannelValue) -> Result<(), IoError> {
+        // Gear parameter channels route into the lock-free shared params
+        // the cyclic loop reads each tick — never into PDI bytes.
+        if let Some(res) = self.gear_routing.write(channel, &value) {
+            return res;
+        }
         let meta = self
             .channels
             .get(channel)
@@ -473,6 +610,10 @@ impl IoDevice for RealEthercat {
     /// periods after returning if you need to guarantee propagation
     /// before exiting (the bridge does this).
     async fn enter_failsafe(&mut self) -> Result<(), IoError> {
+        // Gear axes first: drop every engage request so the engines fall
+        // back to shadow/hold instead of re-driving targets over the
+        // zeroed mirror below.
+        self.gear_routing.disengage_all();
         let mut pdi = self.pdi.lock().expect("pdi mirror poisoned");
         for buf in pdi.outputs.values_mut() {
             buf.fill(0);
@@ -546,6 +687,7 @@ fn smol_main(
         shutdown,
         stopped,
         healthy,
+        mut engines,
     } = shared;
     // Flip `stopped` on EVERY exit path (init failure or loop end) via a
     // drop guard, so a bounded join never waits on a thread that's already
@@ -837,6 +979,7 @@ fn smol_main(
                 while !shutdown.load(Ordering::Relaxed) {
                     let cycle_start = std::time::Instant::now();
                     copy_outputs_to_bus!(group, maindevice, pdi);
+                    gear_tick!(group, maindevice, engines);
                     let next_wait = match group.tx_rx_dc(&maindevice).await {
                         Ok(resp) => {
                             copy_inputs_from_bus!(group, maindevice, pdi);
@@ -883,6 +1026,7 @@ fn smol_main(
                 let mut health = HealthTracker::with_flag(UNHEALTHY_AFTER_TX_ERRORS, healthy);
                 while !shutdown.load(Ordering::Relaxed) {
                     copy_outputs_to_bus!(group, maindevice, pdi);
+                    gear_tick!(group, maindevice, engines);
                     match group.tx_rx(&maindevice).await {
                         Ok(_) => {
                             if health.record_success() == HealthTransition::Recovered {

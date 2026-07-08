@@ -627,10 +627,116 @@ pub struct EthercatConfig {
     /// via this list.
     #[serde(default)]
     pub channels: Vec<EthercatChannel>,
+    /// In-cycle electronic gear axes (B-tier motion). Each entry makes
+    /// the cyclic loop generate the follower axis's target_position every
+    /// bus cycle, strictly cycle-aligned; the PLC scan plane only feeds
+    /// slow parameters (ratio / engage / …) through the named channels
+    /// below, which the device routes into a lock-free shared struct
+    /// instead of PDI bytes. The loop OWNS the follower's target_position
+    /// bytes — PLC writes to that PDO field are overwritten every cycle.
+    #[serde(default)]
+    pub gear: Vec<EthercatGear>,
 }
 
 fn default_cycle_us() -> u32 {
     1_000
+}
+
+/// One in-cycle electronic gear axis: a follower SubDevice whose
+/// target_position is generated inside the cyclic loop from a master
+/// source (virtual accumulator or another axis's actual_position).
+///
+/// Safety model (mirrors the field-hardened ST-tier gear): while the
+/// follower drive is not in CiA402 Operation Enabled the engine shadows
+/// its actual_position (no jump at enable); engagement requires
+/// `max_travel` > 0 and latches ratio/phase at the engage edge (mid-run
+/// parameter edits are inert until re-engage); overtravel trips to a
+/// position hold until the engage channel is dropped.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct EthercatGear {
+    /// Bus position of the follower (controlled) axis.
+    pub slave_index: u16,
+    /// Byte offset of target_position (0x607A, i32) in the follower's
+    /// output PDI.
+    pub target_pos_offset: u16,
+    /// Byte offset of actual_position (0x6064, i32) in the follower's
+    /// input PDI — read for the not-enabled shadow and engage latch.
+    pub actual_pos_offset: u16,
+    /// Byte offset of statusword (0x6041, u16) in the follower's input
+    /// PDI — the engine gates motion on CiA402 Operation Enabled itself
+    /// rather than trusting the slow plane.
+    pub status_word_offset: u16,
+    /// Master position source.
+    pub master: GearMaster,
+    /// Slow-plane parameter channels, routed by `write_channel` into the
+    /// gear's lock-free shared params instead of PDI bytes. Names must
+    /// not collide with PDO channel names on the same device.
+    #[serde(default = "default_gear_engage_channel")]
+    pub engage_channel: String,
+    #[serde(default = "default_gear_ratio_num_channel")]
+    pub ratio_num_channel: String,
+    #[serde(default = "default_gear_ratio_den_channel")]
+    pub ratio_den_channel: String,
+    #[serde(default = "default_gear_ratio_step_channel")]
+    pub ratio_step_channel: String,
+    #[serde(default = "default_gear_phase_channel")]
+    pub phase_channel: String,
+    #[serde(default = "default_gear_master_vel_channel")]
+    pub master_vel_channel: String,
+    /// Travel limit in counts from the engage origin; engagement is
+    /// refused while the routed value is <= 0 (locked-by-default).
+    #[serde(default = "default_gear_max_travel_channel")]
+    pub max_travel_channel: String,
+    /// Read-only feedback channels (engine → PLC/monitor).
+    #[serde(default = "default_gear_engaged_channel")]
+    pub engaged_channel: String,
+    #[serde(default = "default_gear_trip_channel")]
+    pub trip_channel: String,
+}
+
+/// Master position source for an in-cycle gear axis.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GearMaster {
+    /// Software master: an accumulator advanced by `master_vel` counts
+    /// per bus cycle inside the loop.
+    Virtual,
+    /// Another axis on the same bus: its actual_position (0x6064, i32)
+    /// read from the input PDI each cycle.
+    Axis {
+        slave_index: u16,
+        actual_pos_offset: u16,
+    },
+}
+
+fn default_gear_engage_channel() -> String {
+    "gear_engage".into()
+}
+fn default_gear_ratio_num_channel() -> String {
+    "ratio_num".into()
+}
+fn default_gear_ratio_den_channel() -> String {
+    "ratio_den".into()
+}
+fn default_gear_ratio_step_channel() -> String {
+    "ratio_step".into()
+}
+fn default_gear_phase_channel() -> String {
+    "phase_ofs".into()
+}
+fn default_gear_master_vel_channel() -> String {
+    "master_vel".into()
+}
+fn default_gear_max_travel_channel() -> String {
+    "gear_max_travel".into()
+}
+fn default_gear_engaged_channel() -> String {
+    "gear_engaged".into()
+}
+fn default_gear_trip_channel() -> String {
+    "gear_trip".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
