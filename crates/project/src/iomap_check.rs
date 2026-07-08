@@ -350,6 +350,7 @@ mod tests {
                     ch("tx_status", EthercatPdoDirection::TxPdo),
                     ch("rx_command", EthercatPdoDirection::RxPdo),
                 ],
+                gear: vec![],
             }),
         }
     }
