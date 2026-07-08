@@ -103,8 +103,20 @@ impl GearShared {
             ChannelValue::Real(v) => v as f64,
             ChannelValue::F64(v) => v,
         };
+        if let GearParam::Engage = param {
+            self.engage.store(as_f64 != 0.0, Ordering::Relaxed);
+            return;
+        }
+        // Reject non-finite numeric params at the door: a slow-plane NaN/inf
+        // (e.g. an ST `0.0/0.0` while composing a ratio) must never reach the
+        // fast-plane law, where it would poison the target and silently
+        // bypass the max_travel trip. Dropping the write keeps the last good
+        // value in force.
+        if !as_f64.is_finite() {
+            return;
+        }
         match param {
-            GearParam::Engage => self.engage.store(as_f64 != 0.0, Ordering::Relaxed),
+            GearParam::Engage => unreachable!(),
             GearParam::RatioNum => Self::store_f64(&self.ratio_num, as_f64),
             GearParam::RatioDen => Self::store_f64(&self.ratio_den, as_f64),
             GearParam::RatioStep => Self::store_f64(&self.ratio_step, as_f64),
@@ -156,9 +168,14 @@ pub struct GearEngine {
     pub status_off: usize,
     pub master: MasterSrc,
     shared: Arc<GearShared>,
-    /// Virtual master accumulator (counts). Advances every tick so an
-    /// engaged follower sees a continuous master, exactly like a real axis.
-    virt_master: f64,
+    /// Continuous, wrap-free master position (counts). For a virtual master
+    /// this is an accumulator advanced by `master_vel`; for an axis master
+    /// it integrates the per-cycle *wrapping* i32 delta of the master's
+    /// actual_position, so the ±2^31 encoder wrap never becomes a full-scale
+    /// jump in `(master - m0)`. `None` until the first tick primes it.
+    master_pos: f64,
+    /// Previous raw i32 master actual, for the wrapping-delta integration.
+    prev_master_raw: Option<i32>,
     /// Current output target (counts). Shadow / gear law / hold all land
     /// here; it is the single source of what goes on the wire.
     target: f64,
@@ -166,6 +183,12 @@ pub struct GearEngine {
     m0: f64,
     s0: f64,
     ratio: f64,
+    /// Gear parameters latched at the engage edge (the documented contract:
+    /// mid-run edits are inert until re-engage). `ratio_step` stays live —
+    /// it only sets the soft-engage ramp speed.
+    ratio_num_l: f64,
+    ratio_den_l: f64,
+    phase_l: f64,
     trip: bool,
     /// Set when Operation Enabled is lost; a fresh engagement requires the
     /// engage request to be observed low first (operator re-arm), so stale
@@ -192,12 +215,16 @@ impl GearEngine {
             status_off: cfg.status_word_offset as usize,
             master,
             shared,
-            virt_master: 0.0,
+            master_pos: 0.0,
+            prev_master_raw: None,
             target: 0.0,
             was_engaged: false,
             m0: 0.0,
             s0: 0.0,
             ratio: 0.0,
+            ratio_num_l: 0.0,
+            ratio_den_l: 1.0,
+            phase_l: 0.0,
             trip: false,
             need_rearm: false,
         }
@@ -205,28 +232,45 @@ impl GearEngine {
 
     /// One bus cycle. `master_actual` is `Some` for an axis master (read by
     /// the caller from that axis's input PDI) and `None` for virtual.
-    /// Returns the target_position to write into the follower's output PDI.
+    /// `bus_ok` is `false` when the *previous* exchange failed, so the inputs
+    /// are stale — the engine then freezes (no master advance, target held)
+    /// and recovery applies no accumulated step. Returns the target_position
+    /// to write into the follower's output PDI.
     pub fn tick(
         &mut self,
         follower_sw: u16,
         follower_actual: i32,
         master_actual: Option<i32>,
+        bus_ok: bool,
     ) -> i32 {
+        // Stale-input cycle (previous tx_rx failed): don't integrate the
+        // master or advance the law — just re-emit the last target so the
+        // bus recovers without a one-cycle catch-up step.
+        if !bus_ok {
+            self.prev_master_raw = master_actual.or(self.prev_master_raw);
+            return self.emit();
+        }
+
         let engage_in = self.shared.engage.load(Ordering::Relaxed);
-        let ratio_num = GearShared::load_f64(&self.shared.ratio_num);
-        let ratio_den = GearShared::load_f64(&self.shared.ratio_den);
+        // Slow-plane values are sanitized to finite at ingress (see
+        // GearShared::write), so no NaN/inf can reach the law here.
         let ratio_step = GearShared::load_f64(&self.shared.ratio_step).max(0.0);
-        let phase_ofs = GearShared::load_f64(&self.shared.phase_ofs);
         let master_vel = GearShared::load_f64(&self.shared.master_vel);
         let max_travel = GearShared::load_f64(&self.shared.max_travel);
 
-        // The virtual master advances every tick, engaged or not, exactly
-        // like a real axis keeps moving whether or not anyone follows it.
-        self.virt_master += master_vel;
-        let master = match master_actual {
-            Some(a) => a as f64,
-            None => self.virt_master,
-        };
+        // Advance the continuous, wrap-free master position.
+        match master_actual {
+            // Axis master: integrate the WRAPPING i32 delta so the encoder's
+            // ±2^31 rollover contributes a small step, not a full-scale jump.
+            Some(raw) => {
+                if let Some(prev) = self.prev_master_raw {
+                    self.master_pos += raw.wrapping_sub(prev) as f64;
+                }
+                self.prev_master_raw = Some(raw);
+            }
+            // Virtual master: software accumulator, advances every tick.
+            None => self.master_pos += master_vel,
+        }
 
         // CiA402: Operation Enabled = statusword & 0x6F == 0x27.
         let enabled = (follower_sw & 0x006F) == 0x0027;
@@ -244,30 +288,45 @@ impl GearEngine {
             }
             let engage = engage_in && !self.trip && !self.need_rearm && max_travel > 0.0;
             if engage && !self.was_engaged {
-                self.m0 = master;
+                // Engage edge: latch origins AND gear params (documented
+                // contract — mid-run ratio/phase edits are inert until
+                // re-engage). ratio_step stays live (ramp speed only).
+                self.m0 = self.master_pos;
                 self.s0 = self.target;
                 self.ratio = 0.0;
+                self.ratio_num_l = GearShared::load_f64(&self.shared.ratio_num);
+                self.ratio_den_l = GearShared::load_f64(&self.shared.ratio_den);
+                self.phase_l = GearShared::load_f64(&self.shared.phase_ofs);
             }
             self.was_engaged = engage;
             if engage {
-                let tgt_ratio = if ratio_den == 0.0 {
+                let tgt_ratio = if self.ratio_den_l == 0.0 {
                     0.0
                 } else {
-                    ratio_num / ratio_den
+                    self.ratio_num_l / self.ratio_den_l
                 };
                 let d = (tgt_ratio - self.ratio).clamp(-ratio_step, ratio_step);
                 self.ratio += d;
-                self.target = self.s0 + self.ratio * (master - self.m0) + phase_ofs;
-                // Overtravel: latch the trip. This cycle's (just-past-limit)
-                // target still goes out — overshoot is bounded to one cycle
-                // of master motion × ratio; from the next tick we hold.
-                if (self.target - self.s0).abs() >= max_travel {
+                let raw_target = self.s0 + self.ratio * (self.master_pos - self.m0) + self.phase_l;
+                // Hard travel bound: clamp the commanded excursion to
+                // ±max_travel about the engage origin, so max_travel is a
+                // true limit on what reaches the wire — not just a
+                // fire-after-the-fact trip. A wild ratio typo or any other
+                // over-range demand is capped to one max_travel excursion,
+                // and the trip latches to hold there until engage drops.
+                self.target = raw_target.clamp(self.s0 - max_travel, self.s0 + max_travel);
+                if (raw_target - self.s0).abs() >= max_travel {
                     self.trip = true;
                 }
             }
             // Disengaged / tripped / re-arm pending: hold self.target.
         }
 
+        self.emit()
+    }
+
+    /// Publish engine state and encode the held target for the wire.
+    fn emit(&self) -> i32 {
         self.shared
             .engaged_fb
             .store(self.was_engaged, Ordering::Relaxed);
@@ -275,6 +334,8 @@ impl GearEngine {
 
         // Saturate rather than wrap at the i32 edge (±256 motor revs on a
         // 23-bit encoder). Long unidirectional runs remain a known limit.
+        // `target` is always finite: params are finite by ingress guard and
+        // clamped by max_travel, so round()/clamp can't see NaN here.
         self.target.round().clamp(i32::MIN as f64, i32::MAX as f64) as i32
     }
 }
@@ -312,8 +373,47 @@ impl GearRouting {
     }
 }
 
+/// Connect-time check that every gear channel name is unique — across all
+/// gears and within each gear — and doesn't shadow a PDO channel. Without
+/// this, `build`'s HashMap inserts silently overwrite a duplicate, so a
+/// second gear axis (or a fat-fingered channel rename) would misroute
+/// parameters to the wrong engine with no error. Returns the first
+/// collision found. Called by both the real and sim connect paths.
+pub fn validate_channels(
+    gears: &[EthercatGear],
+    pdo_names: &std::collections::HashSet<&str>,
+) -> Result<(), String> {
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for g in gears {
+        for name in [
+            &g.engage_channel,
+            &g.ratio_num_channel,
+            &g.ratio_den_channel,
+            &g.ratio_step_channel,
+            &g.phase_channel,
+            &g.master_vel_channel,
+            &g.max_travel_channel,
+            &g.engaged_channel,
+            &g.trip_channel,
+        ] {
+            if pdo_names.contains(name.as_str()) {
+                return Err(format!(
+                    "gear channel '{name}' collides with a PDO channel name"
+                ));
+            }
+            if !seen.insert(name.as_str()) {
+                return Err(format!(
+                    "gear channel '{name}' is used by more than one gear axis or parameter"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Build the engines + routing tables from the device config. Returns the
 /// engines for the cyclic worker and the routing for the device facade.
+/// Assumes [`validate_channels`] has already passed (unique names).
 pub fn build(gears: &[EthercatGear]) -> (Vec<GearEngine>, GearRouting) {
     let mut engines = Vec::with_capacity(gears.len());
     let mut routing = GearRouting::default();
@@ -447,11 +547,15 @@ mod tests {
     fn shadows_actual_until_enabled_then_holds() {
         let (mut e, _s) = engine_virtual();
         // Not enabled: target shadows whatever the feedback says.
-        assert_eq!(e.tick(RDY_ONLY, 12345, None), 12345);
-        assert_eq!(e.tick(RDY_ONLY, -777, None), -777);
+        assert_eq!(e.tick(RDY_ONLY, 12345, None, true), 12345);
+        assert_eq!(e.tick(RDY_ONLY, -777, None, true), -777);
         // Enable: target latched (holds), no jump.
-        assert_eq!(e.tick(OP_ENABLED, -777, None), -777);
-        assert_eq!(e.tick(OP_ENABLED, -700, None), -777, "hold, not follow");
+        assert_eq!(e.tick(OP_ENABLED, -777, None, true), -777);
+        assert_eq!(
+            e.tick(OP_ENABLED, -700, None, true),
+            -777,
+            "hold, not follow"
+        );
     }
 
     #[test]
@@ -463,7 +567,11 @@ mod tests {
         set(&s, GearParam::MasterVel, 100.0);
         s.write(GearParam::Engage, &ChannelValue::Bool(true));
         for _ in 0..10 {
-            assert_eq!(e.tick(OP_ENABLED, 0, None), 0, "locked while max_travel=0");
+            assert_eq!(
+                e.tick(OP_ENABLED, 0, None, true),
+                0,
+                "locked while max_travel=0"
+            );
         }
         assert_eq!(s.read(GearReadback::Engaged), ChannelValue::Bool(false));
     }
@@ -477,10 +585,10 @@ mod tests {
         set(&s, GearParam::MasterVel, 100.0);
         set(&s, GearParam::MaxTravel, 1e9);
         s.write(GearParam::Engage, &ChannelValue::Bool(true));
-        let t1 = e.tick(OP_ENABLED, 0, None);
+        let t1 = e.tick(OP_ENABLED, 0, None, true);
         let mut prev = t1;
         for _ in 0..50 {
-            let t = e.tick(OP_ENABLED, 0, None);
+            let t = e.tick(OP_ENABLED, 0, None, true);
             assert_eq!(t - prev, 200, "2:1 of 100 cnt/cycle master");
             prev = t;
         }
@@ -498,13 +606,13 @@ mod tests {
         s.write(GearParam::Engage, &ChannelValue::Bool(true));
         let mut last = 0;
         for _ in 0..20 {
-            last = e.tick(OP_ENABLED, 0, None);
+            last = e.tick(OP_ENABLED, 0, None, true);
         }
         assert!(last > 0);
         s.write(GearParam::Engage, &ChannelValue::Bool(false));
-        let hold = e.tick(OP_ENABLED, 0, None);
+        let hold = e.tick(OP_ENABLED, 0, None, true);
         assert_eq!(hold, last, "disengage holds position");
-        assert_eq!(e.tick(OP_ENABLED, 0, None), hold, "keeps holding");
+        assert_eq!(e.tick(OP_ENABLED, 0, None, true), hold, "keeps holding");
     }
 
     #[test]
@@ -517,7 +625,7 @@ mod tests {
         set(&s, GearParam::MaxTravel, 1e9);
         s.write(GearParam::Engage, &ChannelValue::Bool(true));
         for _ in 0..20 {
-            assert_eq!(e.tick(OP_ENABLED, 0, None), 0, "ratio never ramps");
+            assert_eq!(e.tick(OP_ENABLED, 0, None, true), 0, "ratio never ramps");
         }
     }
 
@@ -532,7 +640,7 @@ mod tests {
         s.write(GearParam::Engage, &ChannelValue::Bool(true));
         let mut targets = Vec::new();
         for _ in 0..10 {
-            targets.push(e.tick(OP_ENABLED, 0, None));
+            targets.push(e.tick(OP_ENABLED, 0, None, true));
         }
         // Trips once |target| >= 450 (one cycle of overshoot allowed).
         let peak = *targets.iter().max().unwrap();
@@ -540,14 +648,14 @@ mod tests {
         assert_eq!(*targets.last().unwrap(), peak, "held after trip");
         assert_eq!(s.read(GearReadback::Trip), ChannelValue::Bool(true));
         // Still engaged-requested: stays held (trip persists).
-        assert_eq!(e.tick(OP_ENABLED, 0, None), peak);
+        assert_eq!(e.tick(OP_ENABLED, 0, None, true), peak);
         // Drop engage → trip clears; re-engage runs again from new origin.
         s.write(GearParam::Engage, &ChannelValue::Bool(false));
-        e.tick(OP_ENABLED, 0, None);
+        e.tick(OP_ENABLED, 0, None, true);
         assert_eq!(s.read(GearReadback::Trip), ChannelValue::Bool(false));
         s.write(GearParam::Engage, &ChannelValue::Bool(true));
-        e.tick(OP_ENABLED, 0, None); // engage tick: at new origin (= held peak)
-        let t = e.tick(OP_ENABLED, 0, None);
+        e.tick(OP_ENABLED, 0, None, true); // engage tick: at new origin (= held peak)
+        let t = e.tick(OP_ENABLED, 0, None, true);
         assert!(t > peak, "re-engaged and following again");
     }
 
@@ -560,22 +668,22 @@ mod tests {
         set(&s, GearParam::MasterVel, 100.0);
         set(&s, GearParam::MaxTravel, 1e9);
         s.write(GearParam::Engage, &ChannelValue::Bool(true));
-        e.tick(OP_ENABLED, 0, None); // engage tick: latches origin
-        assert!(e.tick(OP_ENABLED, 0, None) > 0, "engaged and moving");
+        e.tick(OP_ENABLED, 0, None, true); // engage tick: latches origin
+        assert!(e.tick(OP_ENABLED, 0, None, true) > 0, "engaged and moving");
         // Drive drops out (fault / disable); engage force left high.
-        e.tick(RDY_ONLY, 500, None);
+        e.tick(RDY_ONLY, 500, None, true);
         // Back to enabled with the stale engage still high: must NOT move.
-        let t0 = e.tick(OP_ENABLED, 500, None);
+        let t0 = e.tick(OP_ENABLED, 500, None, true);
         for _ in 0..10 {
-            assert_eq!(e.tick(OP_ENABLED, 500, None), t0, "no auto-restart");
+            assert_eq!(e.tick(OP_ENABLED, 500, None, true), t0, "no auto-restart");
         }
         // Operator re-arms: engage low, then high again → fresh engagement.
         s.write(GearParam::Engage, &ChannelValue::Bool(false));
-        e.tick(OP_ENABLED, 500, None);
+        e.tick(OP_ENABLED, 500, None, true);
         s.write(GearParam::Engage, &ChannelValue::Bool(true));
-        e.tick(OP_ENABLED, 500, None);
+        e.tick(OP_ENABLED, 500, None, true);
         assert!(
-            e.tick(OP_ENABLED, 500, None) > t0,
+            e.tick(OP_ENABLED, 500, None, true) > t0,
             "moves after explicit re-arm"
         );
     }
@@ -589,13 +697,172 @@ mod tests {
         set(&s, GearParam::MaxTravel, 1e9);
         // Real bring-up order: shadow while not enabled (s0 arms at the
         // follower's actual), enable with engage low (re-arm), then engage.
-        e.tick(RDY_ONLY, 1000, Some(5000)); // shadow: target=1000
-        e.tick(OP_ENABLED, 1000, Some(5000)); // enabled, engage low
+        e.tick(RDY_ONLY, 1000, Some(5000), true); // shadow: target=1000
+        e.tick(OP_ENABLED, 1000, Some(5000), true); // enabled, engage low
         s.write(GearParam::Engage, &ChannelValue::Bool(true));
-        e.tick(OP_ENABLED, 1000, Some(5000)); // engage: m0=5000, s0=1000
-        let t = e.tick(OP_ENABLED, 1000, Some(5300));
+        e.tick(OP_ENABLED, 1000, Some(5000), true); // engage: m0=5000, s0=1000
+        let t = e.tick(OP_ENABLED, 1000, Some(5300), true);
         assert_eq!(t, 1300, "s0 + 1.0*(master-m0)");
-        let t = e.tick(OP_ENABLED, 1000, Some(4000));
+        let t = e.tick(OP_ENABLED, 1000, Some(4000), true);
         assert_eq!(t, 0, "follows master backwards too");
+    }
+
+    #[test]
+    fn axis_master_i32_wrap_is_a_small_step_not_full_scale() {
+        let (mut e, s) = engine_virtual();
+        set(&s, GearParam::RatioNum, 1.0);
+        set(&s, GearParam::RatioDen, 1.0);
+        set(&s, GearParam::RatioStep, 1.0);
+        set(&s, GearParam::MaxTravel, 1e9);
+        // Engage with the master near the i32 max.
+        let near_max = i32::MAX - 100;
+        e.tick(RDY_ONLY, 0, Some(near_max), true);
+        e.tick(OP_ENABLED, 0, Some(near_max), true);
+        s.write(GearParam::Engage, &ChannelValue::Bool(true));
+        let base = e.tick(OP_ENABLED, 0, Some(near_max), true); // engage edge
+                                                                // Advance 200 counts, which wraps i32 (MAX-100 + 200 -> MIN+99).
+        let wrapped = near_max.wrapping_add(200);
+        assert!(wrapped < 0, "precondition: the master actually wrapped");
+        let t = e.tick(OP_ENABLED, 0, Some(wrapped), true);
+        assert_eq!(t - base, 200, "wrap contributes a +200 step, not ~-4.3e9");
+    }
+
+    #[test]
+    fn nan_param_is_rejected_at_ingress_and_target_stays_finite() {
+        let (mut e, s) = engine_virtual();
+        set(&s, GearParam::RatioNum, 2.0);
+        set(&s, GearParam::RatioDen, 1.0);
+        set(&s, GearParam::RatioStep, 1.0);
+        set(&s, GearParam::MasterVel, 100.0);
+        set(&s, GearParam::MaxTravel, 1e9);
+        s.write(GearParam::Engage, &ChannelValue::Bool(true));
+        e.tick(OP_ENABLED, 0, None, true);
+        let good = e.tick(OP_ENABLED, 0, None, true);
+        // Slow plane writes NaN (e.g. ST 0.0/0.0) to ratio_den; must be dropped.
+        s.write(GearParam::RatioDen, &ChannelValue::F64(f64::NAN));
+        s.write(GearParam::RatioNum, &ChannelValue::F64(f64::INFINITY));
+        assert_eq!(
+            s.read(GearReadback::RatioDen),
+            ChannelValue::F64(1.0),
+            "NaN write dropped, last good value kept"
+        );
+        // Engine keeps producing finite, monotonic targets (2:1 unchanged).
+        let t1 = e.tick(OP_ENABLED, 0, None, true);
+        let t2 = e.tick(OP_ENABLED, 0, None, true);
+        assert_eq!(t1 - good, 200);
+        assert_eq!(t2 - t1, 200, "still 2:1, not poisoned to 0");
+    }
+
+    #[test]
+    fn mid_run_ratio_and_phase_edits_are_inert_until_reengage() {
+        let (mut e, s) = engine_virtual();
+        set(&s, GearParam::RatioNum, 1.0);
+        set(&s, GearParam::RatioDen, 1.0);
+        set(&s, GearParam::RatioStep, 10.0); // hard engage: full ratio in 1 tick
+        set(&s, GearParam::MasterVel, 100.0);
+        set(&s, GearParam::MaxTravel, 1e9);
+        s.write(GearParam::Engage, &ChannelValue::Bool(true));
+        e.tick(OP_ENABLED, 0, None, true); // engage: latch 1:1, phase 0
+        let a = e.tick(OP_ENABLED, 0, None, true);
+        let b = e.tick(OP_ENABLED, 0, None, true);
+        assert_eq!(b - a, 100, "1:1");
+        // Mid-run edits: must NOT take effect while engaged.
+        set(&s, GearParam::RatioNum, 5.0);
+        set(&s, GearParam::PhaseOfs, 1_000_000.0);
+        let c = e.tick(OP_ENABLED, 0, None, true);
+        let d = e.tick(OP_ENABLED, 0, None, true);
+        assert_eq!(d - c, 100, "still 1:1, no phase step — edits inert");
+        // Re-engage picks up the new params.
+        s.write(GearParam::Engage, &ChannelValue::Bool(false));
+        e.tick(OP_ENABLED, 0, None, true);
+        s.write(GearParam::Engage, &ChannelValue::Bool(true));
+        e.tick(OP_ENABLED, 0, None, true); // engage: latch 5:1
+        let p = e.tick(OP_ENABLED, 0, None, true);
+        let q = e.tick(OP_ENABLED, 0, None, true);
+        assert_eq!(q - p, 500, "now 5:1 after re-engage");
+    }
+
+    #[test]
+    fn max_travel_hard_clamps_the_commanded_excursion() {
+        let (mut e, s) = engine_virtual();
+        // Absurd ratio typo: 1000:1. Without the hard clamp this steps ~1e5
+        // counts in the first engaged cycle.
+        set(&s, GearParam::RatioNum, 1000.0);
+        set(&s, GearParam::RatioDen, 1.0);
+        set(&s, GearParam::RatioStep, 1000.0);
+        set(&s, GearParam::MasterVel, 100.0);
+        set(&s, GearParam::MaxTravel, 450.0);
+        s.write(GearParam::Engage, &ChannelValue::Bool(true));
+        let base = e.tick(OP_ENABLED, 0, None, true); // engage edge, s0 here
+        let mut peak_excursion = 0;
+        for _ in 0..8 {
+            let t = e.tick(OP_ENABLED, 0, None, true);
+            peak_excursion = peak_excursion.max((t - base).abs());
+        }
+        assert!(
+            peak_excursion <= 450,
+            "excursion {peak_excursion} must never exceed max_travel, even for a wild ratio"
+        );
+        assert_eq!(s.read(GearReadback::Trip), ChannelValue::Bool(true));
+    }
+
+    #[test]
+    fn stale_bus_cycle_freezes_master_and_holds_target() {
+        let (mut e, s) = engine_virtual();
+        set(&s, GearParam::RatioNum, 1.0);
+        set(&s, GearParam::RatioDen, 1.0);
+        set(&s, GearParam::RatioStep, 1.0);
+        set(&s, GearParam::MasterVel, 100.0);
+        set(&s, GearParam::MaxTravel, 1e9);
+        s.write(GearParam::Engage, &ChannelValue::Bool(true));
+        e.tick(OP_ENABLED, 0, None, true);
+        let before = e.tick(OP_ENABLED, 0, None, true);
+        // 5 stale cycles (bus down): master must NOT integrate, target holds.
+        for _ in 0..5 {
+            assert_eq!(
+                e.tick(OP_ENABLED, 0, None, false),
+                before,
+                "held during outage"
+            );
+        }
+        // Recovery: exactly one cycle of advance, no 5-cycle catch-up.
+        let after = e.tick(OP_ENABLED, 0, None, true);
+        assert_eq!(
+            after - before,
+            100,
+            "single-cycle step on recovery, not 600"
+        );
+    }
+
+    #[test]
+    fn validate_channels_catches_gear_collisions() {
+        use std::collections::HashSet;
+        let mut a = EthercatGear {
+            slave_index: 0,
+            target_pos_offset: 2,
+            actual_pos_offset: 4,
+            status_word_offset: 2,
+            master: GearMaster::Virtual,
+            engage_channel: "gear_engage".into(),
+            ratio_num_channel: "ratio_num".into(),
+            ratio_den_channel: "ratio_den".into(),
+            ratio_step_channel: "ratio_step".into(),
+            phase_channel: "phase_ofs".into(),
+            master_vel_channel: "master_vel".into(),
+            max_travel_channel: "gear_max_travel".into(),
+            engaged_channel: "gear_engaged".into(),
+            trip_channel: "gear_trip".into(),
+        };
+        let empty: HashSet<&str> = HashSet::new();
+        assert!(validate_channels(std::slice::from_ref(&a), &empty).is_ok());
+        // PDO shadow.
+        let pdo: HashSet<&str> = ["ratio_num"].into_iter().collect();
+        assert!(validate_channels(std::slice::from_ref(&a), &pdo).is_err());
+        // Two default-named gears collide.
+        let b = a.clone();
+        assert!(validate_channels(&[a.clone(), b], &empty).is_err());
+        // Intra-gear collision.
+        a.phase_channel = "ratio_num".into();
+        assert!(validate_channels(std::slice::from_ref(&a), &empty).is_err());
     }
 }

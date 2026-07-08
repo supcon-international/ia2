@@ -141,7 +141,7 @@ macro_rules! copy_outputs_to_bus {
 /// `copy_outputs_to_bus!` so the engine — not the PLC mirror — owns those
 /// bytes on the wire.
 macro_rules! gear_tick {
-    ($group:expr, $maindevice:expr, $engines:expr) => {{
+    ($group:expr, $maindevice:expr, $engines:expr, $bus_ok:expr) => {{
         for eng in $engines.iter_mut() {
             let mut master_actual: Option<i32> = None;
             if let crate::gear::MasterSrc::Axis {
@@ -165,7 +165,7 @@ macro_rules! gear_tick {
                             crate::gear::read_i32(&inp[..], eng.actual_off).unwrap_or(0),
                         )
                     };
-                    let target = eng.tick(sw, actual, master_actual);
+                    let target = eng.tick(sw, actual, master_actual, $bus_ok);
                     let mut out = sd.outputs_raw_mut();
                     crate::gear::write_i32(&mut out[..], eng.target_off, target);
                     break;
@@ -323,27 +323,12 @@ impl RealEthercat {
         validate::validate_channel_shapes(&config.channels).map_err(IoError::Connect)?;
         validate::validate_init_sdo(&config.slaves).map_err(IoError::Connect)?;
 
-        // Gear axes: names must not shadow PDO channels (the routing check
-        // in read/write_channel runs first and would silently eat them),
-        // and every referenced slave must exist in the declared topology.
+        // Gear axes: channel names must be unique (across gears and within
+        // each gear) and must not shadow PDO channels — the routing check in
+        // read/write_channel runs first and would silently eat a collision.
+        crate::gear::validate_channels(&config.gear, &seen_names).map_err(IoError::Connect)?;
+        // Every referenced slave must exist in the declared topology.
         for g in &config.gear {
-            for name in [
-                &g.engage_channel,
-                &g.ratio_num_channel,
-                &g.ratio_den_channel,
-                &g.ratio_step_channel,
-                &g.phase_channel,
-                &g.master_vel_channel,
-                &g.max_travel_channel,
-                &g.engaged_channel,
-                &g.trip_channel,
-            ] {
-                if seen_names.contains(name.as_str()) {
-                    return Err(IoError::Connect(format!(
-                        "gear channel '{name}' collides with a PDO channel name"
-                    )));
-                }
-            }
             if !known_slaves.is_empty() && !known_slaves.contains(&g.slave_index) {
                 return Err(IoError::Connect(format!(
                     "gear follower references unknown slave_index={}",
@@ -976,20 +961,27 @@ fn smol_main(
                 // and its CycleInfo tells us when to send the next frame
                 // (stays aligned to SYNC0).
                 let mut health = HealthTracker::with_flag(UNHEALTHY_AFTER_TX_ERRORS, healthy);
+                // Tracks whether the *previous* exchange succeeded — the gear
+                // engines read inputs captured by that exchange, so on a
+                // failed cycle they freeze (no master advance / target held)
+                // and the bus recovers without a one-cycle catch-up step.
+                let mut bus_ok = true;
                 while !shutdown.load(Ordering::Relaxed) {
                     let cycle_start = std::time::Instant::now();
                     copy_outputs_to_bus!(group, maindevice, pdi);
-                    gear_tick!(group, maindevice, engines);
+                    gear_tick!(group, maindevice, engines, bus_ok);
                     let next_wait = match group.tx_rx_dc(&maindevice).await {
                         Ok(resp) => {
                             copy_inputs_from_bus!(group, maindevice, pdi);
                             if health.record_success() == HealthTransition::Recovered {
                                 tracing::info!("ethercat recovered; cyclic exchange running again");
                             }
+                            bus_ok = true;
                             resp.extra.next_cycle_wait
                         }
                         Err(e) => {
                             note_txrx_failure(&mut health, &e);
+                            bus_ok = false;
                             sync0
                         }
                     };
@@ -1024,16 +1016,21 @@ fn smol_main(
                 let mut tick = smol::Timer::interval(sync0);
                 use smol::stream::StreamExt;
                 let mut health = HealthTracker::with_flag(UNHEALTHY_AFTER_TX_ERRORS, healthy);
+                let mut bus_ok = true;
                 while !shutdown.load(Ordering::Relaxed) {
                     copy_outputs_to_bus!(group, maindevice, pdi);
-                    gear_tick!(group, maindevice, engines);
+                    gear_tick!(group, maindevice, engines, bus_ok);
                     match group.tx_rx(&maindevice).await {
                         Ok(_) => {
                             if health.record_success() == HealthTransition::Recovered {
                                 tracing::info!("ethercat recovered; cyclic exchange running again");
                             }
+                            bus_ok = true;
                         }
-                        Err(e) => note_txrx_failure(&mut health, &e),
+                        Err(e) => {
+                            note_txrx_failure(&mut health, &e);
+                            bus_ok = false;
+                        }
                     }
                     copy_inputs_from_bus!(group, maindevice, pdi);
                     tick.next().await;

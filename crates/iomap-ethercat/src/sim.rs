@@ -110,6 +110,11 @@ impl SimEthercat {
         // no live feedback here (sim inputs are all zero), so that path
         // holds position in sim and is validated on the real bus.
         let values = Arc::new(Mutex::new(values));
+        // Same channel-uniqueness validation as the real path so sim rejects
+        // the same misconfigurations (collisions / PDO shadowing).
+        let pdo_names: std::collections::HashSet<&str> =
+            config.channels.iter().map(|c| c.name.as_str()).collect();
+        crate::gear::validate_channels(&config.gear, &pdo_names).map_err(IoError::Connect)?;
         let (engines, gear_routing) = crate::gear::build(&config.gear);
         let gear_stop = Arc::new(AtomicBool::new(false));
         if !engines.is_empty() {
@@ -146,7 +151,7 @@ impl SimEthercat {
                                 crate::gear::MasterSrc::Virtual => None,
                                 crate::gear::MasterSrc::Axis { .. } => Some(0),
                             };
-                            let t = eng.tick(0x0027, last[i], master);
+                            let t = eng.tick(0x0027, last[i], master, true);
                             last[i] = t;
                             if let Some(Some(name)) = target_names.get(i) {
                                 if let Ok(mut v) = values_t.lock() {
