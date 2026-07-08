@@ -243,11 +243,19 @@ impl GearEngine {
         master_actual: Option<i32>,
         bus_ok: bool,
     ) -> i32 {
-        // Stale-input cycle (previous tx_rx failed): don't integrate the
-        // master or advance the law — just re-emit the last target so the
-        // bus recovers without a one-cycle catch-up step.
+        // Stale-input cycle (previous tx_rx failed): hold the target and
+        // FORGET the master baseline. During an outage `sd.inputs_raw()`
+        // keeps returning the pre-outage value, so re-priming to it would be
+        // a no-op — and then the first fresh reading after recovery would
+        // integrate the ENTIRE outage displacement in one cycle (a catch-up
+        // jerk into the follower). Dropping the baseline instead makes the
+        // first good cycle re-prime with a ZERO delta: the gear resyncs to
+        // the master's current position and continues, accepting a one-time
+        // phase slip rather than commanding the whole gap. (A virtual master
+        // has no baseline to keep — it's simply frozen while `bus_ok` is
+        // false.)
         if !bus_ok {
-            self.prev_master_raw = master_actual.or(self.prev_master_raw);
+            self.prev_master_raw = None;
             return self.emit();
         }
 
@@ -832,6 +840,36 @@ mod tests {
             100,
             "single-cycle step on recovery, not 600"
         );
+    }
+
+    #[test]
+    fn stale_bus_axis_master_resyncs_without_catchup_step() {
+        // The dangerous case: an AXIS master keeps physically turning during
+        // a bus outage while its PDI image is frozen at the pre-outage value.
+        // On recovery the engine must resync to the master's new position
+        // with ZERO commanded step, not integrate the whole outage gap.
+        let (mut e, s) = engine_virtual();
+        set(&s, GearParam::RatioNum, 1.0);
+        set(&s, GearParam::RatioDen, 1.0);
+        set(&s, GearParam::RatioStep, 1.0);
+        set(&s, GearParam::MaxTravel, 1e9);
+        e.tick(RDY_ONLY, 0, Some(1000), true);
+        e.tick(OP_ENABLED, 0, Some(1000), true);
+        s.write(GearParam::Engage, &ChannelValue::Bool(true));
+        let base = e.tick(OP_ENABLED, 0, Some(1000), true); // engage edge
+                                                            // Outage: 5 stale cycles, PDI frozen at the last-good raw (1000).
+        for _ in 0..5 {
+            assert_eq!(e.tick(OP_ENABLED, 0, Some(1000), false), base, "held");
+        }
+        // Recovery: fresh raw is 1600 (master moved 600 during the outage).
+        let after = e.tick(OP_ENABLED, 0, Some(1600), true);
+        assert_eq!(
+            after, base,
+            "resync with zero step, NOT a +600 catch-up jerk"
+        );
+        // And it follows normally from the new baseline afterwards.
+        let next = e.tick(OP_ENABLED, 0, Some(1650), true);
+        assert_eq!(next - after, 50, "resumes 1:1 from the resynced position");
     }
 
     #[test]
