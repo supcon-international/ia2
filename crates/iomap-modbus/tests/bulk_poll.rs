@@ -129,16 +129,27 @@ async fn bulk_poll_decodes_sparse_layout_and_32bit_types() {
         ChannelValue::I32(-40)
     );
 
-    // 32-bit write lands both registers in the configured order.
+    // 32-bit write lands both registers in the configured order. Writes
+    // are queued fire-and-forget — wait (bounded) for the poll task to
+    // flush the request to the wire.
     dev.write_channel("sp_f32", ChannelValue::Real(3.5))
         .await
         .unwrap();
     let b = 3.5f32.to_bits();
-    {
-        let regs = slave.holding_registers();
-        let r = regs.lock().unwrap();
-        assert_eq!(r[5], (b >> 16) as u16, "high word at base address");
-        assert_eq!(r[6], b as u16, "low word at base+1");
+    let regs = slave.holding_registers();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        {
+            let r = regs.lock().unwrap();
+            if r[5] == (b >> 16) as u16 && r[6] == b as u16 {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                assert_eq!(r[5], (b >> 16) as u16, "high word at base address");
+                assert_eq!(r[6], b as u16, "low word at base+1");
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
     // Live update: change a register on the slave; the background poll

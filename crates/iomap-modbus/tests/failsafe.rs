@@ -107,17 +107,25 @@ async fn enter_failsafe_zeroes_coils_and_holding_registers_on_the_wire() {
         .await
         .unwrap();
 
-    // Sanity: the slave actually saw those writes.
-    {
-        let coils = slave.coils();
-        let guard = coils.lock().unwrap();
-        assert!(guard[0], "precondition: coil 0 should be set");
-        assert!(guard[1], "precondition: coil 1 should be set");
-    }
-    {
-        let regs = slave.holding_registers();
-        let guard = regs.lock().unwrap();
-        assert_eq!(guard[10], 1234, "precondition: register 10 should be set");
+    // Sanity: the slave actually saw those writes. They are queued
+    // fire-and-forget, so wait (bounded) for the poll task to flush them.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let landed = {
+            let coils = slave.coils();
+            let regs = slave.holding_registers();
+            let c = coils.lock().unwrap();
+            let r = regs.lock().unwrap();
+            c[0] && c[1] && r[10] == 1234
+        };
+        if landed {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "precondition: seed writes must reach the slave"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 
     // Trip failsafe — this is the path the scan loop will take when the

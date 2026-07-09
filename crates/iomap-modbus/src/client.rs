@@ -14,6 +14,13 @@
 //! - Writes (and failsafe) are forwarded to the same task over a command
 //!   channel, so the single Modbus connection is never used
 //!   concurrently — which RTU serial physically cannot tolerate anyway.
+//! - Writes are **on-change and fire-and-forget**: the scan loop pushes
+//!   every mapped output every scan, but a value the wire already has is
+//!   skipped, and a changed value is queued without awaiting the wire —
+//!   otherwise a 2 ms motion task sharing the runtime with an RTU device
+//!   stalls on serial round-trips (~30 ms each at 9600 baud). The
+//!   last-written cache is invalidated on write failure, link loss,
+//!   failsafe, and recovery, so lost outputs are always re-pushed.
 //!
 //! 32-bit channel types (`u32`/`i32`/`f32`) span two consecutive
 //! registers with configurable word order — the norm for instrument
@@ -23,7 +30,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -189,6 +196,12 @@ pub struct ModbusDevice {
     /// `UNHEALTHY_AFTER_FAILURES` consecutive failed refreshes, `true`
     /// again on the first successful poll.
     healthy: Arc<AtomicBool>,
+    /// Last value successfully *queued* per channel — the write-on-change
+    /// cache. Shared with the poll task, which evicts entries whose wire
+    /// write failed and clears the whole map on link loss / failsafe /
+    /// recovery (the device may have watchdog-zeroed its outputs while we
+    /// were away, so everything must be re-pushed).
+    last_written: Arc<Mutex<HashMap<String, ChannelValue>>>,
     cmd_tx: mpsc::Sender<Cmd>,
     task: Option<tokio::task::JoinHandle<()>>,
 }
@@ -215,6 +228,8 @@ impl ModbusDevice {
             .map_err(|e| annotate_rtu_connect_failure(&config.transport, e.into_io()))?;
 
         let healthy = Arc::new(AtomicBool::new(true));
+        let last_written: Arc<Mutex<HashMap<String, ChannelValue>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
         let task = tokio::spawn(poll_task(
             name.clone(),
@@ -224,6 +239,7 @@ impl ModbusDevice {
             mirror.clone(),
             cmd_rx,
             healthy.clone(),
+            last_written.clone(),
         ));
 
         tracing::info!(
@@ -239,6 +255,7 @@ impl ModbusDevice {
             channels,
             mirror,
             healthy,
+            last_written,
             cmd_tx,
             task: Some(task),
         })
@@ -750,6 +767,7 @@ fn note_poll_failure(device: &str, health: &mut HealthTracker, error: &str) {
 ///   same way;
 /// - while disconnected, writes fail fast and reads keep serving the
 ///   last-known mirror.
+#[allow(clippy::too_many_arguments)]
 async fn poll_task(
     device: String,
     client: Context,
@@ -758,6 +776,7 @@ async fn poll_task(
     mirror: Arc<RwLock<HashMap<String, ChannelValue>>>,
     mut cmd_rx: mpsc::Receiver<Cmd>,
     healthy: Arc<AtomicBool>,
+    last_written: Arc<Mutex<HashMap<String, ChannelValue>>>,
 ) {
     let interval = Duration::from_millis(config.poll_interval_ms.max(20) as u64);
     let timeout = request_timeout(&config);
@@ -778,8 +797,30 @@ async fn poll_task(
                             "modbus connection down (reconnecting)".into(),
                         )),
                     };
+                    if let Err(e) = &res {
+                        // The facade no longer awaits the ack: log here and
+                        // evict the write-on-change entry so the scan loop's
+                        // next push of this channel goes back on the wire.
+                        tracing::debug!(
+                            device = %device,
+                            channel = %channel.name,
+                            error = %e.message(),
+                            "queued write failed; will retry on next scan push"
+                        );
+                        last_written
+                            .lock()
+                            .expect("last_written poisoned")
+                            .remove(&channel.name);
+                    }
                     if matches!(res, Err(XferError::Transport(_))) && link.is_some() {
                         drop_link(&device, &mut link, &mut retry_at, &mut backoff);
+                        // Link is gone — the device may watchdog-zero its
+                        // outputs while we reconnect. Forget everything so
+                        // recovery re-pushes the full output image.
+                        last_written
+                            .lock()
+                            .expect("last_written poisoned")
+                            .clear();
                     }
                     let _ = ack.send(res.map_err(XferError::into_io));
                 }
@@ -795,6 +836,12 @@ async fn poll_task(
                     if matches!(res, Err(XferError::Transport(_))) && link.is_some() {
                         drop_link(&device, &mut link, &mut retry_at, &mut backoff);
                     }
+                    // Outputs were (attempted to be) zeroed behind the
+                    // cache's back — nothing it remembers is true anymore.
+                    last_written
+                        .lock()
+                        .expect("last_written poisoned")
+                        .clear();
                     let _ = ack.send(res.map_err(XferError::into_io));
                 }
                 Some(Cmd::Stop) | None => break,
@@ -827,6 +874,13 @@ async fn poll_task(
                                 backoff.reset();
                                 if health.record_success() == HealthTransition::Recovered {
                                     tracing::info!(device = %device, "modbus device recovered; mirror refreshing again");
+                                    // The outage may have watchdog-zeroed the
+                                    // device's outputs — drop the cache so the
+                                    // scan loop re-pushes the full image.
+                                    last_written
+                                        .lock()
+                                        .expect("last_written poisoned")
+                                        .clear();
                                 }
                             }
                             Err(e) => {
@@ -834,6 +888,10 @@ async fn poll_task(
                                 note_poll_failure(&device, &mut health, e.message());
                                 if transport_dead {
                                     drop_link(&device, &mut link, &mut retry_at, &mut backoff);
+                                    last_written
+                                        .lock()
+                                        .expect("last_written poisoned")
+                                        .clear();
                                 }
                             }
                         }
@@ -891,17 +949,35 @@ impl IoDevice for ModbusDevice {
                 value,
             });
         }
-        let (ack, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(Cmd::Write {
-                channel: ch,
-                value,
-                ack,
-            })
-            .await
-            .map_err(|_| IoError::Transport("modbus poll task gone".into()))?;
-        rx.await
-            .map_err(|_| IoError::Transport("modbus poll task gone".into()))?
+        // Write-on-change: skip values the wire already has. Optimistically
+        // record the new value before queueing — the poll task evicts the
+        // entry if the wire write later fails, so the next scan retries.
+        {
+            let mut lw = self.last_written.lock().expect("last_written poisoned");
+            if lw.get(channel) == Some(&value) {
+                return Ok(());
+            }
+            lw.insert(channel.to_string(), value);
+        }
+        // Fire-and-forget: never park the scan thread on a serial
+        // round-trip. Failures surface via the poll task's log + health
+        // flag, and the evicted cache entry gets the write retried.
+        let (ack, _rx) = oneshot::channel();
+        if let Err(e) = self.cmd_tx.try_send(Cmd::Write {
+            channel: ch,
+            value,
+            ack,
+        }) {
+            self.last_written
+                .lock()
+                .expect("last_written poisoned")
+                .remove(channel);
+            return Err(IoError::Transport(match e {
+                mpsc::error::TrySendError::Full(_) => "modbus write queue full".into(),
+                mpsc::error::TrySendError::Closed(_) => "modbus poll task gone".into(),
+            }));
+        }
+        Ok(())
     }
 
     /// `false` once the poll task has seen `UNHEALTHY_AFTER_FAILURES`
@@ -1128,5 +1204,129 @@ mod tests {
         cfg.reconnect_backoff_ms = Some(0);
         assert_eq!(request_timeout(&cfg), Duration::from_millis(1));
         assert_eq!(initial_backoff(&cfg), Duration::from_millis(10));
+    }
+
+    /// Facade wired to a hand-held command receiver — lets tests observe
+    /// exactly which writes reach the (absent) poll task.
+    fn dedupe_device(queue_cap: usize) -> (ModbusDevice, mpsc::Receiver<Cmd>) {
+        let (cmd_tx, cmd_rx) = mpsc::channel(queue_cap);
+        let mut channels = HashMap::new();
+        for ch in [
+            reg("ao1", 193, ModbusDataType::U16, ModbusWordOrder::HiLo),
+            reg("ao2", 194, ModbusDataType::U16, ModbusWordOrder::HiLo),
+        ] {
+            channels.insert(ch.name.clone(), ch);
+        }
+        channels.insert(
+            "ai1".into(),
+            ModbusChannel {
+                name: "ai1".into(),
+                kind: ModbusChannelKind::InputRegister,
+                address: 64,
+                data_type: ModbusDataType::U16,
+                word_order: ModbusWordOrder::HiLo,
+            },
+        );
+        (
+            ModbusDevice {
+                name: "test".into(),
+                channels,
+                mirror: Arc::new(RwLock::new(HashMap::new())),
+                healthy: Arc::new(AtomicBool::new(true)),
+                last_written: Arc::new(Mutex::new(HashMap::new())),
+                cmd_tx,
+                task: None,
+            },
+            cmd_rx,
+        )
+    }
+
+    #[tokio::test]
+    async fn write_on_change_skips_unchanged_values() {
+        let (mut dev, mut rx) = dedupe_device(8);
+        dev.write_channel("ao1", ChannelValue::I32(5))
+            .await
+            .unwrap();
+        dev.write_channel("ao1", ChannelValue::I32(5))
+            .await
+            .unwrap(); // dedup
+        dev.write_channel("ao1", ChannelValue::I32(6))
+            .await
+            .unwrap(); // change
+        dev.write_channel("ao2", ChannelValue::I32(5))
+            .await
+            .unwrap(); // other channel
+        let mut queued = Vec::new();
+        while let Ok(Cmd::Write { channel, value, .. }) = rx.try_recv() {
+            queued.push((channel.name, value));
+        }
+        assert_eq!(
+            queued,
+            vec![
+                ("ao1".to_string(), ChannelValue::I32(5)),
+                ("ao1".to_string(), ChannelValue::I32(6)),
+                ("ao2".to_string(), ChannelValue::I32(5)),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn evicted_entry_gets_rewritten() {
+        let (mut dev, mut rx) = dedupe_device(8);
+        dev.write_channel("ao1", ChannelValue::I32(5))
+            .await
+            .unwrap();
+        // The poll task evicts the entry when the wire write fails —
+        // simulate that, then the same value must queue again.
+        dev.last_written.lock().unwrap().remove("ao1");
+        dev.write_channel("ao1", ChannelValue::I32(5))
+            .await
+            .unwrap();
+        let mut n = 0;
+        while rx.try_recv().is_ok() {
+            n += 1;
+        }
+        assert_eq!(n, 2, "same value must re-queue after eviction");
+    }
+
+    #[tokio::test]
+    async fn full_queue_errors_and_evicts_so_retry_works() {
+        let (mut dev, mut rx) = dedupe_device(1);
+        dev.write_channel("ao1", ChannelValue::I32(1))
+            .await
+            .unwrap(); // fills queue
+        assert!(
+            dev.write_channel("ao2", ChannelValue::I32(2))
+                .await
+                .is_err(),
+            "full queue must surface an error"
+        );
+        assert!(rx.try_recv().is_ok()); // drain the queued ao1 write
+                                        // The failed ao2 write was evicted from the cache, so the retry of
+                                        // the SAME value must not be dedup-skipped.
+        dev.write_channel("ao2", ChannelValue::I32(2))
+            .await
+            .unwrap();
+        match rx.try_recv() {
+            Ok(Cmd::Write { channel, value, .. }) => {
+                assert_eq!(channel.name, "ao2");
+                assert_eq!(value, ChannelValue::I32(2));
+            }
+            _ => panic!("expected the retried ao2 write to be queued"),
+        }
+    }
+
+    #[tokio::test]
+    async fn readonly_kind_rejected_without_queueing_or_caching() {
+        let (mut dev, mut rx) = dedupe_device(8);
+        assert!(dev
+            .write_channel("ai1", ChannelValue::I32(1))
+            .await
+            .is_err());
+        assert!(rx.try_recv().is_err(), "nothing may be queued");
+        assert!(
+            dev.last_written.lock().unwrap().is_empty(),
+            "nothing may be cached"
+        );
     }
 }
