@@ -23,15 +23,22 @@ import type { FbdPosition } from "@/types/generated/FbdPosition"
 import type { FbdProgram } from "@/types/generated/FbdProgram"
 
 // =================================================================
-//   JSON round-trip
+//   JSON round-trip + shared variable CRUD
 // =================================================================
 
-export function parseProgram(source: string): FbdProgram {
-  return JSON.parse(source) as FbdProgram
-}
+// `serializeProgram` and the three variable mutators are byte-identical
+// across the graphical editors — they live in `program-vars` now and
+// re-export here so this module's public API is unchanged.
+export {
+  addVariable,
+  removeVariable,
+  serializeProgram,
+  updateVariable,
+} from "./program-vars"
+import { parseProgramJson } from "./program-vars"
 
-export function serializeProgram(prog: FbdProgram): string {
-  return JSON.stringify(prog, null, 2) + "\n"
+export function parseProgram(source: string): FbdProgram {
+  return parseProgramJson<FbdProgram>(source)
 }
 
 // =================================================================
@@ -273,37 +280,8 @@ export function removeOutputBinding(
   return { ...prog, outputs: prog.outputs.filter((o) => o.variable !== variable) }
 }
 
-// =================================================================
-//   Variable operations (re-used from LD pattern)
-// =================================================================
-
-export function addVariable(
-  prog: FbdProgram,
-  v: FbdProgram["variables"][number],
-): FbdProgram {
-  if (prog.variables.some((x) => x.name === v.name)) return prog
-  return { ...prog, variables: [...prog.variables, v] }
-}
-
-export function removeVariable(prog: FbdProgram, name: string): FbdProgram {
-  return {
-    ...prog,
-    variables: prog.variables.filter((v) => v.name !== name),
-  }
-}
-
-export function updateVariable(
-  prog: FbdProgram,
-  name: string,
-  patch: Partial<FbdProgram["variables"][number]>,
-): FbdProgram {
-  return {
-    ...prog,
-    variables: prog.variables.map((v) =>
-      v.name === name ? { ...v, ...patch } : v,
-    ),
-  }
-}
+// Variable CRUD (addVariable / removeVariable / updateVariable) is
+// shared — see the re-export from `program-vars` above.
 
 // =================================================================
 //   Helpers / lookups

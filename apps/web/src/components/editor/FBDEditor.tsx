@@ -28,8 +28,21 @@
 import { Plus, Trash2, X } from "lucide-react"
 import { useEffect, useMemo, useRef, useState } from "react"
 
-import { checkProgram } from "@/lib/api"
 import { DiagnosticsBanner } from "@/components/editor/DiagnosticsBanner"
+import { Separator } from "@/components/editor/shared/DetailBar"
+import {
+  indexDiagnostics,
+  type DiagnosticIndex,
+  type DiagnosticKey,
+} from "@/components/editor/shared/diagnostics"
+import { EditorHeader } from "@/components/editor/shared/EditorHeader"
+import { powerClass } from "@/components/editor/shared/power"
+import { ReadonlyVariablePanel } from "@/components/editor/shared/ReadonlyVariablePanel"
+import {
+  ParseErrorView,
+  useProgramEditor,
+  type ParseResult,
+} from "@/components/editor/shared/useProgramEditor"
 import {
   addBlock,
   blockOutputs,
@@ -56,8 +69,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import { useRuntime } from "@/state/runtime"
-import { useLastSnapshot } from "@/state/live-feed"
 import type { CheckDiagnostic } from "@/types/generated/CheckDiagnostic"
 import type { FbdBlock } from "@/types/generated/FbdBlock"
 import type { FbdInputSource } from "@/types/generated/FbdInputSource"
@@ -122,11 +133,18 @@ export function FBDEditor({
    *  from double-counting the on-disk copy. */
   path?: string
 }) {
-  const parsed = useMemo(() => safeParse(value), [value])
+  const { parsed, diagnostics, isRunning, lastSnapshot, commit } =
+    useProgramEditor<FbdProgram>({
+      value,
+      onChange,
+      readOnly,
+      path,
+      language: "fbd",
+      parse: safeParse,
+      serialize: serializeProgram,
+    })
 
   // Live values for online-mode wire coloring.
-  const { isRunning, projectEpoch } = useRuntime()
-  const lastSnapshot = useLastSnapshot()
   const liveValues = useMemo<{ bools: Record<string, boolean> } | null>(() => {
     if (!isRunning || !lastSnapshot) return null
     const bools: Record<string, boolean> = {}
@@ -137,26 +155,6 @@ export function FBDEditor({
     }
     return { bools }
   }, [lastSnapshot, isRunning])
-
-  // ---- Diagnostics ----
-  const [diagnostics, setDiagnostics] = useState<CheckDiagnostic[]>([])
-  useEffect(() => {
-    if (parsed.kind === "error") {
-      setDiagnostics([])
-      return
-    }
-    const handle = setTimeout(async () => {
-      try {
-        const diags = await checkProgram(value, "fbd", path)
-        setDiagnostics(diags)
-      } catch (e) {
-        console.warn("FBD diagnostics fetch failed:", e)
-      }
-    }, 350)
-    return () => clearTimeout(handle)
-    // projectEpoch: a library import/remove can (un)resolve this POU's
-    // FB references without the buffer changing — re-check.
-  }, [value, parsed.kind, path, projectEpoch])
 
   // ---- Selection ----
   const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null)
@@ -176,25 +174,21 @@ export function FBDEditor({
 
   if (parsed.kind === "error") {
     return (
-      <div className={cn("flex h-full min-h-0 flex-col", className)}>
-        <div className="border-b border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-          FBD JSON parse error: {parsed.message}
-        </div>
-        <pre className="flex-1 overflow-auto bg-muted/20 px-4 py-3 font-mono text-xs leading-relaxed text-foreground">
-          {value}
-        </pre>
-      </div>
+      <ParseErrorView
+        label="FBD"
+        message={parsed.message}
+        source={value}
+        className={className}
+      />
     )
   }
 
   const prog = parsed.program
   const layout = useMemo(() => layoutBlocks(prog), [prog])
-  const diagIndex = useMemo(() => indexDiagnostics(diagnostics), [diagnostics])
-
-  const commit = (next: FbdProgram) => {
-    if (readOnly) return
-    onChange(serializeProgram(next))
-  }
+  const diagIndex = useMemo(
+    () => indexDiagnostics(diagnostics, fbdDiagnosticKey),
+    [diagnostics],
+  )
 
   const selectedBlock = selectedBlockId
     ? prog.blocks.find((b) => b.id === selectedBlockId) ?? null
@@ -202,7 +196,18 @@ export function FBDEditor({
 
   return (
     <div className={cn("flex h-full min-h-0 flex-col", className)}>
-      <Header prog={prog} />
+      <EditorHeader
+        name={prog.name}
+        language="fbd"
+        pouType={prog.pou_type}
+        summary={
+          <>
+            {prog.blocks.length} block{prog.blocks.length === 1 ? "" : "s"} ·{" "}
+            {prog.outputs.length} output binding
+            {prog.outputs.length === 1 ? "" : "s"}
+          </>
+        }
+      />
       <Toolbar
         readOnly={readOnly}
         onAdd={(fbType) => {
@@ -224,7 +229,10 @@ export function FBDEditor({
         />
       )}
       <div className="flex-1 overflow-auto bg-background">
-        <VariablePanel prog={prog} diagIndex={diagIndex} />
+        <ReadonlyVariablePanel
+          variables={prog.variables}
+          byVariable={diagIndex.byVariable}
+        />
         <div className="p-4">
           <FbdCanvas
             prog={prog}
@@ -281,31 +289,6 @@ export function FBDEditor({
 }
 
 // =================================================================
-//   Header
-// =================================================================
-
-function Header({ prog }: { prog: FbdProgram }) {
-  return (
-    <div className="border-b border-border bg-muted/30 px-3 py-1.5 text-[11px] uppercase tracking-wider text-muted-foreground">
-      <span className="font-mono normal-case tracking-normal text-foreground">
-        {prog.name}
-      </span>
-      <span className="ml-2 rounded border border-border bg-muted/50 px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground">
-        fbd
-      </span>
-      <span className="ml-2 rounded border border-border bg-muted/50 px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground">
-        {prog.pou_type === "function_block" ? "fb" : "prg"}
-      </span>
-      <span className="ml-3">
-        {prog.blocks.length} block{prog.blocks.length === 1 ? "" : "s"} ·{" "}
-        {prog.outputs.length} output binding
-        {prog.outputs.length === 1 ? "" : "s"}
-      </span>
-    </div>
-  )
-}
-
-// =================================================================
 //   Toolbar — "+ Block" picker
 // =================================================================
 
@@ -352,60 +335,6 @@ function Toolbar({
       <span className="text-[10px] text-muted-foreground">
         drag a block's header to reposition · click a block to edit
       </span>
-    </div>
-  )
-}
-
-// =================================================================
-//   Variable panel
-// =================================================================
-
-function VariablePanel({
-  prog,
-  diagIndex,
-}: {
-  prog: FbdProgram
-  diagIndex: DiagIndex
-}) {
-  const groups: Array<{ label: string; section: "input" | "output" | "internal" }> = [
-    { label: "VAR_INPUT", section: "input" },
-    { label: "VAR_OUTPUT", section: "output" },
-    { label: "VAR", section: "internal" },
-  ]
-  return (
-    <div className="grid grid-cols-3 gap-3 border-b border-border bg-muted/10 px-4 py-2 text-[11px]">
-      {groups.map((g) => {
-        const vs = prog.variables.filter((v) => v.section === g.section)
-        return (
-          <div key={g.section}>
-            <div className="mb-1 font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
-              {g.label}
-            </div>
-            <ul className="space-y-0.5">
-              {vs.length === 0 && (
-                <li className="text-muted-foreground italic">—</li>
-              )}
-              {vs.map((v) => (
-                <li
-                  key={v.name}
-                  className={cn(
-                    "flex items-center gap-1 rounded px-1 font-mono",
-                    diagIndex.byVariable.has(v.name) &&
-                      "ring-1 ring-destructive/60",
-                  )}
-                  title={diagIndex.byVariable.get(v.name)?.[0]?.message ?? undefined}
-                >
-                  <span className="text-foreground">{v.name}</span>
-                  <span className="text-muted-foreground">{v.type}</span>
-                  {v.init !== null && v.init !== undefined && (
-                    <span className="text-muted-foreground">:= {v.init}</span>
-                  )}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )
-      })}
     </div>
   )
 }
@@ -535,7 +464,7 @@ function FbdCanvas({
   prog: FbdProgram
   layout: FbdLayout
   liveValues: { bools: Record<string, boolean> } | null
-  diagIndex: DiagIndex
+  diagIndex: DiagnosticIndex
   selectedBlockId: string | null
   readOnly: boolean
   wireDrag: WireDrag | null
@@ -697,7 +626,7 @@ function FbdCanvas({
           block={b}
           layout={layout.blockById.get(b.id)!}
           liveValues={liveValues}
-          hasError={diagIndex.byBlock.has(b.id)}
+          hasError={diagIndex.byElement.has(b.id)}
           selected={selectedBlockId === b.id}
           readOnly={readOnly}
           onPointerDown={(e) => {
@@ -1138,10 +1067,6 @@ function BlockDetail({
   )
 }
 
-function Separator() {
-  return <span className="mx-1 h-4 w-px bg-border" />
-}
-
 function InstanceInput({
   value,
   onCommit,
@@ -1464,28 +1389,15 @@ function AddOutputBinding({
 //   Diagnostics index
 // =================================================================
 
-interface DiagIndex {
-  byBlock: Map<string, CheckDiagnostic[]>
-  byVariable: Map<string, CheckDiagnostic[]>
-}
-
-function indexDiagnostics(diags: CheckDiagnostic[]): DiagIndex {
-  const byBlock = new Map<string, CheckDiagnostic[]>()
-  const byVariable = new Map<string, CheckDiagnostic[]>()
-  for (const d of diags) {
-    const loc = d.fbd_location
-    if (!loc) continue
-    if (loc.kind === "block") {
-      const list = byBlock.get(loc.block_id) ?? []
-      list.push(d)
-      byBlock.set(loc.block_id, list)
-    } else if (loc.kind === "variable") {
-      const list = byVariable.get(loc.name) ?? []
-      list.push(d)
-      byVariable.set(loc.name, list)
-    }
-  }
-  return { byBlock, byVariable }
+/** Classify an FBD diagnostic for the shared `indexDiagnostics`: block
+ *  errors bucket under the block id, variable errors under the variable
+ *  name. `output` locations aren't surfaced inline, so they're dropped. */
+function fbdDiagnosticKey(d: CheckDiagnostic): DiagnosticKey {
+  const loc = d.fbd_location
+  if (!loc) return null
+  if (loc.kind === "block") return { element: loc.block_id }
+  if (loc.kind === "variable") return { variable: loc.name }
+  return null
 }
 
 function describeLocation(
@@ -1536,16 +1448,7 @@ function outputPinCy(
   return layout.y + HEADER_H + ((idx + 0.5) * (layout.h - HEADER_H)) / arr.length
 }
 
-function powerClass(powered: boolean | null): string {
-  if (powered === null) return "stroke-foreground"
-  return powered ? "stroke-highlight" : "stroke-muted-foreground/40"
-}
-
-type Parsed =
-  | { kind: "ok"; program: FbdProgram }
-  | { kind: "error"; message: string }
-
-function safeParse(source: string): Parsed {
+function safeParse(source: string): ParseResult<FbdProgram> {
   try {
     const obj = JSON.parse(source)
     if (!obj || typeof obj !== "object" || !Array.isArray(obj.blocks)) {

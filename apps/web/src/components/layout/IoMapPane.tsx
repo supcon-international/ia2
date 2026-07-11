@@ -288,7 +288,7 @@ function MappingRow({
         <button
           type="button"
           onClick={onRemove}
-          className="rounded p-1 text-muted-foreground hover:bg-accent/40 hover:text-red-600"
+          className="rounded p-1 text-muted-foreground hover:bg-accent/40 hover:text-destructive"
           title="Remove"
         >
           <Trash2 className="size-3.5" />

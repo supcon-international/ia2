@@ -50,7 +50,7 @@ function GlobalErrorToast() {
       // z-[100] keeps the toast above modal dialog overlays (Radix uses
       // z-50) — a create dialog stays open on failure, so its error must
       // float over the dimming overlay, not behind it.
-      className="fixed bottom-4 right-4 z-[100] flex max-w-md items-start gap-2 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-800 shadow-lg dark:border-red-900 dark:bg-red-950/90 dark:text-red-300"
+      className="fixed bottom-4 right-4 z-[100] flex max-w-md items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive shadow-lg"
     >
       <span className="min-w-0 flex-1 whitespace-pre-wrap break-words">
         {error}
@@ -59,7 +59,7 @@ function GlobalErrorToast() {
         type="button"
         onClick={clearError}
         aria-label="Dismiss error"
-        className="-mt-0.5 -mr-1 shrink-0 rounded p-0.5 text-red-500 hover:bg-red-100 hover:text-red-700 dark:hover:bg-red-900/50"
+        className="-mt-0.5 -mr-1 shrink-0 rounded p-0.5 text-destructive/70 hover:bg-destructive/10 hover:text-destructive"
       >
         <X className="size-3.5" />
       </button>

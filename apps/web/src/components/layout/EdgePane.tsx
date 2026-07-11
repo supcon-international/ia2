@@ -20,7 +20,10 @@ import {
 } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
 
+import { UppercaseBadge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { ErrorBox } from "@/components/ui/error-box"
+import { Field } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import {
@@ -355,9 +358,7 @@ function Editor({
               Last deploy
             </div>
             {deployError ? (
-              <pre className="max-w-full overflow-auto rounded-md border border-red-500/40 bg-red-500/5 p-3 text-xs text-red-700 dark:text-red-400">
-                {deployError}
-              </pre>
+              <ErrorBox className="max-w-full p-3 text-xs">{deployError}</ErrorBox>
             ) : deployLog ? (
               <div>
                 <div className="mb-1 inline-flex items-center gap-1.5 text-[12px] text-highlight">
@@ -457,7 +458,7 @@ function LogsPanel({ name }: { name: string }) {
         </button>
       </div>
       {error && (
-        <div className="border-b border-red-500/30 bg-red-500/5 px-3 py-1.5 text-[11px] text-red-700 dark:text-red-400">
+        <div className="border-b border-destructive/30 bg-destructive/5 px-3 py-1.5 text-[11px] text-destructive">
           {error}
         </div>
       )}
@@ -503,18 +504,14 @@ function DiscoverPanel({ name }: { name: string }) {
           Scan
         </Button>
       </div>
-      {error && (
-        <pre className="overflow-auto rounded-md border border-red-500/40 bg-red-500/5 p-2 text-[11px] text-red-700 dark:text-red-400">
-          {error}
-        </pre>
-      )}
+      {error && <ErrorBox>{error}</ErrorBox>}
       {devs?.map((d) => (
         <div key={d.name} className="overflow-hidden rounded-md border border-border">
           <div className="flex items-center gap-2 border-b border-border bg-muted/30 px-3 py-2 text-sm">
             {d.connected ? (
               <CheckCircle2 className="size-3.5 text-highlight" />
             ) : (
-              <AlertCircle className="size-3.5 text-red-600 dark:text-red-400" />
+              <AlertCircle className="size-3.5 text-destructive" />
             )}
             <span className="font-mono">{d.name}</span>
             <span className="rounded border border-border px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
@@ -522,7 +519,7 @@ function DiscoverPanel({ name }: { name: string }) {
             </span>
             {!d.connected && d.error && (
               <span
-                className="truncate text-xs text-red-600 dark:text-red-400"
+                className="truncate text-xs text-destructive"
                 title={d.error}
               >
                 {d.error}
@@ -613,11 +610,7 @@ function SystemPanel({ name }: { name: string }) {
           Refresh
         </Button>
       </div>
-      {error && (
-        <pre className="overflow-auto rounded-md border border-red-500/40 bg-red-500/5 p-2 text-[11px] text-red-700 dark:text-red-400">
-          {error}
-        </pre>
-      )}
+      {error && <ErrorBox>{error}</ErrorBox>}
       {sys && (
         <>
           <div>
@@ -724,16 +717,16 @@ function DebugPanel({ name }: { name: string }) {
   return (
     <div className="flex-1 space-y-4 overflow-auto p-4">
       <div className="flex items-center gap-2">
-        <span
-          className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider ${
+        <UppercaseBadge
+          className={
             mode === "running"
               ? "bg-highlight/15 text-highlight"
               : "bg-warn/15 text-warn"
-          }`}
+          }
         >
           {mode}
           {status?.mode.remaining != null ? ` ${status.mode.remaining}` : ""}
-        </span>
+        </UppercaseBadge>
         <span className="text-xs text-muted-foreground">
           scan {status ? status.scan_count.toLocaleString() : "—"}
         </span>
@@ -761,11 +754,7 @@ function DebugPanel({ name }: { name: string }) {
         </div>
       </div>
 
-      {error && (
-        <pre className="overflow-auto rounded-md border border-red-500/40 bg-red-500/5 p-2 text-[11px] text-red-700 dark:text-red-400">
-          {error}
-        </pre>
-      )}
+      {error && <ErrorBox>{error}</ErrorBox>}
 
       <div className="overflow-hidden rounded-md border border-border">
         <table className="w-full text-xs">
@@ -854,23 +843,6 @@ function DebugPanel({ name }: { name: string }) {
   )
 }
 
-function Field({
-  label,
-  children,
-}: {
-  label: string
-  children: React.ReactNode
-}) {
-  return (
-    <div className="space-y-1.5">
-      <Label className="text-[11px] uppercase tracking-wider text-muted-foreground">
-        {label}
-      </Label>
-      {children}
-    </div>
-  )
-}
-
 function ReachBadge({
   probe,
   probing,
@@ -880,38 +852,38 @@ function ReachBadge({
 }) {
   if (probing) {
     return (
-      <span className="inline-flex items-center gap-1 rounded-md bg-muted/50 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+      <UppercaseBadge className="bg-muted/50 text-muted-foreground">
         <Loader2 className="size-3 animate-spin" />
         probing
-      </span>
+      </UppercaseBadge>
     )
   }
   if (!probe) {
     return (
-      <span className="inline-flex items-center gap-1 rounded-md bg-muted/50 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+      <UppercaseBadge className="bg-muted/50 text-muted-foreground">
         unknown
-      </span>
+      </UppercaseBadge>
     )
   }
   if (probe.reachable) {
     return (
-      <span
-        className="inline-flex items-center gap-1 rounded-md bg-highlight/15 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-highlight"
+      <UppercaseBadge
+        className="bg-highlight/15 text-highlight"
         title="Edge runtime is responding"
       >
         <CheckCircle2 className="size-3" />
         running
-      </span>
+      </UppercaseBadge>
     )
   }
   return (
-    <span
-      className="inline-flex items-center gap-1 rounded-md bg-red-500/15 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-red-700 dark:text-red-400"
+    <UppercaseBadge
+      className="bg-destructive/15 text-destructive"
       title={probe.error ?? ""}
     >
       <AlertCircle className="size-3" />
       unreachable
-    </span>
+    </UppercaseBadge>
   )
 }
 
@@ -935,9 +907,7 @@ function StatusGrid({ probe }: { probe: EdgeProbe }) {
       <Stat label="Runtime version" value={probe.runtime_version ?? "—"} />
       {!probe.reachable && probe.error && (
         <div className="col-span-3">
-          <pre className="overflow-auto rounded-md border border-red-500/40 bg-red-500/5 p-2 text-[11px] text-red-700 dark:text-red-400">
-            {probe.error}
-          </pre>
+          <ErrorBox>{probe.error}</ErrorBox>
         </div>
       )}
     </dl>

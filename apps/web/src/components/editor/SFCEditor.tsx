@@ -34,8 +34,19 @@
 import { Plus, Trash2, X } from "lucide-react"
 import { useEffect, useMemo, useState } from "react"
 
-import { checkProgram } from "@/lib/api"
 import { DiagnosticsBanner } from "@/components/editor/DiagnosticsBanner"
+import { ActionBtn, DetailLabel, Separator } from "@/components/editor/shared/DetailBar"
+import {
+  indexDiagnostics,
+  type DiagnosticKey,
+} from "@/components/editor/shared/diagnostics"
+import { EditorHeader } from "@/components/editor/shared/EditorHeader"
+import { ReadonlyVariablePanel } from "@/components/editor/shared/ReadonlyVariablePanel"
+import {
+  ParseErrorView,
+  useProgramEditor,
+  type ParseResult,
+} from "@/components/editor/shared/useProgramEditor"
 import { Input } from "@/components/ui/input"
 import {
   Select,
@@ -61,8 +72,6 @@ import {
   setInitialStep,
   updateTransition,
 } from "@/lib/sfc-edit"
-import { useRuntime } from "@/state/runtime"
-import { useLastSnapshot } from "@/state/live-feed"
 import type { CheckDiagnostic } from "@/types/generated/CheckDiagnostic"
 import type { SfcAction } from "@/types/generated/SfcAction"
 import type { SfcLocation } from "@/types/generated/SfcLocation"
@@ -102,11 +111,18 @@ export function SFCEditor({
    *  from double-counting the on-disk copy. */
   path?: string
 }) {
-  const parsed = useMemo(() => safeParse(value), [value])
+  const { parsed, diagnostics, isRunning, lastSnapshot, commit } =
+    useProgramEditor<SfcProgram>({
+      value,
+      onChange,
+      readOnly,
+      path,
+      language: "sfc",
+      parse: safeParse,
+      serialize: serializeProgram,
+    })
 
   // Online-mode current step lookup (see also LDEditor / FBDEditor).
-  const { isRunning, projectEpoch } = useRuntime()
-  const lastSnapshot = useLastSnapshot()
   const activeStep = useMemo<string | null>(() => {
     if (!isRunning || !lastSnapshot) return null
     const v = lastSnapshot.vars.find((x) => x.name === "__sfc_step")
@@ -114,45 +130,26 @@ export function SFCEditor({
     return v.value.replace(/^'/, "").replace(/'$/, "")
   }, [lastSnapshot, isRunning])
 
-  // Diagnostics — 350 ms debounced poll, same pattern as LD / FBD.
-  const [diagnostics, setDiagnostics] = useState<CheckDiagnostic[]>([])
-  useEffect(() => {
-    if (parsed.kind === "error") {
-      setDiagnostics([])
-      return
-    }
-    const handle = setTimeout(async () => {
-      try {
-        const diags = await checkProgram(value, "sfc", path)
-        setDiagnostics(diags)
-      } catch (e) {
-        console.warn("SFC diagnostics fetch failed:", e)
-      }
-    }, 350)
-    return () => clearTimeout(handle)
-    // projectEpoch: a library import/remove can (un)resolve this POU's
-    // FB references without the buffer changing — re-check.
-  }, [value, parsed.kind, path, projectEpoch])
-
   const [sel, setSel] = useState<Selection>(null)
   // Drop selection on external source changes (revert, POU switch).
   useEffect(() => setSel(null), [value])
 
   if (parsed.kind === "error") {
     return (
-      <div className={cn("flex h-full min-h-0 flex-col", className)}>
-        <div className="border-b border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-          SFC JSON parse error: {parsed.message}
-        </div>
-        <pre className="flex-1 overflow-auto bg-muted/20 px-4 py-3 font-mono text-xs leading-relaxed text-foreground">
-          {value}
-        </pre>
-      </div>
+      <ParseErrorView
+        label="SFC"
+        message={parsed.message}
+        source={value}
+        className={className}
+      />
     )
   }
 
   const prog = parsed.program
-  const diagIndex = useMemo(() => indexDiagnostics(diagnostics), [diagnostics])
+  const diagIndex = useMemo(
+    () => indexDiagnostics(diagnostics, sfcDiagnosticKey),
+    [diagnostics],
+  )
 
   // Cache outbound transitions per step so the render pass doesn't
   // re-scan transitions[] for every step. Also keep the **global**
@@ -168,14 +165,26 @@ export function SFCEditor({
     return m
   }, [prog.transitions])
 
-  const commit = (next: SfcProgram) => {
-    if (readOnly) return
-    onChange(serializeProgram(next))
-  }
-
   return (
     <div className={cn("flex h-full min-h-0 flex-col", className)}>
-      <Header prog={prog} activeStep={activeStep} />
+      <EditorHeader
+        name={prog.name}
+        language="sfc"
+        pouType={prog.pou_type}
+        summary={
+          <>
+            {prog.steps.length} step{prog.steps.length === 1 ? "" : "s"} ·{" "}
+            {prog.transitions.length} transition
+            {prog.transitions.length === 1 ? "" : "s"}
+          </>
+        }
+      >
+        {activeStep && (
+          <span className="ml-3 rounded bg-highlight/15 px-1.5 py-0.5 font-mono text-[9px] normal-case text-foreground">
+            → {activeStep}
+          </span>
+        )}
+      </EditorHeader>
       <Toolbar
         readOnly={readOnly}
         canAddTransition={prog.steps.length >= 2}
@@ -203,7 +212,10 @@ export function SFCEditor({
         />
       )}
       <div className="flex-1 overflow-auto bg-background">
-        <VariablePanel prog={prog} diagIndex={diagIndex} />
+        <ReadonlyVariablePanel
+          variables={prog.variables}
+          byVariable={diagIndex.byVariable}
+        />
         {prog.steps.length === 0 ? (
           <EmptyState
             readOnly={readOnly}
@@ -221,7 +233,7 @@ export function SFCEditor({
               const outbound = outboundByStep.get(step.name) ?? []
               const stepSelected =
                 sel?.kind === "step" && sel.name === step.name
-              const hasStepError = diagIndex.byStep.has(step.name)
+              const hasStepError = diagIndex.byElement.has(step.name)
               return (
                 <div
                   key={step.name}
@@ -310,40 +322,8 @@ export function SFCEditor({
 }
 
 // =================================================================
-//   Header + Toolbar
+//   Toolbar
 // =================================================================
-
-function Header({
-  prog,
-  activeStep,
-}: {
-  prog: SfcProgram
-  activeStep: string | null
-}) {
-  return (
-    <div className="border-b border-border bg-muted/30 px-3 py-1.5 text-[11px] uppercase tracking-wider text-muted-foreground">
-      <span className="font-mono normal-case tracking-normal text-foreground">
-        {prog.name}
-      </span>
-      <span className="ml-2 rounded border border-border bg-muted/50 px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground">
-        sfc
-      </span>
-      <span className="ml-2 rounded border border-border bg-muted/50 px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground">
-        {prog.pou_type === "function_block" ? "fb" : "prg"}
-      </span>
-      <span className="ml-3">
-        {prog.steps.length} step{prog.steps.length === 1 ? "" : "s"} ·{" "}
-        {prog.transitions.length} transition
-        {prog.transitions.length === 1 ? "" : "s"}
-      </span>
-      {activeStep && (
-        <span className="ml-3 rounded bg-highlight/15 px-1.5 py-0.5 font-mono text-[9px] normal-case text-foreground">
-          → {activeStep}
-        </span>
-      )}
-    </div>
-  )
-}
 
 function Toolbar({
   readOnly,
@@ -412,60 +392,6 @@ function EmptyState({
           </button>
         )}
       </div>
-    </div>
-  )
-}
-
-// =================================================================
-//   Variable panel
-// =================================================================
-
-function VariablePanel({
-  prog,
-  diagIndex,
-}: {
-  prog: SfcProgram
-  diagIndex: DiagIndex
-}) {
-  const groups: Array<{ label: string; section: "input" | "output" | "internal" }> = [
-    { label: "VAR_INPUT", section: "input" },
-    { label: "VAR_OUTPUT", section: "output" },
-    { label: "VAR", section: "internal" },
-  ]
-  return (
-    <div className="grid grid-cols-3 gap-3 border-b border-border bg-muted/10 px-4 py-2 text-[11px]">
-      {groups.map((g) => {
-        const vs = prog.variables.filter((v) => v.section === g.section)
-        return (
-          <div key={g.section}>
-            <div className="mb-1 font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
-              {g.label}
-            </div>
-            <ul className="space-y-0.5">
-              {vs.length === 0 && (
-                <li className="text-muted-foreground italic">—</li>
-              )}
-              {vs.map((v) => (
-                <li
-                  key={v.name}
-                  className={cn(
-                    "flex items-center gap-1 rounded px-1 font-mono",
-                    diagIndex.byVariable.has(v.name) &&
-                      "ring-1 ring-destructive/60",
-                  )}
-                  title={diagIndex.byVariable.get(v.name)?.[0]?.message ?? undefined}
-                >
-                  <span className="text-foreground">{v.name}</span>
-                  <span className="text-muted-foreground">{v.type}</span>
-                  {v.init !== null && v.init !== undefined && (
-                    <span className="text-muted-foreground">:= {v.init}</span>
-                  )}
-                </li>
-              ))}
-            </ul>
-          </div>
-        )
-      })}
     </div>
   )
 }
@@ -954,42 +880,6 @@ function DetailContainer({ children }: { children: React.ReactNode }) {
   )
 }
 
-function DetailLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] uppercase text-muted-foreground">
-      {children}
-    </span>
-  )
-}
-
-function Separator() {
-  return <span className="mx-1 h-4 w-px bg-border" />
-}
-
-function ActionBtn({
-  onClick,
-  title,
-  disabled = false,
-  children,
-}: {
-  onClick: () => void
-  title: string
-  disabled?: boolean
-  children: React.ReactNode
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      title={title}
-      className="flex h-7 items-center gap-1 rounded border border-input px-2 text-[11px] hover:bg-accent/30 disabled:cursor-not-allowed disabled:opacity-50"
-    >
-      {children}
-    </button>
-  )
-}
-
 function DangerBtn({
   onClick,
   title,
@@ -1124,29 +1014,16 @@ function ConditionInput({
 //   Diagnostics
 // =================================================================
 
-interface DiagIndex {
-  byStep: Map<string, CheckDiagnostic[]>
-  byVariable: Map<string, CheckDiagnostic[]>
-}
-
-function indexDiagnostics(diags: CheckDiagnostic[]): DiagIndex {
-  const byStep = new Map<string, CheckDiagnostic[]>()
-  const byVariable = new Map<string, CheckDiagnostic[]>()
-  for (const d of diags) {
-    const loc = d.sfc_location
-    if (!loc) continue
-    if (loc.kind === "step" || loc.kind === "action") {
-      const step = loc.kind === "step" ? loc.name : loc.step
-      const list = byStep.get(step) ?? []
-      list.push(d)
-      byStep.set(step, list)
-    } else if (loc.kind === "variable") {
-      const list = byVariable.get(loc.name) ?? []
-      list.push(d)
-      byVariable.set(loc.name, list)
-    }
-  }
-  return { byStep, byVariable }
+/** Classify an SFC diagnostic for the shared `indexDiagnostics`: step
+ *  and action errors bucket under the step name; variable errors under
+ *  the variable name; everything else is dropped. */
+function sfcDiagnosticKey(d: CheckDiagnostic): DiagnosticKey {
+  const loc = d.sfc_location
+  if (!loc) return null
+  if (loc.kind === "step") return { element: loc.name }
+  if (loc.kind === "action") return { element: loc.step }
+  if (loc.kind === "variable") return { variable: loc.name }
+  return null
 }
 
 function describeLocation(loc: SfcLocation | null | undefined): string {
@@ -1184,11 +1061,7 @@ function qualifierTooltip(q: string): string {
   }
 }
 
-type Parsed =
-  | { kind: "ok"; program: SfcProgram }
-  | { kind: "error"; message: string }
-
-function safeParse(source: string): Parsed {
+function safeParse(source: string): ParseResult<SfcProgram> {
   try {
     const obj = JSON.parse(source)
     if (

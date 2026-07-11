@@ -77,7 +77,7 @@ export function ProgramPane() {
             </span>
           )}
           {diagnostics.length > 0 && (
-            <span className="rounded bg-red-500/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-red-700 dark:text-red-400">
+            <span className="rounded bg-destructive/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-destructive">
               {diagnostics.length}{" "}
               {diagnostics.length === 1 ? "issue" : "issues"}
             </span>

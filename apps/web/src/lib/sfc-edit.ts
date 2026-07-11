@@ -13,15 +13,22 @@ import type { SfcStep } from "@/types/generated/SfcStep"
 import type { SfcTransition } from "@/types/generated/SfcTransition"
 
 // =================================================================
-//   JSON round-trip
+//   JSON round-trip + shared variable CRUD
 // =================================================================
 
-export function parseProgram(source: string): SfcProgram {
-  return JSON.parse(source) as SfcProgram
-}
+// `serializeProgram` and the three variable mutators are byte-identical
+// across the graphical editors — they live in `program-vars` now and
+// re-export here so this module's public API is unchanged.
+export {
+  addVariable,
+  removeVariable,
+  serializeProgram,
+  updateVariable,
+} from "./program-vars"
+import { parseProgramJson } from "./program-vars"
 
-export function serializeProgram(prog: SfcProgram): string {
-  return JSON.stringify(prog, null, 2) + "\n"
+export function parseProgram(source: string): SfcProgram {
+  return parseProgramJson<SfcProgram>(source)
 }
 
 // =================================================================
@@ -245,34 +252,5 @@ export function moveTransition(
   return { ...prog, transitions }
 }
 
-// =================================================================
-//   Variables (re-used from LD/FBD pattern)
-// =================================================================
-
-export function addVariable(
-  prog: SfcProgram,
-  v: SfcProgram["variables"][number],
-): SfcProgram {
-  if (prog.variables.some((x) => x.name === v.name)) return prog
-  return { ...prog, variables: [...prog.variables, v] }
-}
-
-export function removeVariable(prog: SfcProgram, name: string): SfcProgram {
-  return {
-    ...prog,
-    variables: prog.variables.filter((v) => v.name !== name),
-  }
-}
-
-export function updateVariable(
-  prog: SfcProgram,
-  name: string,
-  patch: Partial<SfcProgram["variables"][number]>,
-): SfcProgram {
-  return {
-    ...prog,
-    variables: prog.variables.map((v) =>
-      v.name === name ? { ...v, ...patch } : v,
-    ),
-  }
-}
+// Variable CRUD (addVariable / removeVariable / updateVariable) is
+// shared — see the re-export from `program-vars` above.

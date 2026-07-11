@@ -27,9 +27,19 @@ import type { LdFbInput } from "@/types/generated/LdFbInput"
 import type { LdNode } from "@/types/generated/LdNode"
 import type { LdOperand } from "@/types/generated/LdOperand"
 import type { LdProgram } from "@/types/generated/LdProgram"
-import type { LdVariable } from "@/types/generated/LdVariable"
 
 import { fbByType, fbInputs, fbBoolOutputs, suggestInstanceName } from "./ld-fbs"
+import { parseProgramJson } from "./program-vars"
+
+// `serializeProgram` and the variable mutators are byte-identical across
+// the graphical editors — shared in `program-vars`, re-exported here so
+// this module's public API (and its vitest suite) is unchanged.
+export {
+  addVariable,
+  removeVariable,
+  serializeProgram,
+  updateVariable,
+} from "./program-vars"
 
 export type NodePath = readonly number[]
 
@@ -501,39 +511,8 @@ export function setCoilKind(
   })
 }
 
-// =================================================================
-//   Variable operations
-// =================================================================
-
-export function addVariable(
-  prog: LdProgram,
-  v: LdVariable,
-): LdProgram {
-  // Reject duplicate names rather than silently overwriting — the
-  // UI should validate this before calling, but defending the model.
-  if (prog.variables.some((x) => x.name === v.name)) return prog
-  return { ...prog, variables: [...prog.variables, v] }
-}
-
-export function removeVariable(prog: LdProgram, name: string): LdProgram {
-  return {
-    ...prog,
-    variables: prog.variables.filter((v) => v.name !== name),
-  }
-}
-
-export function updateVariable(
-  prog: LdProgram,
-  name: string,
-  patch: Partial<LdVariable>,
-): LdProgram {
-  return {
-    ...prog,
-    variables: prog.variables.map((v) =>
-      v.name === name ? { ...v, ...patch } : v,
-    ),
-  }
-}
+// Variable CRUD (addVariable / removeVariable / updateVariable) is
+// shared — see the re-export from `program-vars` at the top of file.
 
 // =================================================================
 //   Construction helpers
@@ -606,15 +585,10 @@ function collectInstances(node: LdNode, out: Set<string>): void {
 
 /** Parse a source string into a typed program. Throws on invalid
  *  JSON; the caller (LDEditor) treats that as a parse error and
- *  falls back to the JSON-text view. */
+ *  falls back to the JSON-text view. (`serializeProgram` is shared —
+ *  see the `program-vars` re-export at the top of file.) */
 export function parseProgram(source: string): LdProgram {
-  return JSON.parse(source) as LdProgram
-}
-
-/** Serialise a program back to the canonical pretty-JSON form. The
- *  IDE writes this on save; it's what lands in `pous/<slug>.ld.json`. */
-export function serializeProgram(prog: LdProgram): string {
-  return JSON.stringify(prog, null, 2) + "\n"
+  return parseProgramJson<LdProgram>(source)
 }
 
 // =================================================================

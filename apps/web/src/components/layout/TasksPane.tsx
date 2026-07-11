@@ -12,8 +12,8 @@ import {
 import { useEffect, useState } from "react"
 
 import { Button } from "@/components/ui/button"
+import { Field } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
 import {
   Select,
   SelectContent,
@@ -443,7 +443,7 @@ function TaskCard({
         <button
           type="button"
           onClick={onTaskRemove}
-          className="rounded p-1 text-muted-foreground hover:bg-accent/40 hover:text-red-600"
+          className="rounded p-1 text-muted-foreground hover:bg-accent/40 hover:text-destructive"
           title="Remove this task"
         >
           <Trash2 className="size-3.5" />
@@ -528,7 +528,7 @@ function ProgramRow({
       >
         <SelectTrigger
           className={
-            "h-7 w-40 text-[12px] " + (programMissing ? "border-red-500/60" : "")
+            "h-7 w-40 text-[12px] " + (programMissing ? "border-destructive/60" : "")
           }
         >
           <SelectValue placeholder="(pick a PROGRAM)" />
@@ -552,7 +552,7 @@ function ProgramRow({
         onChange={(e) => onChange({ instance: e.target.value })}
         className={
           "h-7 w-44 font-mono text-[12px] " +
-          (instanceNameClashes ? "border-red-500/60" : "")
+          (instanceNameClashes ? "border-destructive/60" : "")
         }
         title={
           instanceNameClashes
@@ -563,7 +563,7 @@ function ProgramRow({
       <button
         type="button"
         onClick={onRemove}
-        className="ml-auto rounded p-1 text-muted-foreground hover:bg-accent/40 hover:text-red-600"
+        className="ml-auto rounded p-1 text-muted-foreground hover:bg-accent/40 hover:text-destructive"
         title="Unschedule"
       >
         <Trash2 className="size-3.5" />
@@ -593,8 +593,8 @@ function UnscheduledGroup({
   onProgramRemove: (program: ProgramInstance) => void
 }) {
   return (
-    <div className="overflow-hidden rounded-md border border-red-500/40 bg-red-500/5">
-      <div className="flex items-center gap-2 border-b border-red-500/30 bg-red-500/10 px-3 py-2 text-[11px] font-medium uppercase tracking-wider text-red-800 dark:text-red-400">
+    <div className="overflow-hidden rounded-md border border-destructive/40 bg-destructive/5">
+      <div className="flex items-center gap-2 border-b border-destructive/30 bg-destructive/10 px-3 py-2 text-[11px] font-medium uppercase tracking-wider text-destructive">
         <AlertCircle className="size-3.5" />
         Unscheduled program instances — Run / Deploy will fail until these are fixed.
       </div>
@@ -613,7 +613,7 @@ function UnscheduledGroup({
                   className={
                     "h-7 w-40 text-[12px] " +
                     (!programOptionsSet.has(p.program)
-                      ? "border-red-500/60"
+                      ? "border-destructive/60"
                       : "")
                   }
                 >
@@ -645,7 +645,7 @@ function UnscheduledGroup({
                 value={p.task || ""}
                 onValueChange={(v) => onProgramChange(p, { task: v })}
               >
-                <SelectTrigger className="h-7 w-32 border-red-500/60 text-[12px]">
+                <SelectTrigger className="h-7 w-32 border-destructive/60 text-[12px]">
                   <SelectValue placeholder="(no task)" />
                 </SelectTrigger>
                 <SelectContent>
@@ -659,7 +659,7 @@ function UnscheduledGroup({
               <button
                 type="button"
                 onClick={() => onProgramRemove(p)}
-                className="ml-auto rounded p-1 text-muted-foreground hover:bg-accent/40 hover:text-red-600"
+                className="ml-auto rounded p-1 text-muted-foreground hover:bg-accent/40 hover:text-destructive"
                 title="Remove"
               >
                 <Trash2 className="size-3.5" />
@@ -728,23 +728,4 @@ function Note({
       ? "border-highlight/40 bg-highlight/10 text-highlight"
       : ""
   return <div className={`rounded-md border p-2 text-[12px] ${cls}`}>{children}</div>
-}
-
-function Field({
-  label,
-  className,
-  children,
-}: {
-  label: string
-  className?: string
-  children: React.ReactNode
-}) {
-  return (
-    <div className={`space-y-1 ${className ?? ""}`}>
-      <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">
-        {label}
-      </Label>
-      {children}
-    </div>
-  )
 }

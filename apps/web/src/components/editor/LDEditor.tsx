@@ -8,8 +8,20 @@ import {
 } from "lucide-react"
 import { useEffect, useMemo, useRef, useState } from "react"
 
-import { checkProgram } from "@/lib/api"
 import { DiagnosticsBanner } from "@/components/editor/DiagnosticsBanner"
+import { ActionBtn, DetailLabel, Separator } from "@/components/editor/shared/DetailBar"
+import {
+  indexDiagnostics,
+  type DiagnosticIndex,
+  type DiagnosticKey,
+} from "@/components/editor/shared/diagnostics"
+import { EditorHeader } from "@/components/editor/shared/EditorHeader"
+import { powerClass } from "@/components/editor/shared/power"
+import {
+  ParseErrorView,
+  useProgramEditor,
+  type ParseResult,
+} from "@/components/editor/shared/useProgramEditor"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import {
@@ -57,8 +69,6 @@ import {
   type NodePath,
 } from "@/lib/ld-edit"
 import { fbByType, fbInputs, fbOutputs, fbPinHint, groupedFbs } from "@/lib/ld-fbs"
-import { useRuntime } from "@/state/runtime"
-import { useLastSnapshot } from "@/state/live-feed"
 import type { LdCoilKind } from "@/types/generated/LdCoilKind"
 import type { LdNode } from "@/types/generated/LdNode"
 import type { LdProgram } from "@/types/generated/LdProgram"
@@ -103,7 +113,16 @@ export function LDEditor({
    *  from double-counting the on-disk copy. */
   path?: string
 }) {
-  const parsed = useMemo(() => safeParse(value), [value])
+  const { parsed, diagnostics, isRunning, lastSnapshot, commit } =
+    useProgramEditor<LdProgram>({
+      value,
+      onChange,
+      readOnly,
+      path,
+      language: "ld",
+      parse: safeParse,
+      serialize: serializeProgram,
+    })
   const [sel, setSel] = useState<Selection>(null)
 
   // Live values from the bridge — drives online-mode coloring.
@@ -111,8 +130,6 @@ export function LDEditor({
   //   numerics → Compare-block evaluation
   // Both null when nothing's running; the renderer falls back to
   // static (uncoloured) glyphs in that case.
-  const { isRunning, projectEpoch } = useRuntime()
-  const lastSnapshot = useLastSnapshot()
   const liveValues = useMemo<{
     bools: Record<string, boolean>
     numerics: Record<string, number>
@@ -146,66 +163,38 @@ export function LDEditor({
     setSel(null)
   }, [value])
 
-  // ---- Diagnostics ----
-  //
-  // ironplc's LSP doesn't speak LD JSON, so we poll the HTTP `check`
-  // endpoint with `language=ld` whenever the source settles. The
-  // returned diagnostics carry an `ld_location` that pinpoints which
-  // rung / coil / variable / FB call the error came from — we render
-  // it as a banner up top and inline badges on the affected elements.
-  //
-  // 350 ms debounce: long enough to skip every keystroke when the user
-  // types, short enough that the squiggle appears before they finish
-  // wondering "is this right?".
-  const [diagnostics, setDiagnostics] = useState<CheckDiagnostic[]>([])
-  useEffect(() => {
-    if (parsed.kind === "error") {
-      // JSON itself broken — `check` would just bounce, and we already
-      // show the parse error in-pane.
-      setDiagnostics([])
-      return
-    }
-    const handle = setTimeout(async () => {
-      try {
-        const diags = await checkProgram(value, "ld", path)
-        setDiagnostics(diags)
-      } catch (e) {
-        // Network errors don't constitute LD errors — keep the last
-        // good diagnostic snapshot. Logging is enough.
-        console.warn("LD diagnostics fetch failed:", e)
-      }
-    }, 350)
-    return () => clearTimeout(handle)
-    // projectEpoch: a library import/remove can (un)resolve this POU's
-    // FB references without the buffer changing — re-check.
-  }, [value, parsed.kind, path, projectEpoch])
-
   if (parsed.kind === "error") {
     return (
-      <div className={cn("flex h-full min-h-0 flex-col", className)}>
-        <div className="border-b border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-          LD JSON parse error: {parsed.message}
-        </div>
-        <pre className="flex-1 overflow-auto bg-muted/20 px-4 py-3 font-mono text-xs leading-relaxed text-foreground">
-          {value}
-        </pre>
-      </div>
+      <ParseErrorView
+        label="LD"
+        message={parsed.message}
+        source={value}
+        className={className}
+      />
     )
   }
   const prog = parsed.program
 
-  const commit = (next: LdProgram) => {
-    if (readOnly) return
-    onChange(serializeProgram(next))
-  }
-
   // Index diagnostics by ld_location so each renderer can look up
   // "are there errors on this element?" in O(1).
-  const diagIndex = useMemo(() => indexDiagnostics(diagnostics), [diagnostics])
+  const diagIndex = useMemo(
+    () => indexDiagnostics(diagnostics, ldDiagnosticKey),
+    [diagnostics],
+  )
 
   return (
     <div className={cn("flex h-full min-h-0 flex-col", className)}>
-      <Header prog={prog} />
+      <EditorHeader
+        name={prog.name}
+        language="ld"
+        pouType={prog.pou_type}
+        summary={
+          <>
+            {prog.rungs.length} rung{prog.rungs.length === 1 ? "" : "s"} ·{" "}
+            {prog.variables.length} var{prog.variables.length === 1 ? "" : "s"}
+          </>
+        }
+      />
 
       {diagnostics.length > 0 && (
         <DiagnosticsBanner
@@ -263,7 +252,7 @@ export function LDEditor({
               selection={sel}
               readOnly={readOnly}
               liveValues={liveValues}
-              rungDiagnostics={diagIndex.byRung.get(rung.id) ?? []}
+              rungDiagnostics={diagIndex.byElement.get(rung.id) ?? []}
               onSelect={setSel}
               onCommit={commit}
             />
@@ -287,42 +276,20 @@ export function LDEditor({
 }
 
 // =================================================================
-//   Top-of-pane summary
-// =================================================================
-
-// =================================================================
 //   Diagnostics indexing + banner
 // =================================================================
 
-/**
- * Indexed view over a diagnostics list — O(1) lookup by rung / variable
- * / coil so each render path stays cheap. Rungs and variables get
- * dedicated maps; the full diagnostic objects sit in `all` for the
- * banner.
- */
-interface DiagIndex {
-  all: CheckDiagnostic[]
-  byRung: Map<string, CheckDiagnostic[]>
-  byVariable: Map<string, CheckDiagnostic[]>
-}
-
-function indexDiagnostics(diags: CheckDiagnostic[]): DiagIndex {
-  const byRung = new Map<string, CheckDiagnostic[]>()
-  const byVariable = new Map<string, CheckDiagnostic[]>()
-  for (const d of diags) {
-    const loc = d.ld_location
-    if (!loc) continue
-    if (loc.kind === "rung" || loc.kind === "coil" || loc.kind === "fb_call") {
-      const list = byRung.get(loc.rung_id) ?? []
-      list.push(d)
-      byRung.set(loc.rung_id, list)
-    } else if (loc.kind === "variable") {
-      const list = byVariable.get(loc.name) ?? []
-      list.push(d)
-      byVariable.set(loc.name, list)
-    }
+/** Classify an LD diagnostic for the shared `indexDiagnostics`: rung,
+ *  coil and fb_call errors all bucket under the owning rung id; variable
+ *  errors under the variable name; everything else is dropped. */
+function ldDiagnosticKey(d: CheckDiagnostic): DiagnosticKey {
+  const loc = d.ld_location
+  if (!loc) return null
+  if (loc.kind === "rung" || loc.kind === "coil" || loc.kind === "fb_call") {
+    return { element: loc.rung_id }
   }
-  return { all: diags, byRung, byVariable }
+  if (loc.kind === "variable") return { variable: loc.name }
+  return null
 }
 
 /** Format an LdLocation for human display. Used in the banner. */
@@ -341,27 +308,8 @@ function describeLocation(loc: LdLocation | null | undefined): string {
 }
 
 // (DiagnosticsBanner moved to its own module — same component is
-//  shared with FBDEditor and SFCEditor. See ./DiagnosticsBanner.tsx.)
-
-function Header({ prog }: { prog: LdProgram }) {
-  return (
-    <div className="border-b border-border bg-muted/30 px-3 py-1.5 text-[11px] uppercase tracking-wider text-muted-foreground">
-      <span className="font-mono normal-case tracking-normal text-foreground">
-        {prog.name}
-      </span>
-      <span className="ml-2 rounded border border-border bg-muted/50 px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground">
-        ld
-      </span>
-      <span className="ml-2 rounded border border-border bg-muted/50 px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground">
-        {prog.pou_type === "function_block" ? "fb" : "prg"}
-      </span>
-      <span className="ml-3">
-        {prog.rungs.length} rung{prog.rungs.length === 1 ? "" : "s"} ·{" "}
-        {prog.variables.length} var{prog.variables.length === 1 ? "" : "s"}
-      </span>
-    </div>
-  )
-}
+//  shared with FBDEditor and SFCEditor. See ./DiagnosticsBanner.tsx.
+//  The top-of-pane Header is now the shared <EditorHeader>.)
 
 // =================================================================
 //   Variable panel — three columns, inline-editable
@@ -380,7 +328,7 @@ function VariablePanel({
   prog: LdProgram
   selection: Selection
   readOnly: boolean
-  diagIndex: DiagIndex
+  diagIndex: DiagnosticIndex
   onSelect: (name: string) => void
   onAdd: (v: LdProgram["variables"][number]) => void
   onRemove: (name: string) => void
@@ -1048,11 +996,6 @@ interface NodeRenderProps {
 //   We use stroke-current + a CSS text-* class so dark / light themes
 //   both inherit the right colour automatically.
 // =================================================================
-function powerClass(powered: boolean | null): string {
-  if (powered === null) return "stroke-foreground"
-  return powered ? "stroke-highlight" : "stroke-muted-foreground/40"
-}
-
 function RenderNode(props: NodeRenderProps) {
   const { node, path, x, y, cols, rows, rungIdx, selection, liveValues, onSelect } = props
   const midY = y + ((rows - 1) * CELL_H) / 2 + CELL_H / 2
@@ -2494,46 +2437,6 @@ function DetailBar({
   )
 }
 
-function DetailLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
-      {children}
-    </span>
-  )
-}
-
-function Separator() {
-  return <span className="text-muted-foreground/30">·</span>
-}
-
-function ActionBtn({
-  onClick,
-  title,
-  destructive,
-  children,
-}: {
-  onClick: () => void
-  title?: string
-  destructive?: boolean
-  children: React.ReactNode
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      title={title}
-      className={cn(
-        "inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider transition-colors",
-        destructive
-          ? "text-destructive hover:bg-destructive/10"
-          : "text-foreground hover:bg-accent/40",
-      )}
-    >
-      {children}
-    </button>
-  )
-}
-
 function ToggleBtn({
   active,
   onClick,
@@ -2618,11 +2521,7 @@ function VarPicker({
 //   Helpers
 // =================================================================
 
-type Parsed =
-  | { kind: "ok"; program: LdProgram }
-  | { kind: "error"; message: string }
-
-function safeParse(source: string): Parsed {
+function safeParse(source: string): ParseResult<LdProgram> {
   try {
     const program = parseProgram(source)
     if (!program || typeof program !== "object") {
