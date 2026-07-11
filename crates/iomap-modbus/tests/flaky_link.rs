@@ -149,17 +149,13 @@ async fn link_loss_flips_unhealthy_and_reconnect_recovers() {
         ChannelValue::U16(41)
     );
 
-    // Writes to a writable channel fail fast while the link is down
-    // rather than hanging on a dead socket.
-    let write_err = dev
-        .write_channel("sp", ChannelValue::U16(1))
+    // Writes while the link is down never park the caller on the dead
+    // socket: they queue fire-and-forget (Ok), the poll task fails them
+    // and evicts the write-on-change entry, and the scan loop's periodic
+    // push retries once the link is back.
+    dev.write_channel("sp", ChannelValue::U16(1))
         .await
-        .unwrap_err();
-    let msg = write_err.to_string();
-    assert!(
-        msg.contains("down") || msg.contains("timed out") || msg.contains("refused"),
-        "unexpected write error while down: {msg}"
-    );
+        .expect("write while down must queue without blocking");
 
     // ---- recovery: restart the proxy on the same port -------------------
     slave.input_registers().lock().unwrap()[0] = 42;
@@ -181,6 +177,25 @@ async fn link_loss_flips_unhealthy_and_reconnect_recovers() {
         assert!(
             tokio::time::Instant::now() < deadline,
             "mirror must refresh to the post-outage value"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    // Re-push of the outage-era write (what the scan loop does every scan)
+    // must not be dedup-skipped — the failed write was evicted — and must
+    // now land on the wire.
+    dev.write_channel("sp", ChannelValue::U16(1))
+        .await
+        .expect("post-recovery write must queue");
+    let regs = slave.holding_registers();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        if regs.lock().unwrap()[5] == 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "post-recovery write must reach the slave"
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
