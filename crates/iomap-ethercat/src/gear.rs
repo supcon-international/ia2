@@ -104,7 +104,14 @@ impl GearShared {
             ChannelValue::F64(v) => v,
         };
         if let GearParam::Engage = param {
-            self.engage.store(as_f64 != 0.0, Ordering::Relaxed);
+            // Release: the engage flag is the mailbox's publish point. A PLC
+            // scan sets ratio/phase (Relaxed stores above) and then raises
+            // engage in the same cycle; pairing this store with the engine's
+            // Acquire load (see `tick`) guarantees that a tick observing
+            // engage=true also sees those parameter writes, so the engage-edge
+            // latch can't capture a stale (ratio, phase) against a fresh
+            // engage on a weakly-ordered CPU.
+            self.engage.store(as_f64 != 0.0, Ordering::Release);
             return;
         }
         // Reject non-finite numeric params at the door: a slow-plane NaN/inf
@@ -145,7 +152,9 @@ impl GearShared {
     /// its next tick (position hold / shadow) even if the slow plane never
     /// gets another word in.
     pub fn disengage(&self) {
-        self.engage.store(false, Ordering::Relaxed);
+        // Release to stay consistent with the other engage writer, though a
+        // clear only needs the value to land — the engine reads it Acquire.
+        self.engage.store(false, Ordering::Release);
     }
 }
 
@@ -259,7 +268,11 @@ impl GearEngine {
             return self.emit();
         }
 
-        let engage_in = self.shared.engage.load(Ordering::Relaxed);
+        // Acquire pairs with the Release store in `GearShared::write`: if we
+        // observe engage=true here, every parameter the slow plane wrote
+        // before raising engage (ratio/phase/…) is visible, so the engage-edge
+        // latch below captures a coherent snapshot even on a weakly-ordered CPU.
+        let engage_in = self.shared.engage.load(Ordering::Acquire);
         // Slow-plane values are sanitized to finite at ingress (see
         // GearShared::write), so no NaN/inf can reach the law here.
         let ratio_step = GearShared::load_f64(&self.shared.ratio_step).max(0.0);
@@ -652,7 +665,7 @@ mod tests {
         }
         // Trips once |target| >= 450 (one cycle of overshoot allowed).
         let peak = *targets.iter().max().unwrap();
-        assert!(peak >= 450 && peak <= 550, "peak {peak}");
+        assert!((450..=550).contains(&peak), "peak {peak}");
         assert_eq!(*targets.last().unwrap(), peak, "held after trip");
         assert_eq!(s.read(GearReadback::Trip), ChannelValue::Bool(true));
         // Still engaged-requested: stays held (trip persists).
