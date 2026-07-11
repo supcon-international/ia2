@@ -10,7 +10,7 @@ The IDE has three top-level concepts:
 | | What it represents |
 | --- | --- |
 | **POUs** | Your ST source files. One `.st` file can hold one or more PROGRAM / FUNCTION_BLOCK / FUNCTION declarations. |
-| **Devices** | Fieldbus things your program talks to (Modbus, EtherCAT) |
+| **Devices** | Things your program talks to over a bus or network (Modbus, EtherCAT, OPC UA) |
 | **Edges** | Linux boxes where the program runs in production |
 
 Edges are deploy targets, not runtime peers. The IDE never opens a network
@@ -194,6 +194,14 @@ one carrying your SSH / management traffic.
   servo drives need it to reach OP. Startup CoE writes go through
   `init_sdo` (e.g. `0x6060 = 8` for CSP). CiA 402 CSP motion, including
   electronic gearing, has been run on real hardware.
-- **ESI auto-mapping**: not implemented. PDO byte offsets are hand-authored
-  — read them off the connect-time PDO-mapping log (the runtime dumps each
-  `0x1C12`/`0x1C13` entry with its object index and byte offset).
+- **ESI modular couplers**: offline ESI parsing and channel assembly *are*
+  shipped. Set `bringup = { mode = "esi_modular", esi_path = "esi/coupler.xml" }`,
+  then `cs device esi-assemble <device> --idents …` builds the channel list
+  from the coupler's ESI plus its reported modules (tracking byte/bit offsets)
+  and replaces the device's channels. What remains hardware-gated is the
+  real-bus cyclic bring-up for these couplers (master-programmed
+  SyncManager/FMMU + logical-RW exchange), tracked as issue #11; author and
+  verify the layout in `nic = "_sim"` meanwhile. Fixed-PDO servos and slices
+  (`bringup = auto`, the default) still take hand-authored `pdi_byte_offset`s —
+  read them off the connect-time PDO-mapping log, where the runtime dumps each
+  `0x1C12`/`0x1C13` entry with its object index and byte offset.

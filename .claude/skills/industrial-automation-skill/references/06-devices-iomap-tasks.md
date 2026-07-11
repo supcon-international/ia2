@@ -142,6 +142,37 @@ cs device esi-assemble coupler --idents 0x10,0x20,0x30   # hex or decimal
 
 > Real-bus cyclic I/O for `esi_modular` (master-programmed SyncManager/FMMU + logical-RW exchange) is validated against the physical coupler separately; the parsing, assembly, and offline channel authoring above are hardware-independent and the recommended way to author + verify the layout first (run it in `nic: "_sim"` to exercise the program against the assembled channels).
 
+### In-cycle electronic gear (`[[gear]]`)
+
+B-tier motion. Instead of computing a follower's `target_position` in the PLC scan and copying it to the wire, an EtherCAT device can carry one or more `[[gear]]` entries that make the **cyclic loop** generate the follower target every bus cycle, strictly SYNC0-aligned. The PLC scan plane only feeds slow parameters (ratio, engage, …) through named channels that the device routes into a lock-free struct rather than PDI bytes — which removes the scan-plane phase jitter that otherwise dominates inter-axis sync error at speed. Authored in the device TOML (a table-array, not the JSON config body):
+
+```toml
+[[gear]]
+slave_index        = 1        # follower (controlled) axis
+target_pos_offset  = 0        # 0x607A i32, follower output PDI — loop-owned
+actual_pos_offset  = 4        # 0x6064 i32, follower input PDI
+status_word_offset = 8        # 0x6041 u16 — engine gates on Operation Enabled
+master = { kind = "virtual" }  # software accumulator, +master_vel counts/cycle
+# or gear off a real leader axis on the same bus:
+# master = { kind = "axis", slave_index = 2, actual_pos_offset = 4 }
+```
+
+The follower descriptor names the four PDI byte offsets above; `master` is either `{ kind = "virtual" }` (a software accumulator advanced by `master_vel` counts each cycle) or `{ kind = "axis", slave_index, actual_pos_offset }` (geared off another axis's `0x6064` read each cycle). Nine parameter channels carry the slow plane — each has a default name you can override, and they bind in `iomap` like any channel; seven the PLC writes, two the engine reports back:
+
+| Channel | Default name | Direction |
+|---|---|---|
+| engage | `gear_engage` | PLC → engine |
+| ratio numerator | `ratio_num` | PLC → engine |
+| ratio denominator | `ratio_den` | PLC → engine |
+| ratio slew step | `ratio_step` | PLC → engine |
+| phase offset | `phase_ofs` | PLC → engine |
+| master velocity | `master_vel` | PLC → engine |
+| max travel | `gear_max_travel` | PLC → engine |
+| engaged (feedback) | `gear_engaged` | engine → PLC |
+| trip (feedback) | `gear_trip` | engine → PLC |
+
+**Safety model** (all enforced inside the cyclic loop, so no slow-plane mistake can bypass it): while the follower is not in CiA402 Operation Enabled the engine shadows its `actual_position`, so there is no jump at enable; engaging is refused unless `max_travel > 0` (locked by default); ratio and phase latch at the engage edge, so mid-run parameter edits stay inert until you re-engage; travel past `±max_travel` hard-clamps and then trips to a position hold that clears only when the engage channel drops; and an enable loss forces a re-arm. The loop **owns** `target_position` — leave it unmapped in `iomap`, since any PLC write to that PDO field is overwritten every cycle. Worked sim example: `examples/eg_gear_incycle`.
+
 ---
 
 ## IoMap
@@ -178,7 +209,7 @@ Bindings that reference an unknown device/variable/channel are skipped at run ti
 - `tasks[].interval_ms` becomes `TASK fast(INTERVAL := T#50ms, PRIORITY := 1)` in the synthesized CONFIGURATION. Periodic only (event tasks not supported yet).
 - `programs[].program` must be a **PROGRAM**-kind POU (not FB/FUNCTION).
 - `programs[].instance` is the instance name; `task` references a `tasks[].name`.
-- **Keep `programs` length 1.** `cs run` (whole-schedule) errors if 2+ PROGRAMs are scheduled — ironplc emits only one PROGRAM per compilation. Multiple tasks are fine; multiple PROGRAM instances are not (yet).
+- **`programs` may list several PROGRAM instances.** Each gets its own container and runs round-robin, so `cs run` (whole-schedule) executes them all. The one rejected shape is 2+ PROGRAMs that also share a `VAR_GLOBAL` (globals aren't shared across instances). See `01-mental-model.md` fact 2.
 
 The scan-loop cadence comes from the bound task's `interval_ms` (the bridge throttles there, because the vendored ironplc doesn't populate the VM task table from CONFIGURATION). So `interval_ms` is the real knob for "how fast does my program scan".
 

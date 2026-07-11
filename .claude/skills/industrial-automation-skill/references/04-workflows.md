@@ -75,7 +75,7 @@ cs project check ~/Documents/IA2/tank_ctrl
 
 ## C. Configure tasks.toml + run the full schedule
 
-`cs run` (no `--program`) runs the whole tasks.toml. **It errors if tasks.toml schedules 2+ PROGRAMs** (ironplc limit). One PROGRAM per schedule.
+`cs run` (no `--program`) runs the whole tasks.toml — every scheduled PROGRAM, each in its own container, round-robin on one scan thread. The only rejected shape is 2+ PROGRAMs that *also* share a `VAR_GLOBAL` (globals aren't shared across instances). See `01-mental-model.md` fact 2.
 
 ```bash
 cs --project tank_ctrl tasks set --server "$SRV" --from - <<'JSON'

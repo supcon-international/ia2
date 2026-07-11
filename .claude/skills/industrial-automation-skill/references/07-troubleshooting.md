@@ -30,9 +30,9 @@ Each entry: the symptom you'll see, the cause, the fix.
 
 ## Run / compile errors
 
-### "tasks.toml schedules N PROGRAMs … the runtime can only execute one PROGRAM per run"
-**Cause:** the hard ironplc limit — codegen emits one PROGRAM per compilation. `cs run` (whole schedule) refuses 2+.
-**Fix:** either reduce `tasks.programs` to one entry, or run a specific one ad-hoc: `cs run --program NAME`. There is no workaround that runs two PROGRAMs simultaneously today.
+### "tasks.toml schedules N PROGRAMs but the project declares VAR_GLOBAL …"
+**Cause:** multi-PROGRAM projects run one container per instance, so a `VAR_GLOBAL` can't be shared across them (each instance would get a private, diverging copy). This is the *only* multi-PROGRAM restriction — scheduling several PROGRAMs is otherwise supported, and they run round-robin.
+**Fix:** move the shared state behind an I/O mapping or FUNCTION_BLOCK parameter, or reduce `tasks.programs` to a single PROGRAM. Both `cs run` and `cs project check` name the offending globals. See `01-mental-model.md` fact 2.
 
 ### `cs project check` fails with `P####`
 **Cause:** an IEC source error.
@@ -49,6 +49,10 @@ Each entry: the symptom you'll see, the cause, the fix.
 ### RETAIN value didn't persist across restart
 **Cause:** either the variable isn't in a `VAR RETAIN` block, or the program was killed hard (not a clean stop) between the 5 s flush windows.
 **Fix:** confirm the `VAR RETAIN` declaration. Note the flush cadence is 5 s + on clean stop — up to 5 s of change can be lost on an unclean kill. Also: values restore as i32, so LREAL/LINT/LWORD truncate (use DINT-class for retained counters).
+
+### The run stopped by itself — snapshots frozen, nothing obvious in the way
+**Cause:** the program faulted. A VM trap (divide by zero, bad array index, …) in any scheduled instance stops the whole plant and zeroes outputs (failsafe), by design.
+**Fix:** read the reason instead of re-running blind: `/api/runtime/status` reports `running: false` with `last_error` carrying the trap message (e.g. `VM trap in main_inst: DivideByZero`), and the SSE stream emitted `error` then `stopped` at the moment it died. On an edge, the runtime's own `/status` carries the same message in `fault`. Fix the arithmetic (guard divisors, clamp indices) and run again — the next `cs run` clears `last_error`.
 
 ## Overlay / session
 
@@ -77,7 +81,7 @@ An `init_sdo` entry targets a CoE object the drive doesn't have. A failed startu
 
 ## Known limits (not bugs — design constraints today)
 
-- **One PROGRAM per run.** ironplc codegen limitation. Multi-PROGRAM scheduling is rejected with a clear error.
+- **Multi-PROGRAM runs are supported** — one container per scheduled instance, round-robin on one scan thread. The sole restriction is no `VAR_GLOBAL` shared across instances (rejected with a clear error). See `01-mental-model.md` fact 2.
 - **One running program per server.** Hardware (Modbus/EtherCAT bus) can have one master. Starting a program stops the previous, across all projects.
 - **No `AT %IX0.0` located variables.** Bind via `iomap.toml`, not IEC direct addressing.
 - **Real EtherCAT is Linux-only** (`CAP_NET_RAW`). On macOS use `nic: "_sim"`.

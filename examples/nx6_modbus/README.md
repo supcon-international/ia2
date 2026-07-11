@@ -62,20 +62,20 @@ EtherCAT path for the same module family.)
 
 ## Deploy to an edge host
 
+Use the product deploy path (`cs deploy`) — see `docs/edge-deploy.md` for the
+full flow, including one-time edge setup:
+
 ```bash
-# 1) sync the project to the edge box
-rsync -a examples/nx6_modbus/  edge:/opt/ia2/nx6_modbus_src/
-# 2) assemble a version dir (reusing the released runtime) and switch current
-ssh edge 'ORIG=$(readlink -f /opt/ia2/current); echo $ORIG > /opt/ia2/nx6_modbus_src/.orig
-  D=/opt/ia2/versions/modbus-$(date +%Y%m%dT%H%M%SZ); mkdir -p "$D/project"
-  cp -a /opt/ia2/current/runtime "$D/runtime"; cp -a /opt/ia2/nx6_modbus_src/. "$D/project/"
-  ln -sfn "$D" /opt/ia2/current'
-# 3) restart
-ssh edge 'sudo -n systemctl restart ia2'
-# rollback: ln -sfn $(cat /opt/ia2/nx6_modbus_src/.orig) /opt/ia2/current && restart
+cs project open examples/nx6_modbus
+cs --project nx6_modbus edge create bench --host edge   # your ssh host/alias
+cs deploy bench                                         # tar → ssh → versioned swap → restart
+cs probe  bench                                         # confirm the runtime came up
 ```
 
-> The serial port needs root or `dialout` membership for the runtime user.
+`cs deploy` carries forward the runtime already on the box unless a matching
+Linux `ia2-runtime` binary is present to ship. The serial port needs root or
+`dialout` membership for the runtime user. A manual rsync + symlink-swap deploy
+is possible but is not the supported path.
 
 ## Verify / poke (edge runtime HTTP API on 127.0.0.1:13001)
 

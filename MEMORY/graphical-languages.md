@@ -1,11 +1,18 @@
-# Adding LD / FBD / CFC / SFC support — design plan
+# LD / FBD / CFC / SFC support — design record
 
-**Status**: design only, not implemented. Read `MEMORY/principles.md`
-first — every decision below is downstream of those principles.
+**Status**: implemented and shipped. The store accepts `.ld.json` /
+`.fbd.json` / `.sfc.json`, each language transpiles to ST through its own
+front-end, and the IDE renders and edits all three (see the phased-rollout
+table below — every phase is ✅). This document is kept as the **design
+rationale** — the *why* behind transpile-to-ST, JSON storage, and the
+source-map approach — not a to-do list. Read `MEMORY/principles.md` first;
+every decision below is downstream of those principles.
 
-## Where we stand today
+## Where we stood at design time
 
-From a code audit on 2026-05-15:
+Snapshot from the code audit on 2026-05-15, when this plan was written — the
+baseline the phases below built from. Every row here has since been resolved;
+the rollout table at the end tracks what shipped.
 
 | Layer | State |
 |---|---|
@@ -19,8 +26,8 @@ From a code audit on 2026-05-15:
 | Frontend editor | `<STEditor>` (Monaco) unconditionally. No branching on `currentPou.declarations[0].language`. |
 | New-POU dialog | Hardcodes ST. |
 
-The infrastructure has the **schema slot** but is functionally empty
-below it.
+At that point the infrastructure had the **schema slot** but was
+functionally empty below it; the phased rollout filled it in.
 
 ## The architectural question
 

@@ -37,7 +37,7 @@ When you see yourself or the user about to do any of these, **stop**:
 
 - **Running multi-step work without `cs agent run`** → the IDE banner will strobe. Wrap it. Even a 3-command sequence is enough to be ugly. (See `03-agent-sessions.md`.)
 - **Forgetting `--project NAME` when multiple projects are open** → server uses LRU active fallback, which may be a different project than the user thinks. Run `cs project list` first when in doubt.
-- **`cs run` without checking `tasks.programs.len() == 1`** → ironplc only emits one PROGRAM per compilation. If tasks.toml schedules 2+, `cs run` errors. Use `cs run --program NAME` for an ad-hoc single-program run.
+- **Scheduling 2+ PROGRAMs that share a `VAR_GLOBAL`** → multiple PROGRAMs otherwise run fine (one container each, round-robin), but instances can't share globals, so `cs run` and `cs project check` reject exactly that combination; move the shared state behind an iomap or FB parameter. (See `references/01-mental-model.md` fact 2.)
 - **Writing IEC code without `cs project check`** → cheap (just compile, no run). Catches 90% of mistakes before the user sees a red Monitor pane.
 - **Forgetting `application` on iomap entries** → `Mapping` has 5 fields: `application` (POU name) + `variable` + `device` + `channel` + `direction`. The server rejects with 422 if you skip `application`.
 - **Using `cs runtime force` and forgetting to `unforce`** → forces survive the agent's lifetime. Always pair them, or call out the leftover at handoff.

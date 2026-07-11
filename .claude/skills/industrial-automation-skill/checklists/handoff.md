@@ -6,7 +6,7 @@ Run before you tell the user "done". Catches the things that look fine in your t
 
 - [ ] **`cs project check ~/Documents/IA2/<name>` passes.** A clean compile of the whole project, not just the one POU you edited. Edits to shared variables or iomap can break a different POU.
 - [ ] **Every iomap entry resolves.** If you added bindings, confirm each `device`/`channel`/`variable` exists (`cs device get`, `cs symbols`). Unresolved bindings warn-skip silently at run time — they won't error, they just won't do anything.
-- [ ] **`tasks.programs` has exactly one entry** if the user will `cs run` the schedule. Two+ → it'll error; either fix it or tell them to use `cs run --program NAME`.
+- [ ] **No 2+ PROGRAMs sharing a `VAR_GLOBAL`.** Several scheduled PROGRAMs run fine (round-robin, one container each); that single combination is the only one rejected, and `cs project check` catches it. See `references/01-mental-model.md` fact 2.
 
 ## Runtime state
 

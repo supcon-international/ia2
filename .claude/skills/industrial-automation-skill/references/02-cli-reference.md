@@ -70,10 +70,15 @@ cs device list                                    # name + protocol; --json
 cs device get  hmi_plc                             # full config as JSON (round-trip source)
 cs device set  hmi_plc --from cfg.json             # replace config; --from - reads stdin
 cs device delete hmi_plc
+
+# modular EtherCAT coupler: build channels from its ESI + the modules present
+cs device esi-assemble coupler --idents 0x10,0x20,0x30   # slot order; hex or decimal
 ```
 
 To configure channels / switch a Modbus device to RTU / set EtherCAT PDOs, use
 `cs device get NAME` → edit the JSON → `cs device set NAME --from -`. Shapes are in `06-devices-iomap-tasks.md`.
+
+`cs device esi-assemble NAME --idents <ids>` is the exception to hand-editing channels: for a device with `bringup = esi_modular`, it parses the device's ESI file, looks up each comma-separated module ident (hex `0x10` or decimal) in slot order, and **replaces** the channel list with the assembled process image. The idents come from the coupler's `0xF050` scan or the modules you physically installed. Full workflow in `06-devices-iomap-tasks.md` § EtherCAT.
 
 ## Edges (deploy targets)
 

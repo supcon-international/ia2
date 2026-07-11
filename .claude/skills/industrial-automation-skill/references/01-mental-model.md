@@ -23,7 +23,7 @@ Three layers. Memorise them — every other reference assumes this picture.
 │                                                                  │
 │   ProjectRegistry           Program (singleton)                  │
 │   ───────────────────       ─────────────────                    │
-│   N open projects           one PROGRAM at a time                │
+│   N open projects           one project at a time                │
 │   `X-IA2-Project` header    (hardware constraint — Modbus,       │
 │   selects which              EtherCAT bus can have only one      │
 │                              master per process)                 │
@@ -63,9 +63,13 @@ Three layers. Memorise them — every other reference assumes this picture.
 
 Projects live in `~/Documents/IA2/<name>/`. The server holds a `ProjectRegistry` keyed by name. Every CLI request carries `X-IA2-Project: <name>` (set by `--project` flag); missing header → server falls back to its LRU "active" project. **Always pass `--project` if `cs project list` shows more than one.**
 
-### 2. One running PROGRAM at a time
+### 2. One running program per server; a run may schedule several PROGRAMs
 
-There is exactly one `Program` slot in server state. Starting a new program stops the previous one. The slot remembers which project owns it, so `/api/runtime/status` answers "running: foo/main" or "running: bar/conveyor". Don't try to "run two programs" — there's no `tasks.toml` shape that allows it (ironplc codegen emits only one PROGRAM per compilation).
+There is exactly one running-program slot in server state, and it belongs to one project at a time — starting a run stops whatever ran before, across all projects. That singleton is a *hardware* constraint, not a language one: a Modbus or EtherCAT bus has one master per process, so two scan loops can't drive the field at once. `/api/runtime/status` reports which project owns the slot ("running: foo/main").
+
+Within that one run, though, `tasks.toml` may schedule **several PROGRAM instances**, and they all execute. The bridge compiles one container plus one VM per instance and round-robin schedules them on the single scan thread: each instance fires on its own task interval, and priority then declaration order breaks same-tick ties. Snapshots merge across instances (a name shared by two renders as `instance.variable`; single-instance projects keep bare names), and each `iomap` entry routes to its `application` instance. Extra PROGRAMs are **not** silently dropped, and scheduling two is **not** an error.
+
+The one thing multi-PROGRAM projects cannot do is share a `VAR_GLOBAL` across instances — separate containers isolate the address spaces, so each instance would get its own diverging copy. Both `/api/run` and `/api/project/validate` refuse a project that schedules 2+ PROGRAMs while also declaring `VAR_GLOBAL`, naming the offending globals; move the shared state behind an I/O mapping or FUNCTION_BLOCK parameter, or schedule a single PROGRAM. See ADR-0001 (`docs/adr/0001-ironplc-ia2-boundary.md`) for the round-robin design.
 
 ### 3. The scan loop is real and drives real hardware
 

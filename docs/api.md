@@ -31,6 +31,7 @@ serves a smaller subset on its own port — see `docs/edge-deploy.md`.
 | `POST` | `/api/projects/open` | Open an existing project. Body: `OpenProjectRequest { path }`. | |
 | `POST` | `/api/projects/close` | Close the currently-open project. | |
 | `GET` | `/api/projects/open-list` | Every project the server currently has open + which is the active fallback. Returns `OpenProjectsList`. | Multi-window IDE picker |
+| `GET` | `/api/fs/browse?path=` | List the sub-directories of `path` (default `~/Documents/IA2`) for the Open-project folder picker — directories only, dotfiles hidden, each flagged `is_project` (has a `project.toml`). Returns `FsListing`. | A browser has no native OS folder dialog |
 | `GET` | `/api/project` | Full project tree (applications, devices, edges, iomap, tasks, folder lists). Returns `ProjectTree` or `null` when no project is open. | |
 | `POST` | `/api/project/migrate-tasks` | One-shot migrate inline-CONFIGURATION blocks in POU files into `tasks.toml`. Idempotent. Returns `MigrationResponse`. | Legacy projects only |
 | `POST` | `/api/project/validate` | Run `compile_project` and return diagnostics without spawning. Returns `Vec<CheckDiagnostic>` (empty = ok). | Pre-flight check before Run/Deploy |
@@ -76,6 +77,7 @@ read-only device-template catalog used to pre-fill devices from a bus scan.
 | `GET` | `/api/devices/{name}` | Read a device. Returns `Device`. |
 | `PUT` | `/api/devices/{name}` | Update full device config. Body: `Device`. |
 | `DELETE` | `/api/devices/{name}` | Delete. |
+| `POST` | `/api/devices/{name}/esi-assemble` | Assemble a modular EtherCAT coupler's channels from its ESI file + the modules it reports. Body: `EsiAssembleRequest { detected: u32[] }` (module idents in slot order). Requires the device to be EtherCAT with `bringup = esi_modular`; the assembled channels **replace** the device's channel list. Returns the updated `Device`. |
 
 ## Edges (deploy targets)
 
@@ -127,7 +129,7 @@ read-only device-template catalog used to pre-fill devices from a bus scan.
 | `POST` | `/api/symbols?language=st\|ld\|fbd\|sfc` | Extract declared variables from one source string (any language; default `st`). Body: `text/plain`. Returns `VariableInfo[]`. | Backs the editor's binding picker
 | `POST` | `/api/run` | Compile the whole project + spawn the bridge. Body: `{}` or `RunRequest`. | Reads `tasks.toml` to decide what runs
 | `POST` | `/api/stop` | Stop the running program (cooperative; scan loop drains). |
-| `GET` | `/api/runtime/status` | Synchronous overview of the runtime. Returns `RuntimeStatus { running, project, scan_count, last_snapshot_us, last_error, devices_connected, programs_active }`. | One-shot, agent-friendly
+| `GET` | `/api/runtime/status` | Synchronous overview of the runtime. Returns `RuntimeStatus { running, project, scan_count, last_snapshot_us, last_error, devices_connected, programs_active }`; `last_error` carries the VM-trap / panic message when a run dies (also emitted as SSE `error` + `stopped`), `null` after a clean run. | One-shot, agent-friendly
 | `GET` | `/api/runtime/snapshot` | Latest `VarSnapshot` or `null`. | No SSE needed for one-off queries
 | `POST` | `/api/runtime/variables/{name}` | Write a variable while running. Body: `WriteVariableRequest { value: <i32-coerceable> }`. Returns the new value. | Critical for debugging closed loops
 | `GET` | `/api/events` | SSE stream of `AppEvent` (`snapshot` / `started` / `stopped` / `error`). | For long-running IDE clients
@@ -182,13 +184,15 @@ been pointed at real hardware yet.
 
 # Coverage
 
-This doc was reconciled against the router on **2026-06-13** — every
-`.route()` in `crates/server/src/main.rs` has a row above. When you add a
-route, add its row here in the same change; the generated TypeScript types
-under `apps/web/src/types/generated/` remain the source of truth for shapes.
+This doc was reconciled against the router on **2026-07-11** — every
+`.route()` in `crates/server/src/main.rs` has a row above, and every route in
+`crates/runtime/src/main.rs` has a row in the Edge runtime table below. When
+you add a route, add its row here in the same change; the generated TypeScript
+types under `apps/web/src/types/generated/` remain the source of truth for
+shapes.
 
 Notable capabilities, mapped to the agent-use-case checklist (see
-`memory/principle_api_first.md`):
+`MEMORY/principles.md`):
 
 - ✅ Whole-project compile-check → **POST /api/project/validate**
 - ✅ One-shot latest snapshot (no SSE required) → **GET /api/runtime/snapshot**
@@ -210,14 +214,27 @@ Notable capabilities, mapped to the agent-use-case checklist (see
 
 # Edge runtime API (separate process)
 
-The headless `ia2-runtime` binary (running on the edge) exposes
-a small subset of the same surface, bound to `127.0.0.1` only:
+The headless `ia2-runtime` binary (running on the edge) exposes the runtime
+slice of the same surface — liveness/status, log tailing, discovery, and the
+full online-debug set — bound to `127.0.0.1` only. The IDE proxies most of
+these through `/api/edges/{name}/…` (and `/api/edges/{name}/runtime/{op}` for
+the debug ops).
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/health` | Liveness. |
-| `GET` | `/status` | Project + program instances + scan count + last snapshot. |
+| `GET` | `/health` | Liveness: status, uptime, scan count, plus `fieldbus_healthy` (true only when every configured device's transport is live) and a per-device `devices` health breakdown. |
+| `GET` | `/status` | Project + PROGRAM instances + device list + scan count + last snapshot + debug mode + forces, plus `device_health` (per-device transport health; a `false` entry means that device's inputs are frozen at last-known values) and `fault` (why the scan loop died — VM trap / panic message — `null` while running or after a clean stop). |
 | `GET` | `/events` | SSE stream of `VarSnapshot` (bare — no `AppEvent` wrapper). |
+| `GET` | `/logs?tail=N` | The most recent `tail` (default 200) captured log lines. What `cs edge logs` pulls over the tunnel. |
+| `GET` | `/logs/stream` | SSE stream of log lines as they're emitted (no backlog; pair with `/logs` for history). |
+| `GET` | `/discover` | Per-device connect reports + discovered EtherCAT topology. Powers `cs edge scan`. |
+| `GET` | `/system` | Edge NICs / serial ports / arch, for authoring device configs against real edge facts. Powers `cs edge system`. |
+| `POST` | `/pause` | Freeze the scan loop (last outputs hold). Returns `{ mode }`. |
+| `POST` | `/resume` | Resume free-running. Returns `{ mode }`. |
+| `POST` | `/step` | Advance N cycles while paused. Body: `{ cycles }`. Returns `{ mode }`. |
+| `POST` | `/write` | One-shot write of a variable. Body: `{ name, value }`. Returns the applied value. |
+| `POST` | `/force` | Pin a variable every cycle until released. Body: `{ name, value }`. |
+| `POST` | `/unforce` | Release a forced variable. Body: `{ name }`. |
 | `POST` | `/stop` | Request graceful shutdown. |
 
 Access from the dev machine: open an `ssh -N -L <local>:127.0.0.1:<runtime_port> <edge>`
