@@ -318,7 +318,7 @@ function Header({
           project-level
         </span>
         {dirty && (
-          <span className="rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-amber-700 dark:text-amber-400">
+          <span className="rounded bg-warn/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-warn">
             modified
           </span>
         )}
@@ -691,11 +691,11 @@ function MigrateBanner({
   onMigrate: () => void
 }) {
   return (
-    <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/5 p-3 text-[12px] text-amber-900 dark:text-amber-200">
+    <div className="flex items-start gap-2 rounded-md border border-warn/40 bg-warn/10 p-3 text-[12px] text-warn">
       <ArrowDownToLine className="mt-0.5 size-4 shrink-0" />
       <div className="flex-1 space-y-1">
         <div className="font-medium">Legacy project — needs migration</div>
-        <p className="text-[11px] text-amber-900/80 dark:text-amber-200/80">
+        <p className="text-[11px] text-warn/80">
           This project's POU files still carry inline CONFIGURATION blocks.
           Migration extracts them into <span className="font-mono">tasks.toml</span>{" "}
           and strips them from the POU source files. Files are rewritten in
@@ -725,7 +725,7 @@ function Note({
 }) {
   const cls =
     kind === "ok"
-      ? "border-emerald-500/40 bg-emerald-500/5 text-emerald-900 dark:text-emerald-200"
+      ? "border-highlight/40 bg-highlight/10 text-highlight"
       : ""
   return <div className={`rounded-md border p-2 text-[12px] ${cls}`}>{children}</div>
 }

@@ -152,8 +152,11 @@ export const languageConfiguration: languages.LanguageConfiguration = {
 }
 
 export const editorOptions: editor.IStandaloneEditorConstructionOptions = {
+  // Same stack as the rest of the app (--font-mono in styles.css). If
+  // Monaco kept its own fallback list, the editor's glyphs would drift
+  // from the tree / monitor mono and the seam would be visible.
   fontFamily:
-    'ui-monospace, "SF Mono", "Cascadia Mono", "Roboto Mono", Menlo, Consolas, monospace',
+    '"JetBrains Mono Variable", "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace',
   fontSize: 13,
   lineNumbers: "on",
   minimap: { enabled: false },
@@ -164,4 +167,8 @@ export const editorOptions: editor.IStandaloneEditorConstructionOptions = {
   insertSpaces: true,
   automaticLayout: true,
   padding: { top: 8, bottom: 8 },
+  // The design's code block is airier than Monaco's default 1.35×.
+  lineHeight: 21,
+  renderLineHighlight: "line",
+  guides: { indentation: false },
 }

@@ -4,8 +4,24 @@
     {
       "name": "controller-server",
       "runtimeExecutable": "target/release/server",
-      "runtimeArgs": ["--bind", "127.0.0.1:3001", "--static-dir", "apps/web/dist"],
+      "runtimeArgs": [
+        "--bind",
+        "127.0.0.1:3001",
+        "--static-dir",
+        "apps/web/dist"
+      ],
       "port": 3001,
+      "autoPort": false
+    },
+    {
+      "name": "web-dev",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": [
+        "--dir",
+        "apps/web",
+        "dev"
+      ],
+      "port": 3000,
       "autoPort": false
     }
   ]

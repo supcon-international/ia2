@@ -103,7 +103,7 @@ export function IoMapPane() {
         <span className="truncate normal-case tracking-normal text-foreground">
           IO Mapping
           {dirty && (
-            <span className="ml-2 rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-amber-700 dark:text-amber-400">
+            <span className="ml-2 rounded bg-warn/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-warn">
               modified
             </span>
           )}

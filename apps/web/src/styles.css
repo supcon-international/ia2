@@ -1,127 +1,152 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+/* Self-hosted, per the design's type spec: IBM Plex Sans for UI chrome,
+ * JetBrains Mono everywhere code, identifiers, addresses and live values
+ * appear. Bundled rather than CDN-linked because the Mac shell's
+ * WKWebView must render identically with no network. Only the weights the
+ * UI actually uses are pulled in; the variable mono covers 400/500/700
+ * from a single file. */
+@import "@fontsource/ibm-plex-sans/400.css";
+@import "@fontsource/ibm-plex-sans/500.css";
+@import "@fontsource/ibm-plex-sans/600.css";
+@import "@fontsource-variable/jetbrains-mono/wght.css";
+
 @custom-variant dark (&:is(.dark *));
 
 :root {
   /* Tightened to 4px from 10px to match the workspace-tool feel of the
      rest of the IDE. Cascades through Tailwind's rounded-sm/md/lg/xl. */
   --radius: 0.25rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  /* Sub-perceptible warmth on accent so hover reads as "clickable"
-   * instead of "disabled" — see the dark-mode block for the
-   * reasoning. Chroma is mirrored across themes. */
-  --accent: oklch(0.965 0.012 245);
-  --accent-foreground: oklch(0.205 0 0);
+  /* ---- Acid-green tune (Figma: IA2 / ZLbt1F2kBzeTsuVF4GpKRy) --------
+   *
+   * Two ideas carry the whole theme:
+   *
+   *  1. WARM neutrals, never pure gray. Every surface sits on a hex
+   *     where R = G > B by a point or two (#FAFAF8, #F2F2F0 / dark
+   *     #1C1C1B, #1A1A19). The warmth is sub-perceptible — you can't
+   *     name it, but pure-gray UI next to it suddenly looks blue.
+   *
+   *  2. ACID GREEN (#B2ED1D) is the *agent's* colour, not a general
+   *     accent. It appears exactly where the machine is in control:
+   *     the window frame and the takeover status bar. Running/success
+   *     states keep a conventional green (--highlight) so "agent
+   *     presence" and "process running" never blur together.
+   */
+  --background: #fafaf8; /* editor / content surface */
+  --foreground: #21201c;
+  --card: #ffffff;
+  --card-foreground: #21201c;
+  --popover: #ffffff;
+  --popover-foreground: #21201c;
+  /* Save-style primary: near-black chip with warm white text. */
+  --primary: #21201c;
+  --primary-foreground: #fafaf8;
+  --secondary: #f2f2f0; /* titlebar / sidebar / chrome surface */
+  --secondary-foreground: #21201c;
+  --muted: #f2f2f0;
+  --muted-foreground: #6f6d66;
+  --accent: #e8e7e3; /* hover / selected rows (warm, not blue) */
+  --accent-foreground: #21201c;
   --destructive: oklch(0.577 0.245 27.325);
-  /* FX Green — the IDE's one brand highlight colour, reserved for
-     "currently active / selected / running / progress" surfaces. NOT a
-     general success colour, and NOT a page background. Roughly tracks
-     Tailwind's emerald-500 in hue but a touch sharper. */
-  --highlight: oklch(0.7 0.17 152);
-  --highlight-foreground: oklch(0.98 0 0);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
+  /* Conventional green — Running dot, RUNNING pill, TRUE values, the
+     Stop/Run affordances, connected/healthy/bound states. The muted
+     forest green from the Figma frames (#2e8049), deliberately NOT the
+     acid green: process-running and agent-in-control must never blur. */
+  --highlight: #2e8049;
+  --highlight-foreground: #fafaf8;
+  /* THE acid green — agent-in-control surfaces only (window frame,
+     takeover bar, agent chips). Black text on top. */
+  --agent: #b2ed1d;
+  --agent-foreground: #191c08;
+  /* Ochre warn — MODIFIED/dirty/forced/attention. The Figma's MODIFIED
+     badge colour (#a8710f); used at low alpha for chip fills. */
+  --warn: #a8710f;
+  /* The design's single blue — the Monitor trend sparkline. Muted steel,
+     not a saturated cyan, so it reads as data, not a link. */
+  --trend: #3a6fb0;
+  --border: #e4e3df;
+  --input: #e4e3df;
+  --ring: #8a8983;
   --chart-1: oklch(0.646 0.222 41.116);
   --chart-2: oklch(0.6 0.118 184.704);
   --chart-3: oklch(0.398 0.07 227.392);
   --chart-4: oklch(0.828 0.189 84.429);
   --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  --sidebar: #f2f2f0;
+  --sidebar-foreground: #21201c;
+  --sidebar-primary: #21201c;
+  --sidebar-primary-foreground: #fafaf8;
+  --sidebar-accent: #e8e7e3;
+  --sidebar-accent-foreground: #21201c;
+  --sidebar-border: #e4e3df;
+  --sidebar-ring: #8a8983;
 }
 
 .dark {
-  /* Softer dark palette pass:
-   *
-   * The previous values (bg 0.145, fg 0.985) gave a contrast ratio of
-   * ~17:1 — far above WCAG AAA's 7:1, well into "harsh on extended
-   * viewing" territory. The numbers below land near 12:1, which is
-   * still solidly AAA but reads as Linear / Cursor / Figma-class dark
-   * rather than industrial-terminal severe. Three coordinated lifts:
-   *
-   *   1. Background up from 0.145 → 0.18 (#1a → #232323-ish). The
-   *      near-black goes away; the eye has somewhere to rest.
-   *   2. Cards / popovers up from 0.205 → 0.225 — a hair more lift
-   *      than before so the elevation step against the new bg still
-   *      reads as a separate surface, not a sticker.
-   *   3. Sidebar between bg and card (0.205) so the left rail has a
-   *      visible-but-quiet edge against the editor.
-   *
-   * Borders go from 10% → 18% white opacity — the previous 10% was
-   * barely perceptible against the near-black; on the lifted bg it
-   * needs a touch more presence to register as a separator.
-   *
-   * Focus ring jumps from 55% gray to a near-foreground tone so
-   * keyboard nav is actually visible. (Old: oklch(0.556 0 0); new:
-   * oklch(0.85 0 0) — the same color the foreground text uses, dimmed
-   * just enough to feel like a ring rather than an outline.)
-   */
-  --background: oklch(0.18 0 0);
-  --foreground: oklch(0.97 0 0);
-  --card: oklch(0.225 0 0);
-  --card-foreground: oklch(0.97 0 0);
-  --popover: oklch(0.225 0 0);
-  --popover-foreground: oklch(0.97 0 0);
-  --primary: oklch(0.92 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.28 0 0);
-  --secondary-foreground: oklch(0.97 0 0);
-  --muted: oklch(0.28 0 0);
-  --muted-foreground: oklch(0.72 0 0);
-  /* Accent has a touch of warmth (chroma 0.012 at hue 245° — very
-   * faint blue-violet, the same hue family Linear / Cursor use for
-   * row-hover). Pure-gray accent reads as "disabled" on hover; a
-   * sub-perceptible chroma reads as "clickable". The chroma is
-   * deliberately low enough (~0.01) that it doesn't violate the
-   * design system's near-neutral mandate — you can't name the colour,
-   * you just feel the interaction. */
-  --accent: oklch(0.305 0.012 245);
-  --accent-foreground: oklch(0.97 0 0);
+  /* Dark half of the acid-green tune. Same two ideas as light:
+   * warm near-blacks (#1C1C1B editor, #1A1A19 chrome — R = G > B,
+   * never a blue-gray), and the SAME acid green (#B2ED1D) for agent
+   * surfaces — the accent does not shift between themes, which is
+   * what makes the takeover state read identically day or night.
+   * Primary stays inverted (warm-white chip, near-black text) so the
+   * Save button is the one high-contrast object in the toolbar in
+   * both themes. */
+  --background: #1c1c1b; /* editor / content surface */
+  --foreground: #eceae4;
+  --card: #232322;
+  --card-foreground: #eceae4;
+  --popover: #232322;
+  --popover-foreground: #eceae4;
+  --primary: #ecebe8; /* Save chip: warm white on dark */
+  --primary-foreground: #21201c;
+  --secondary: #1a1a19; /* titlebar / sidebar / chrome surface */
+  --secondary-foreground: #eceae4;
+  --muted: #262625;
+  --muted-foreground: #a3a199;
+  --accent: #333331; /* hover / selected rows (warm) */
+  --accent-foreground: #eceae4;
   --destructive: oklch(0.704 0.191 22.216);
-  /* Slightly brighter / more luminous on dark so it still reads as
-     "the active thing" against the near-black background. */
-  --highlight: oklch(0.76 0.18 152);
-  --highlight-foreground: oklch(0.15 0 0);
-  --border: oklch(1 0 0 / 18%);
-  --input: oklch(1 0 0 / 22%);
-  --ring: oklch(0.85 0 0);
+  /* Same forest green lifted for legibility on the near-black editor —
+     same hue as light, more luminance. */
+  --highlight: #3aba67;
+  --highlight-foreground: #10160c;
+  /* Acid green is theme-invariant — the agent looks the same day or
+     night. Only its text flips to the near-black ink. */
+  --agent: #b2ed1d;
+  --agent-foreground: #191c08;
+  /* Ochre lifted for dark legibility (same hue as light's #a8710f). */
+  --warn: #e0a63a;
+  /* Steel blue lifted for the near-black editor. */
+  --trend: #6ea3e0;
+  --border: #33332f;
+  --input: #3a3a36;
+  --ring: #c9c7c0;
   --chart-1: oklch(0.488 0.243 264.376);
   --chart-2: oklch(0.696 0.17 162.48);
   --chart-3: oklch(0.769 0.188 70.08);
   --chart-4: oklch(0.627 0.265 303.9);
   --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.97 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.97 0 0);
-  /* Match the workspace accent so hovers on tree rows + file list
-   * read the same as hovers on buttons / list items elsewhere. */
-  --sidebar-accent: oklch(0.305 0.012 245);
-  --sidebar-accent-foreground: oklch(0.97 0 0);
-  --sidebar-border: oklch(1 0 0 / 18%);
-  --sidebar-ring: oklch(0.85 0 0);
+  --sidebar: #1a1a19;
+  --sidebar-foreground: #eceae4;
+  --sidebar-primary: #ecebe8;
+  --sidebar-primary-foreground: #21201c;
+  --sidebar-accent: #333331;
+  --sidebar-accent-foreground: #eceae4;
+  --sidebar-border: #33332f;
+  --sidebar-ring: #c9c7c0;
 }
 
 @theme inline {
+  /* Type stack. `font-sans` is the chrome; `font-mono` carries anything
+     the machine authored or measured (code, POU paths, IP addresses,
+     live values, badges) — that split is what makes the IDE read as a
+     tool rather than a website. System fallbacks keep the layout stable
+     if the woff2 hasn't landed yet. */
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace,
+    "SF Mono", Menlo, Consolas, monospace;
   /* Keep the radius ladder shallow so cards / buttons / inputs / popovers
      all share a near-identical curvature — per the design language we
      don't want the radius itself becoming a visual element. */
@@ -146,6 +171,10 @@
   --color-destructive: var(--destructive);
   --color-highlight: var(--highlight);
   --color-highlight-foreground: var(--highlight-foreground);
+  --color-agent: var(--agent);
+  --color-agent-foreground: var(--agent-foreground);
+  --color-warn: var(--warn);
+  --color-trend: var(--trend);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
@@ -178,7 +207,12 @@ body,
 
 body {
   margin: 0;
-  @apply text-foreground;
+  @apply text-foreground font-sans;
+  /* The design's UI type is optically small (11–13px). Without these two
+     the sans reads noticeably chunkier than the Figma frames at the same
+     px size. */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   /*
    * Background: transparent on body, set explicitly on the workspace
    * content area inside Workbench. The Mac shell turns off the
@@ -273,112 +307,60 @@ body {
   mix-blend-mode: normal;
 }
 
-/* ---- Agent takeover overlay ----------------------------------------
+/* ---- Agent takeover chrome ------------------------------------------
  *
- * Composed of two layers stacked on top of each other (both rendered
- * by TakeoverOverlay.tsx → BorderGlow):
+ * Per the acid-green design: when an agent is in control the whole
+ * window is FRAMED in solid acid green (#B2ED1D) and a 26px status bar
+ * docks to the bottom edge, inside the frame — the frame and the bar
+ * read as one continuous piece of chrome that "clamps" the app.
  *
- *   1. .ia2-takeover-breath — A fixed-position div that "breathes":
- *      a 6px inset ring + deep soft halo. Pulses opacity / thickness
- *      together on a 2.4s cycle. Slow enough not to read as
- *      seizure-y; fast enough to communicate "alive".
+ *   .ia2-takeover-frame — solid 3px inset ring. Not a glow, not a
+ *     gradient: the design's frame is flat and constant. A very slow,
+ *     shallow breath (100% → 82% opacity) keeps it reading as "live"
+ *     without becoming a spinner; reduced-motion drops even that.
  *
- *   2. .ia2-takeover-comet  — A second fixed div behind the breath
- *      layer, with a conic-gradient that has a bright "spotlight"
- *      arc and is fully transparent elsewhere. We then mask out the
- *      centre so only a perimeter ring is visible. The whole thing
- *      rotates at 6s/turn, producing a traveling highlight that
- *      reads as "something purposeful is moving around the window".
- *
- * Why both: the breath alone is too easy to mistake for a subtle
- * accent. The comet alone reads as a single moving object, less
- * "presence" than "loading spinner". Together they say "live
- * agent activity here", clearly, without being garish.
- *
- * The conic-gradient relies on @property which is in Safari 16.4+
- * (WKWebView ≥ macOS 13.3) — same baseline we already require for
- * other private prefs. Browsers without @property animate-able
- * custom properties degrade gracefully: the gradient still renders
- * but doesn't rotate (the breath layer still pulses).
+ *   The status bar itself is a React component (AgentStatusBar) laid
+ *   out in normal flow at the bottom of the shell, so the app content
+ *   shrinks by 26px rather than being overlapped — matching how the
+ *   Figma frames reserve the strip.
  */
-@property --ia2-comet-angle {
-  syntax: '<angle>';
-  initial-value: 0deg;
-  inherits: false;
+@keyframes ia2-takeover-frame-breath {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.82; }
 }
 
-@keyframes ia2-takeover-breath {
-  0%, 100% {
-    box-shadow:
-      inset 0 0 0 4px rgb(95 184 104 / 0.75),
-      inset 0 0 80px rgb(95 184 104 / 0.22);
-  }
-  50% {
-    box-shadow:
-      inset 0 0 0 6px rgb(95 184 104 / 1.00),
-      inset 0 0 130px rgb(95 184 104 / 0.45);
-  }
-}
-
-@keyframes ia2-takeover-comet-spin {
-  to {
-    --ia2-comet-angle: 360deg;
-  }
-}
-
-.ia2-takeover-breath {
+.ia2-takeover-frame {
   position: fixed;
   inset: 0;
   pointer-events: none;
   z-index: 700;
-  animation: ia2-takeover-breath 2.4s ease-in-out infinite;
+  box-shadow: inset 0 0 0 3px var(--agent);
+  animation: ia2-takeover-frame-breath 3.2s ease-in-out infinite;
 }
 
-.ia2-takeover-comet {
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  z-index: 699;  /* one below the breath so the breath's crisp inner edge wins */
-  background: conic-gradient(
-    from var(--ia2-comet-angle, 0deg),
-    transparent 0%,
-    rgb(95 184 104 / 0.20) 3%,
-    rgb(120 220 130 / 0.90) 7%,
-    rgb(180 250 200 / 1.00) 9%,
-    rgb(120 220 130 / 0.90) 11%,
-    rgb(95 184 104 / 0.30) 16%,
-    transparent 22%,
-    transparent 100%
-  );
-  /* Mask out the centre — keep only an 8px-wide ring at the perimeter.
-   * The `xor` composite cuts the inner rectangle from the outer one
-   * so we get a hollow frame. */
-  -webkit-mask:
-    linear-gradient(#000, #000) content-box,
-    linear-gradient(#000, #000);
-  -webkit-mask-composite: xor;
-          mask:
-    linear-gradient(#000, #000) content-box,
-    linear-gradient(#000, #000);
-          mask-composite: exclude;
-  padding: 8px;
-  animation: ia2-takeover-comet-spin 6s linear infinite;
-}
-
-/* Respect the reduced-motion preference: drop the comet rotation
- * (which is the most visually busy element) and slow the breath to
- * a barely-perceptible pulse. The user still gets a clear visual
- * cue that the agent is in control. */
 @media (prefers-reduced-motion: reduce) {
-  .ia2-takeover-breath {
+  .ia2-takeover-frame {
     animation: none;
-    box-shadow:
-      inset 0 0 0 4px rgb(95 184 104 / 0.85),
-      inset 0 0 80px rgb(95 184 104 / 0.30);
   }
-  .ia2-takeover-comet {
+}
+
+/* Blinking terminal-style cursor block at the tail of the agent bar's
+ * activity text — the design's "the machine is typing" tell. */
+@keyframes ia2-agent-caret-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+.ia2-agent-caret {
+  display: inline-block;
+  width: 7px;
+  height: 14px;
+  margin-left: 4px;
+  background: var(--agent-foreground);
+  animation: ia2-agent-caret-blink 1.1s steps(1) infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ia2-agent-caret {
     animation: none;
-    opacity: 0.5;
   }
 }
 

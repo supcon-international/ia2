@@ -145,13 +145,13 @@ export function OpenProjectDialog({ trigger }: Props) {
                     }
                   >
                     {e.is_project ? (
-                      <FolderCheck className="size-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                      <FolderCheck className="size-4 shrink-0 text-highlight" />
                     ) : (
                       <Folder className="size-4 shrink-0 text-muted-foreground" />
                     )}
                     <span className="truncate">{e.name}</span>
                     {e.is_project && (
-                      <span className="ml-auto rounded bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-emerald-700 dark:text-emerald-400">
+                      <span className="ml-auto rounded bg-highlight/15 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-highlight">
                         project
                       </span>
                     )}

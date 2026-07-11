@@ -182,7 +182,7 @@ function Editor({
             edge
           </span>
           {dirty && (
-            <span className="rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-amber-700 dark:text-amber-400">
+            <span className="rounded bg-warn/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-warn">
               modified
             </span>
           )}
@@ -305,7 +305,7 @@ function Editor({
                 size="sm"
                 variant="outline"
                 onClick={() => void onDetach()}
-                className="border-emerald-500/40 text-emerald-700 dark:text-emerald-400"
+                className="border-highlight/40 text-highlight"
               >
                 <Link2Off className="mr-1.5 size-3" />
                 Detach
@@ -341,7 +341,7 @@ function Editor({
             </p>
           )}
           {attached && (
-            <div className="mt-3 inline-flex items-center gap-1.5 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-2 py-1 text-[12px] text-emerald-800 dark:text-emerald-300">
+            <div className="mt-3 inline-flex items-center gap-1.5 rounded-md border border-highlight/30 bg-highlight/10 px-2 py-1 text-[12px] text-highlight">
               <Link2 className="size-3" />
               IDE is attached — Monitor and Variables panes are now showing
               live data from this edge.
@@ -360,7 +360,7 @@ function Editor({
               </pre>
             ) : deployLog ? (
               <div>
-                <div className="mb-1 inline-flex items-center gap-1.5 text-[12px] text-emerald-800 dark:text-emerald-300">
+                <div className="mb-1 inline-flex items-center gap-1.5 text-[12px] text-highlight">
                   <CheckCircle2 className="size-3.5" />
                   Version{" "}
                   <span className="font-mono">{deployLog.version}</span> live
@@ -512,7 +512,7 @@ function DiscoverPanel({ name }: { name: string }) {
         <div key={d.name} className="overflow-hidden rounded-md border border-border">
           <div className="flex items-center gap-2 border-b border-border bg-muted/30 px-3 py-2 text-sm">
             {d.connected ? (
-              <CheckCircle2 className="size-3.5 text-emerald-600 dark:text-emerald-400" />
+              <CheckCircle2 className="size-3.5 text-highlight" />
             ) : (
               <AlertCircle className="size-3.5 text-red-600 dark:text-red-400" />
             )}
@@ -633,7 +633,7 @@ function SystemPanel({ name }: { name: string }) {
                       <td className="py-1.5 text-muted-foreground">{n.operstate}</td>
                       <td className="py-1.5">
                         {n.carrier ? (
-                          <span className="text-emerald-600 dark:text-emerald-400">
+                          <span className="text-highlight">
                             carrier
                           </span>
                         ) : (
@@ -727,8 +727,8 @@ function DebugPanel({ name }: { name: string }) {
         <span
           className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider ${
             mode === "running"
-              ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
-              : "bg-amber-500/15 text-amber-700 dark:text-amber-400"
+              ? "bg-highlight/15 text-highlight"
+              : "bg-warn/15 text-warn"
           }`}
         >
           {mode}
@@ -792,7 +792,7 @@ function DebugPanel({ name }: { name: string }) {
                 <td className="py-1">
                   {v.value}
                   {forced.has(v.name) && (
-                    <span className="ml-1.5 text-amber-600 dark:text-amber-400">forced</span>
+                    <span className="ml-1.5 text-warn">forced</span>
                   )}
                 </td>
                 <td className="py-1 pr-3 text-right">
@@ -896,7 +896,7 @@ function ReachBadge({
   if (probe.reachable) {
     return (
       <span
-        className="inline-flex items-center gap-1 rounded-md bg-emerald-500/15 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-emerald-700 dark:text-emerald-400"
+        className="inline-flex items-center gap-1 rounded-md bg-highlight/15 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-highlight"
         title="Edge runtime is responding"
       >
         <CheckCircle2 className="size-3" />

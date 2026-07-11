@@ -611,7 +611,7 @@ function CategoryVisual({
 }) {
   switch (cat) {
     case "numeric": {
-      const defaultColor = "text-sky-600 dark:text-sky-400"
+      const defaultColor = "text-trend"
       return (
         <span
           className={cn("block h-4 w-full", !sparkColor && defaultColor)}

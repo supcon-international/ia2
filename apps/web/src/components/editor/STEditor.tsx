@@ -7,6 +7,7 @@ import { useDarkMode } from "@/lib/dark-mode"
 import { groupedFbs } from "@/lib/ld-fbs"
 import type { CheckDiagnostic } from "@/types/generated/CheckDiagnostic"
 import type { VariableInfo } from "@/types/generated/VariableInfo"
+import { ACID_DARK, ACID_LIGHT, defineAcidThemes } from "./acid-theme"
 import {
   LANGUAGE_ID,
   builtins,
@@ -32,7 +33,7 @@ export function STEditor({ value, onChange, diagnostics, readOnly = false }: Pro
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null)
   const monacoRef = useRef<Monaco | null>(null)
   const dark = useDarkMode()
-  const theme = dark === "dark" ? "vs-dark" : "light"
+  const theme = dark === "dark" ? ACID_DARK : ACID_LIGHT
 
   // Live symbol table — repopulated whenever the source settles (350ms
   // debounce, same cadence as our diagnostics poll). The completion
@@ -213,6 +214,11 @@ export function STEditor({ value, onChange, diagnostics, readOnly = false }: Pro
       language={LANGUAGE_ID}
       value={value}
       theme={theme}
+      // Themes must exist before the first paint, otherwise Monaco falls
+      // back to stock `vs` for a frame and the editor flashes white on a
+      // dark workbench. `beforeMount` runs ahead of that first paint;
+      // `onMount` would be one frame too late.
+      beforeMount={defineAcidThemes}
       onChange={(v) => onChange(v ?? "")}
       onMount={handleMount}
       options={{ ...editorOptions, readOnly, domReadOnly: readOnly }}

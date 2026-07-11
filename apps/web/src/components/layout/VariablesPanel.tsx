@@ -121,7 +121,7 @@ export function VariablesPanel() {
                               {m.direction === "input" ? (
                                 <ArrowLeftRight className="size-3 shrink-0 text-sky-700 dark:text-sky-400" />
                               ) : (
-                                <ArrowRight className="size-3 shrink-0 text-emerald-700 dark:text-emerald-400" />
+                                <ArrowRight className="size-3 shrink-0 text-highlight" />
                               )}
                               <span className="truncate">
                                 {m.device}.{m.channel}

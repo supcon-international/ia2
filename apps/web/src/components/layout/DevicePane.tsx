@@ -192,7 +192,7 @@ function ModbusDeviceEditor({
             modbus
           </span>
           {dirty && (
-            <span className="rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-amber-700 dark:text-amber-400">
+            <span className="rounded bg-warn/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-warn">
               modified
             </span>
           )}
@@ -892,7 +892,7 @@ function EthercatDeviceEditor({
             ethercat
           </span>
           {dirty && (
-            <span className="rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-amber-700 dark:text-amber-400">
+            <span className="rounded bg-warn/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-warn">
               modified
             </span>
           )}
@@ -1402,7 +1402,7 @@ function OpcuaDeviceEditor({
             opc ua
           </span>
           {dirty && (
-            <span className="rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-amber-700 dark:text-amber-400">
+            <span className="rounded bg-warn/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-warn">
               modified
             </span>
           )}
@@ -1717,7 +1717,7 @@ function LinkedToCell({
             className={
               m.direction === "input"
                 ? "text-sky-700 dark:text-sky-400"
-                : "text-emerald-700 dark:text-emerald-400"
+                : "text-highlight"
             }
           >
             {m.direction === "input" ? "←" : "→"}

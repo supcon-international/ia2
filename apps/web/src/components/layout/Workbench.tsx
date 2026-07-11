@@ -4,7 +4,9 @@ import { Group, Panel, Separator, type Layout } from "react-resizable-panels"
 
 import { ProjectEmptyState } from "@/components/dialogs/ProjectEmptyState"
 import { RuntimeProvider, useRuntime } from "@/state/runtime"
+import { AgentStatusBar } from "./AgentStatusBar"
 import { DevicePane } from "./DevicePane"
+import { IconRail } from "./IconRail"
 import { EdgePane } from "./EdgePane"
 import { IoMapPane } from "./IoMapPane"
 import { MonitorPane } from "./MonitorPane"
@@ -176,44 +178,55 @@ function Shell() {
        * gutter that costs ~28px of vertical space — no visual
        * conflict, no special-casing. */}
       <WindowTitleBar />
-      <Group
-        orientation="horizontal"
-        defaultLayout={hLayout}
-        onLayoutChange={setHLayout}
-        className="ia2-no-drag h-full w-full min-h-0 bg-background"
-      >
-        <Panel
-          id={PANEL_PROJECT}
-          minSize="10%"
-          maxSize="40%"
-          collapsible
-          collapsedSize="0%"
+      {/* Rail + resizable panes share one horizontal row. The rail is a
+       * fixed 52px outside the resizable Group so dragging the sidebar
+       * gutter never touches it — it's chrome, not a pane. */}
+      <div className="ia2-no-drag flex h-full min-h-0 w-full bg-background">
+        <IconRail />
+        <Group
+          orientation="horizontal"
+          defaultLayout={hLayout}
+          onLayoutChange={setHLayout}
+          className="h-full min-h-0 flex-1"
         >
-          <ProjectPane />
-        </Panel>
-        <Gutter orientation="vertical" />
-        <Panel id={PANEL_CENTER} minSize="30%">
-          <Group
-            orientation="vertical"
-            defaultLayout={vLayout}
-            onLayoutChange={setVLayout}
-            className="h-full w-full"
+          <Panel
+            id={PANEL_PROJECT}
+            minSize="10%"
+            maxSize="40%"
+            collapsible
+            collapsedSize="0%"
           >
-            <Panel id={PANEL_EDITOR} minSize="20%">
-              {center}
-            </Panel>
-            <Gutter orientation="horizontal" />
-            <Panel
-              id={PANEL_MONITOR}
-              minSize="5%"
-              collapsible
-              collapsedSize="3%"
+            <ProjectPane />
+          </Panel>
+          <Gutter orientation="vertical" />
+          <Panel id={PANEL_CENTER} minSize="30%">
+            <Group
+              orientation="vertical"
+              defaultLayout={vLayout}
+              onLayoutChange={setVLayout}
+              className="h-full w-full"
             >
-              <MonitorPane />
-            </Panel>
-          </Group>
-        </Panel>
-      </Group>
+              <Panel id={PANEL_EDITOR} minSize="20%">
+                {center}
+              </Panel>
+              <Gutter orientation="horizontal" />
+              <Panel
+                id={PANEL_MONITOR}
+                minSize="5%"
+                collapsible
+                collapsedSize="3%"
+              >
+                <MonitorPane />
+              </Panel>
+            </Group>
+          </Panel>
+        </Group>
+      </div>
+      {/* Acid-green agent bar. In normal flow (not an overlay) so the
+       * workspace above shrinks by its 26px instead of being covered —
+       * an agent editing the bottom line of a file must still be able
+       * to see it. Renders nothing when no agent is active. */}
+      <AgentStatusBar />
     </div>
   )
 }

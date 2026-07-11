@@ -72,7 +72,7 @@ export function ProgramPane() {
             </span>
           ) : null}
           {isDirty && (
-            <span className="rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-amber-700 dark:text-amber-400">
+            <span className="rounded bg-warn/15 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-warn">
               modified
             </span>
           )}
@@ -114,11 +114,14 @@ export function ProgramPane() {
         <div className="flex items-center gap-1">
           {isDirty && !isLibrary && (
             <>
+              {/* Revert: bordered secondary. Save: the one filled dark
+               * chip in the toolbar (design's single high-contrast
+               * object). Mirrors the Figma toolbar exactly. */}
               <button
                 type="button"
                 onClick={() => setSource(currentPou.source)}
                 title="Revert"
-                className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium tracking-normal text-muted-foreground normal-case hover:bg-accent/40"
+                className="flex items-center gap-1 rounded-md border border-border bg-card px-2 py-1 text-xs font-medium tracking-normal text-muted-foreground normal-case hover:bg-accent/40 hover:text-foreground"
               >
                 <RotateCcw className="size-3" />
                 Revert
@@ -127,7 +130,7 @@ export function ProgramPane() {
                 type="button"
                 onClick={() => void saveCurrentPou()}
                 title="Save (Cmd/Ctrl+S)"
-                className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium tracking-normal text-foreground normal-case hover:bg-accent/40"
+                className="flex items-center gap-1 rounded-md bg-primary px-2.5 py-1 text-xs font-medium tracking-normal text-primary-foreground normal-case hover:bg-primary/90"
               >
                 <Save className="size-3" />
                 Save
@@ -282,7 +285,7 @@ function ScheduleHint({
       type="button"
       onClick={() => void onSchedule(target.name)}
       title={`Add PROGRAM ${target.name} to a task so Run actually schedules it`}
-      className="inline-flex items-center gap-1 rounded-md border border-dashed border-amber-500/50 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-amber-800 hover:bg-amber-500/15 dark:text-amber-300"
+      className="inline-flex items-center gap-1 rounded-md border border-dashed border-warn/50 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-warn hover:bg-warn/15 dark:text-warn"
     >
       <Plus className="size-2.5" />
       schedule {target.name}
