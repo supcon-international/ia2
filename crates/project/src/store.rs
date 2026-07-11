@@ -1334,6 +1334,7 @@ fn default_config_for(protocol: Protocol) -> ProtocolConfig {
             dc_static_sync_iterations: 0,
             slaves: vec![],
             channels: vec![],
+            gear: vec![],
         }),
         Protocol::Opcua => ProtocolConfig::Opcua(crate::types::OpcuaConfig {
             endpoint_url: "opc.tcp://127.0.0.1:4840".into(),

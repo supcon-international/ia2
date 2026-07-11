@@ -1,0 +1,89 @@
+# Map the follower's enable-chain PDOs and the gear parameter channels.
+# target_position is intentionally NOT mapped: the in-cycle gear engine
+# owns those bytes (declaring an output mapping would fight it every scan).
+
+[[mappings]]
+application = "main"
+variable = "status_word"
+direction = "input"
+device = "servo"
+channel = "statusword"
+
+[[mappings]]
+application = "main"
+variable = "actual_pos"
+direction = "input"
+device = "servo"
+channel = "position_actual"
+
+[[mappings]]
+application = "main"
+variable = "control_word"
+direction = "output"
+device = "servo"
+channel = "controlword"
+
+# --- Gear slow-plane parameters (routed into the engine, not PDI bytes) ---
+[[mappings]]
+application = "main"
+variable = "g_engage"
+direction = "output"
+device = "servo"
+channel = "gear_engage"
+
+[[mappings]]
+application = "main"
+variable = "g_ratio_num"
+direction = "output"
+device = "servo"
+channel = "ratio_num"
+
+[[mappings]]
+application = "main"
+variable = "g_ratio_den"
+direction = "output"
+device = "servo"
+channel = "ratio_den"
+
+[[mappings]]
+application = "main"
+variable = "g_ratio_step"
+direction = "output"
+device = "servo"
+channel = "ratio_step"
+
+[[mappings]]
+application = "main"
+variable = "g_phase"
+direction = "output"
+device = "servo"
+channel = "phase_ofs"
+
+[[mappings]]
+application = "main"
+variable = "g_master_vel"
+direction = "output"
+device = "servo"
+channel = "master_vel"
+
+[[mappings]]
+application = "main"
+variable = "g_max_travel"
+direction = "output"
+device = "servo"
+channel = "gear_max_travel"
+
+# --- Engine feedback ---
+[[mappings]]
+application = "main"
+variable = "g_engaged_fb"
+direction = "input"
+device = "servo"
+channel = "gear_engaged"
+
+[[mappings]]
+application = "main"
+variable = "g_trip_fb"
+direction = "input"
+device = "servo"
+channel = "gear_trip"

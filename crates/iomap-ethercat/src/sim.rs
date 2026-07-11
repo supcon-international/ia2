@@ -9,6 +9,8 @@
 //! surface early, just like real mode.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use iocore::{ChannelValue, IoDevice, IoError};
@@ -18,8 +20,13 @@ use crate::validate;
 
 pub struct SimEthercat {
     name: String,
-    values: HashMap<String, ChannelValue>,
+    values: Arc<Mutex<HashMap<String, ChannelValue>>>,
     channels: HashMap<String, EthercatChannel>,
+    /// Slow-plane routing for in-cycle gear parameter channels (same
+    /// surface as the real device).
+    gear_routing: crate::gear::GearRouting,
+    /// Stops the sim gear ticker thread on drop/shutdown.
+    gear_stop: Arc<AtomicBool>,
     discovered: Vec<crate::SlaveDiscovery>,
 }
 
@@ -95,16 +102,82 @@ impl SimEthercat {
                 .map_err(IoError::Connect)?;
         }
 
+        // In-cycle gear axes: same engine + routing as the real device. A
+        // background ticker stands in for the cyclic loop, modelling an
+        // IDEAL follower drive: always Operation Enabled, actual == last
+        // target. Virtual-master gearing is therefore fully exercisable in
+        // sim (the engine math itself is unit-tested); an axis master has
+        // no live feedback here (sim inputs are all zero), so that path
+        // holds position in sim and is validated on the real bus.
+        let values = Arc::new(Mutex::new(values));
+        // Same channel-uniqueness validation as the real path so sim rejects
+        // the same misconfigurations (collisions / PDO shadowing).
+        let pdo_names: std::collections::HashSet<&str> =
+            config.channels.iter().map(|c| c.name.as_str()).collect();
+        crate::gear::validate_channels(&config.gear, &pdo_names).map_err(IoError::Connect)?;
+        let (engines, gear_routing) = crate::gear::build(&config.gear);
+        let gear_stop = Arc::new(AtomicBool::new(false));
+        if !engines.is_empty() {
+            // Surface each engine's live target through its follower's
+            // target_position RxPDO channel (matched by slave + offset) so
+            // /status and iomap inputs can observe it, like the real PDI echo.
+            let target_names: Vec<Option<String>> = engines
+                .iter()
+                .map(|e| {
+                    config
+                        .channels
+                        .iter()
+                        .find(|c| {
+                            c.slave_index == e.follower_index
+                                && c.direction == EthercatPdoDirection::RxPdo
+                                && c.pdi_byte_offset as usize == e.target_off
+                        })
+                        .map(|c| c.name.clone())
+                })
+                .collect();
+            let values_t = values.clone();
+            let stop_t = gear_stop.clone();
+            let cycle = std::time::Duration::from_micros(config.cycle_us.max(100) as u64);
+            let mut engines = engines;
+            std::thread::Builder::new()
+                .name("ec-sim-gear".into())
+                .spawn(move || {
+                    // Ideal drive: feed the engine its own last target as
+                    // the follower actual; statusword = Operation Enabled.
+                    let mut last: Vec<i32> = vec![0; engines.len()];
+                    while !stop_t.load(Ordering::Relaxed) {
+                        for (i, eng) in engines.iter_mut().enumerate() {
+                            let master = match eng.master {
+                                crate::gear::MasterSrc::Virtual => None,
+                                crate::gear::MasterSrc::Axis { .. } => Some(0),
+                            };
+                            let t = eng.tick(0x0027, last[i], master, true);
+                            last[i] = t;
+                            if let Some(Some(name)) = target_names.get(i) {
+                                if let Ok(mut v) = values_t.lock() {
+                                    v.insert(name.clone(), ChannelValue::I32(t));
+                                }
+                            }
+                        }
+                        std::thread::sleep(cycle);
+                    }
+                })
+                .ok();
+        }
+
         tracing::info!(
             name = %name,
             slaves = config.slaves.len(),
             channels = config.channels.len(),
+            gear_axes = config.gear.len(),
             "ethercat device ready (sim mode)"
         );
         Ok(Self {
             name,
             values,
             channels,
+            gear_routing,
+            gear_stop,
             discovered,
         })
     }
@@ -128,15 +201,23 @@ impl IoDevice for SimEthercat {
     }
 
     async fn read_channel(&mut self, channel: &str) -> Result<ChannelValue, IoError> {
+        if let Some(v) = self.gear_routing.read(channel) {
+            return Ok(v);
+        }
         let _meta = self.channel(channel)?;
         Ok(self
             .values
+            .lock()
+            .expect("sim values poisoned")
             .get(channel)
             .copied()
             .unwrap_or(ChannelValue::I32(0)))
     }
 
     async fn write_channel(&mut self, channel: &str, value: ChannelValue) -> Result<(), IoError> {
+        if let Some(res) = self.gear_routing.write(channel, &value) {
+            return res;
+        }
         let meta = self.channel(channel)?.clone();
         if meta.direction == EthercatPdoDirection::TxPdo {
             return Err(IoError::TypeMismatch {
@@ -145,7 +226,10 @@ impl IoDevice for SimEthercat {
             });
         }
         let coerced = coerce_to_type(value, meta.data_type);
-        self.values.insert(channel.into(), coerced);
+        self.values
+            .lock()
+            .expect("sim values poisoned")
+            .insert(channel.into(), coerced);
         Ok(())
     }
 
@@ -160,11 +244,19 @@ impl IoDevice for SimEthercat {
             .filter(|c| c.direction == EthercatPdoDirection::RxPdo)
             .map(|c| (c.name.clone(), c.data_type))
             .collect();
+        self.gear_routing.disengage_all();
+        let mut values = self.values.lock().expect("sim values poisoned");
         for (name, ty) in to_zero {
-            self.values.insert(name, zero_for(ty));
+            values.insert(name, zero_for(ty));
         }
         tracing::info!(device = %self.name, "ethercat (sim) failsafe applied");
         Ok(())
+    }
+}
+
+impl Drop for SimEthercat {
+    fn drop(&mut self) {
+        self.gear_stop.store(true, Ordering::Relaxed);
     }
 }
 

@@ -1,0 +1,95 @@
+# In-cycle electronic gear demo — runs under nic = "_sim" with no hardware.
+#
+# One follower servo (Inovance SV660N layout) whose target_position is
+# generated inside the cyclic loop by the gear engine from a VIRTUAL master
+# (a software accumulator advanced by `master_vel` counts/cycle). The PLC
+# program only feeds slow parameters through the gear_* channels and reads
+# back engaged/trip; it never writes target_position0 (the loop owns it).
+#
+# For a real bench, set `nic = "enp2s0"` (or your NIC) and, for a two-axis
+# gear, switch the [[gear]] master to `{ kind = "axis", slave_index = 1,
+# actual_pos_offset = 4 }` and add the second SV660N as slave 1.
+
+name = "servo"
+protocol = "ethercat"
+nic = "_sim"           # real bench: your EtherCAT NIC, e.g. "enp2s0"
+cycle_us = 2000
+dc_sync = "off"        # per-slave sync0 below (a real SV660N needs SYNC0 for CSP)
+
+[[slaves]]
+index = 0
+name = "sv660n"
+vendor_id = 1048576    # 0x00100000 Inovance
+product_id = 786701    # 0x000C010D SV660N
+dc_sync = "sync0"
+
+# CSP mode + a conservative torque cap, applied in PRE-OP on every connect.
+[[slaves.init_sdo]]
+index = 0x6060         # Modes of Operation = 8 (Cyclic Synchronous Position)
+sub_index = 0
+value = 8
+bits = 8
+
+[[slaves.init_sdo]]
+index = 0x6072         # Max torque, 0.1% rated — 30% cap for a bench
+sub_index = 0
+value = 300
+bits = 16
+
+# --- Follower PDO channels (SV660N default CSP layout) ---
+[[channels]]
+name = "controlword"
+slave_index = 0
+direction = "rx_pdo"
+pdo_index = 0x6040
+sub_index = 0
+bit_length = 16
+data_type = "u16"
+pdi_byte_offset = 0
+pdi_bit_offset = 0
+
+# target_position (0x607A) IS declared so the PDI has the bytes, but the PLC
+# does NOT map it — the in-cycle gear engine owns these bytes (see [[gear]]).
+[[channels]]
+name = "target_position"
+slave_index = 0
+direction = "rx_pdo"
+pdo_index = 0x607A
+sub_index = 0
+bit_length = 32
+data_type = "i32"
+pdi_byte_offset = 2
+pdi_bit_offset = 0
+
+[[channels]]
+name = "statusword"
+slave_index = 0
+direction = "tx_pdo"
+pdo_index = 0x6041
+sub_index = 0
+bit_length = 16
+data_type = "u16"
+pdi_byte_offset = 2
+pdi_bit_offset = 0
+
+[[channels]]
+name = "position_actual"
+slave_index = 0
+direction = "tx_pdo"
+pdo_index = 0x6064
+sub_index = 0
+bit_length = 32
+data_type = "i32"
+pdi_byte_offset = 4
+pdi_bit_offset = 0
+
+# --- In-cycle gear: virtual master -> follower target_position ---
+[[gear]]
+slave_index = 0            # follower
+target_pos_offset = 2      # 0x607A byte offset in the follower's RxPDO
+actual_pos_offset = 4      # 0x6064 byte offset in the follower's TxPDO
+status_word_offset = 2     # 0x6041 byte offset in the follower's TxPDO
+master = { kind = "virtual" }
+# Slow-plane channel names default to: gear_engage / ratio_num / ratio_den /
+# ratio_step / phase_ofs / master_vel / gear_max_travel and feedback
+# gear_engaged / gear_trip — the program below maps them.
