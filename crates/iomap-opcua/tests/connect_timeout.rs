@@ -20,7 +20,6 @@ async fn connect_to_unreachable_endpoint_errors_promptly_instead_of_hanging() {
     // with infinite retry, would loop forever without the bounded connect.
     let cfg = OpcuaConfig {
         endpoint_url: "opc.tcp://127.0.0.1:59".to_string(), // discard port, reliably refused
-        security: Default::default(),
         auth: Default::default(),
         poll_interval_ms: 200,
         channels: vec![],

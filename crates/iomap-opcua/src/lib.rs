@@ -21,11 +21,12 @@
 
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use iocore::{ChannelValue, IoDevice, IoError};
+use iocore::{ChannelValue, HealthTracker, HealthTransition, IoDevice, IoError};
 use opcua::client::{Client, ClientBuilder, IdentityToken, Session};
 use opcua::crypto::SecurityPolicy;
 use opcua::types::{
@@ -44,6 +45,13 @@ use project::{OpcuaAccess, OpcuaAuth, OpcuaChannel, OpcuaConfig, OpcuaDataType};
 /// unreachable endpoint can't wedge the whole runtime.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Consecutive failed mirror refreshes before the device is flagged
+/// unhealthy (one ERROR log per outage, not one per poll) — same
+/// contract as the Modbus adapter. The session keeps retrying forever
+/// either way; this only makes the outage *visible* to the bridge's
+/// per-device health surface instead of silently serving stale tags.
+const UNHEALTHY_AFTER_FAILURES: u32 = 3;
+
 /// Resolved channel — NodeId parsed once at connect.
 #[derive(Clone)]
 struct ResolvedChannel {
@@ -57,6 +65,9 @@ pub struct OpcuaDevice {
     /// Last-known value per readable channel, refreshed by the poll task.
     mirror: Arc<RwLock<HashMap<String, ChannelValue>>>,
     session: Arc<Session>,
+    /// `false` once the poll task has seen `UNHEALTHY_AFTER_FAILURES`
+    /// consecutive failed refreshes, `true` again on the first success.
+    healthy: Arc<AtomicBool>,
     poll_task: Option<tokio::task::JoinHandle<()>>,
     event_loop_task: Option<tokio::task::JoinHandle<StatusCode>>,
 }
@@ -178,12 +189,17 @@ impl OpcuaDevice {
             "opcua connected; tag mirror seeded"
         );
 
-        // Background poll task — one bulk read per interval.
+        // Background poll task — one bulk read per interval. It also owns
+        // the health tracking: the session retries reconnection forever on
+        // its own, but without this the bridge (and the monitor) would keep
+        // reporting a dead DCS link as healthy while serving stale tags.
+        let healthy = Arc::new(AtomicBool::new(true));
         let poll_task = {
             let session = session.clone();
             let mirror = mirror.clone();
             let device = name.clone();
             let interval = Duration::from_millis(config.poll_interval_ms.max(50) as u64);
+            let mut health = HealthTracker::with_flag(UNHEALTHY_AFTER_FAILURES, healthy.clone());
             tokio::spawn(async move {
                 let mut tick = tokio::time::interval(interval);
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -191,6 +207,9 @@ impl OpcuaDevice {
                     tick.tick().await;
                     match bulk_read(&session, &readable).await {
                         Ok(values) => {
+                            if health.record_success() == HealthTransition::Recovered {
+                                tracing::info!(device = %device, "opcua device recovered; tag mirror refreshing again");
+                            }
                             let mut m = mirror.write().expect("mirror poisoned");
                             for (name, value) in values {
                                 m.insert(name, value);
@@ -199,7 +218,22 @@ impl OpcuaDevice {
                         Err(e) => {
                             // Session retry handles reconnection; keep
                             // last-known values and keep trying.
-                            tracing::warn!(device = %device, %e, "opcua poll failed; serving last-known values");
+                            match health.record_failure() {
+                                HealthTransition::BecameUnhealthy => {
+                                    tracing::error!(
+                                        device = %device,
+                                        consecutive_failures = health.consecutive_failures(),
+                                        error = %e,
+                                        "opcua device unhealthy; serving last-known values until it recovers"
+                                    );
+                                }
+                                _ if health.is_healthy() => {
+                                    tracing::warn!(device = %device, %e, "opcua poll failed; serving last-known values");
+                                }
+                                _ => {
+                                    tracing::debug!(device = %device, %e, "opcua poll still failing");
+                                }
+                            }
                         }
                     }
                 }
@@ -211,6 +245,7 @@ impl OpcuaDevice {
             channels,
             mirror,
             session,
+            healthy,
             poll_task: Some(poll_task),
             event_loop_task: Some(event_loop_task),
         })
@@ -357,6 +392,14 @@ impl IoDevice for OpcuaDevice {
             });
         }
         self.write_node(&ch, value).await
+    }
+
+    /// `false` once the poll task has seen `UNHEALTHY_AFTER_FAILURES`
+    /// consecutive failed refreshes — surfaced per device on /health and
+    /// /status so a dead DCS link is visible instead of silently serving
+    /// stale tags.
+    fn is_healthy(&self) -> bool {
+        self.healthy.load(Ordering::Relaxed)
     }
 
     /// Only channels with an explicit `failsafe` value are written —

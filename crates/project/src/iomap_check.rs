@@ -291,7 +291,7 @@ mod tests {
     use crate::types::{
         EthercatChannel, EthercatConfig, EthercatDataType, EthercatDcSync, ModbusChannel,
         ModbusConfig, ModbusDataType, ModbusTcpParams, ModbusTransport, ModbusWordOrder, OpcuaAuth,
-        OpcuaChannel, OpcuaDataType, OpcuaSecurity,
+        OpcuaChannel, OpcuaDataType,
     };
 
     // ---- fixtures -------------------------------------------------------
@@ -367,7 +367,6 @@ mod tests {
             name: name.into(),
             config: ProtocolConfig::Opcua(crate::types::OpcuaConfig {
                 endpoint_url: "opc.tcp://127.0.0.1:4840".into(),
-                security: OpcuaSecurity::None,
                 auth: OpcuaAuth::Anonymous,
                 poll_interval_ms: 500,
                 channels: vec![

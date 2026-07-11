@@ -200,6 +200,15 @@ pub struct ProgramHandle {
     /// refreshed by the scan loop each round. Shared so the HTTP layer can
     /// serve health without a scan-loop round-trip.
     device_health: Arc<std::sync::Mutex<Vec<DeviceHealth>>>,
+    /// Why the scan loop died, if it died: set exactly once — to the trap
+    /// message when a VM trap stops the plant, or to the panic payload if
+    /// the loop panicked — and never on a clean stop. A `watch` channel
+    /// rather than a plain slot because the handle itself keeps the
+    /// snapshot broadcast alive, so "stream closed" can never signal a
+    /// fault — watchers must be woken by the fault WRITE itself. The
+    /// sender lives on the scan thread; it drops (closing the watch) on
+    /// clean exit.
+    fault: tokio::sync::watch::Receiver<Option<String>>,
     /// The scan thread's join handle, shared so `shutdown` can join it
     /// from any clone. `Some` until the first `shutdown` takes it. Joining
     /// is how a caller waits for the always-run failsafe pass + per-device
@@ -374,6 +383,30 @@ impl ProgramHandle {
             .map(|h| h.clone())
             .unwrap_or_default()
     }
+
+    /// Why the scan loop died, if it died: `Some(message)` after a VM trap
+    /// or a scan-thread panic, `None` while running or after a clean stop.
+    /// Callers watching the snapshot stream use this at stream close to
+    /// tell fault from stop.
+    pub fn fault(&self) -> Option<String> {
+        self.fault.borrow().clone()
+    }
+
+    /// Watch half of [`ProgramHandle::fault`], for callers that must be
+    /// WOKEN on fault (the server's snapshot forwarder): `changed()`
+    /// fires when the fault is written, and errors when the scan thread
+    /// exits cleanly (sender dropped) — both are "stop watching" edges.
+    pub fn fault_watch(&self) -> tokio::sync::watch::Receiver<Option<String>> {
+        self.fault.clone()
+    }
+
+    /// True when `other` is a clone of this same spawned run — not merely a
+    /// handle to an identically-shaped one. The server's stream forwarder
+    /// uses this to release the program slot only if the slot still holds
+    /// the run it was watching (a newer run may have replaced it).
+    pub fn same_run(&self, other: &ProgramHandle) -> bool {
+        Arc::ptr_eq(&self.stop, &other.stop)
+    }
 }
 
 /// Default scan period when the caller doesn't request one. 100 ms
@@ -387,25 +420,6 @@ pub const DEFAULT_SCAN_INTERVAL_MS: u64 = 100;
 /// 5 s strikes a balance between disk churn and worst-case data loss
 /// for typical setpoints / counters / accumulators.
 pub const RETAIN_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
-
-/// All knobs the run path can set when starting a scan loop. The old
-/// `spawn` / `spawn_with_interval` entry points stay as thin wrappers
-/// for code that doesn't care about retain persistence.
-#[derive(Debug, Clone, Default)]
-pub struct SpawnOptions {
-    /// Cycle period in milliseconds. `0` (or omitted) falls back to
-    /// `DEFAULT_SCAN_INTERVAL_MS`.
-    pub scan_interval_ms: u64,
-    /// IEC variable names declared `VAR RETAIN` — extracted from the
-    /// AST by `ironplc_bridge::compile_with_metadata`. Empty means "no
-    /// retain persistence".
-    pub retain_vars: Vec<String>,
-    /// Where to load/save retain values. `None` disables persistence
-    /// (in-memory only) — useful for the IDE's ephemeral demo runs.
-    /// The runtime crate points this at `<install_dir>/state/retain.json`
-    /// so values survive systemd restarts and redeploys.
-    pub state_path: Option<PathBuf>,
-}
 
 /// One scheduled PROGRAM instance: its own compiled `Container` plus the
 /// scheduling facts the scan thread needs to run it as an independent
@@ -432,65 +446,6 @@ pub struct ProgramUnit {
     pub container: Container,
     /// `VAR RETAIN` names declared by this unit's source.
     pub retain_vars: Vec<String>,
-}
-
-pub fn spawn(
-    container: Container,
-    devices: Vec<DeviceSpec>,
-    mappings: Vec<Mapping>,
-) -> ProgramHandle {
-    spawn_with_interval(container, devices, mappings, DEFAULT_SCAN_INTERVAL_MS)
-}
-
-/// Compatibility wrapper — preserves the old API for callers that
-/// don't need retain options. New code should call `spawn_with_options`
-/// directly.
-pub fn spawn_with_interval(
-    container: Container,
-    device_specs: Vec<DeviceSpec>,
-    mappings: Vec<Mapping>,
-    scan_interval_ms: u64,
-) -> ProgramHandle {
-    spawn_with_options(
-        container,
-        device_specs,
-        mappings,
-        SpawnOptions {
-            scan_interval_ms,
-            ..Default::default()
-        },
-    )
-}
-
-/// Single-unit convenience wrapper over `spawn_units` — the historical
-/// "one container, one interval" entry point. The unit is registered
-/// under instance name `"main"`; with a single unit all snapshot /
-/// retain / write names stay bare, so callers see exactly the
-/// pre-multi-program behaviour.
-pub fn spawn_with_options(
-    container: Container,
-    device_specs: Vec<DeviceSpec>,
-    mappings: Vec<Mapping>,
-    options: SpawnOptions,
-) -> ProgramHandle {
-    let SpawnOptions {
-        scan_interval_ms,
-        retain_vars,
-        state_path,
-    } = options;
-    spawn_units(
-        vec![ProgramUnit {
-            instance: "main".into(),
-            task_name: "plc_task".into(),
-            interval_ms: scan_interval_ms,
-            priority: 1,
-            container,
-            retain_vars,
-        }],
-        device_specs,
-        mappings,
-        state_path,
-    )
 }
 
 /// Start the scan thread hosting one `VmRunning` per unit.
@@ -566,6 +521,7 @@ fn spawn_units_inner(
     let forces = Arc::new(std::sync::Mutex::new(HashMap::<String, i32>::new()));
     let device_reports = Arc::new(std::sync::Mutex::new(Vec::<DeviceReport>::new()));
     let device_health = Arc::new(std::sync::Mutex::new(Vec::<DeviceHealth>::new()));
+    let (fault_tx, fault_rx) = tokio::sync::watch::channel(None::<String>);
 
     let stop_clone = stop.clone();
     let stop_reconnect = stop.clone();
@@ -665,11 +621,30 @@ fn spawn_units_inner(
                 mode_clone,
                 forces_clone,
                 device_health_clone,
+                &fault_tx,
                 reconnect_rx,
                 state_path,
             ))
             .catch_unwind()
             .await;
+            // A panic is a fault too: record it so the HTTP layer can
+            // surface WHY the run died, not just that snapshots stopped.
+            // (The failsafe + teardown below still run either way.)
+            if let Err(panic) = &result {
+                let msg = panic
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "scan loop panicked".into());
+                fault_tx.send_if_modified(|f| {
+                    if f.is_none() {
+                        *f = Some(format!("scan loop panicked: {msg}"));
+                        true
+                    } else {
+                        false
+                    }
+                });
+            }
 
             // Always-run failsafe before the thread dies. Drive every
             // device's outputs to zero so a hung / panicked / stopped
@@ -724,6 +699,7 @@ fn spawn_units_inner(
         forces,
         device_reports,
         device_health,
+        fault: fault_rx,
         thread: Arc::new(std::sync::Mutex::new(Some(join_handle))),
     }
 }
@@ -1151,6 +1127,10 @@ async fn run_loop_async(
     mode: Arc<std::sync::Mutex<RuntimeMode>>,
     forces: Arc<std::sync::Mutex<HashMap<String, i32>>>,
     device_health: Arc<std::sync::Mutex<Vec<DeviceHealth>>>,
+    // Borrowed: the wrapper keeps ownership so its panic path can also
+    // record into the same channel (and so the sender drops — closing
+    // the watch — only when the scan thread exits).
+    fault: &tokio::sync::watch::Sender<Option<String>>,
     reconnect_rx: std::sync::mpsc::Receiver<Box<dyn IoDevice>>,
     state_path: Option<PathBuf>,
 ) {
@@ -1573,6 +1553,17 @@ async fn run_loop_async(
             let now_us = start.elapsed().as_micros() as u64;
             if let Err(ctx) = runnings[i].run_round(now_us) {
                 tracing::error!(instance = %instances[i], ?ctx.trap, "vm trap during run_round");
+                // Record WHY before breaking — the watch write is what
+                // wakes the HTTP layer's forwarder, turning a silent halt
+                // into a visible fault on /status + SSE.
+                fault.send_if_modified(|f| {
+                    if f.is_none() {
+                        *f = Some(format!("VM trap in {}: {:?}", instances[i], ctx.trap));
+                        true
+                    } else {
+                        false
+                    }
+                });
                 // One faulted unit stops the whole plant — consistent
                 // with pause semantics ("the plant freezes together")
                 // and the safest default; the wrapper's failsafe pass
@@ -2013,9 +2004,9 @@ mod tests {
         .expect("trivial program compiles")
     }
 
-    /// One unit named the way `spawn_with_options` names its single
-    /// unit — tests that exercise the legacy single-program path use
-    /// this to stay representative of production call sites.
+    /// One unit named `"main"` — the conventional instance name for a
+    /// single-program run; tests exercising that path use this to stay
+    /// representative of production call sites.
     fn single_unit(container: Container, interval_ms: u64) -> ProgramUnit {
         unit("main", container, interval_ms, 1)
     }

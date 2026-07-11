@@ -43,3 +43,7 @@ apps/mac/build/
 
 # Claude Code agent worktrees (per-session, not part of the repo)
 .claude/worktrees/
+
+# async-opcua peer-certificate store — populated at runtime by real OPC UA
+# connections; certs must never be committed.
+pki/

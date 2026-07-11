@@ -42,7 +42,7 @@ pub use types::{
     IoMap, Mapping, ModbusChannel, ModbusChannelKind, ModbusConfig, ModbusDataBits, ModbusDataType,
     ModbusParity, ModbusRs485, ModbusRtuParams, ModbusStopBits, ModbusTcpParams, ModbusTransport,
     ModbusWordOrder, MqttNorthbound, NorthboundConfig, OpcuaAccess, OpcuaAuth, OpcuaChannel,
-    OpcuaConfig, OpcuaDataType, OpcuaSecurity, Pou, PouDecl, PouFile, PouFileSource, PouLanguage,
-    PouType, ProgramInstance, ProjectListing, ProjectManifest, ProjectTree, ProjectTreeSkeleton,
-    Protocol, ProtocolConfig, Task, Tasks,
+    OpcuaConfig, OpcuaDataType, Pou, PouDecl, PouFile, PouFileSource, PouLanguage, PouType,
+    ProgramInstance, ProjectListing, ProjectManifest, ProjectTree, ProjectTreeSkeleton, Protocol,
+    ProtocolConfig, Task, Tasks,
 };

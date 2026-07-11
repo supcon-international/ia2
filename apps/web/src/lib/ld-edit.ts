@@ -27,7 +27,6 @@ import type { LdFbInput } from "@/types/generated/LdFbInput"
 import type { LdNode } from "@/types/generated/LdNode"
 import type { LdOperand } from "@/types/generated/LdOperand"
 import type { LdProgram } from "@/types/generated/LdProgram"
-import type { LdVarSection } from "@/types/generated/LdVarSection"
 import type { LdVariable } from "@/types/generated/LdVariable"
 
 import { fbByType, fbInputs, fbBoolOutputs, suggestInstanceName } from "./ld-fbs"
@@ -48,18 +47,6 @@ export function getNode(root: LdNode, path: NodePath): LdNode {
     cur = childAt(cur, step)
   }
   return cur
-}
-
-/** Return the parent of `path` along with the child index occupied by
- *  the target. `null` when `path` is empty (the root has no parent). */
-export function getParent(
-  root: LdNode,
-  path: NodePath,
-): { parent: LdNode; childIndex: number } | null {
-  if (path.length === 0) return null
-  const parentPath = path.slice(0, -1)
-  const parent = getNode(root, parentPath)
-  return { parent, childIndex: path[path.length - 1] }
 }
 
 function childAt(node: LdNode, step: number): LdNode {
@@ -184,19 +171,6 @@ function nextRungId(prog: LdProgram): string {
 // =================================================================
 //   Logic-tree operations (operate within a single rung)
 // =================================================================
-
-/** Replace the node at `path` within rung `rungIdx`. */
-export function replaceNode(
-  prog: LdProgram,
-  rungIdx: number,
-  path: NodePath,
-  next: LdNode,
-): LdProgram {
-  return updateRung(prog, rungIdx, (r) => ({
-    ...r,
-    logic: updateNode(r.logic, path, () => next),
-  }))
-}
 
 /** Toggle the `negated` flag on a contact. No-op if the target isn't
  *  a contact. */
@@ -561,41 +535,12 @@ export function updateVariable(
   }
 }
 
-/** All BOOL variables (or any type, if `restrictType` is null). Used to
- *  populate the variable dropdown when authoring a contact/coil. */
-export function variableNames(
-  prog: LdProgram,
-  restrictType: string | null = "BOOL",
-): string[] {
-  return prog.variables
-    .filter((v) => restrictType === null || v.type === restrictType)
-    .map((v) => v.name)
-}
-
-/** Group variables by section in canonical render order. */
-export function variablesBySection(prog: LdProgram): Record<
-  LdVarSection,
-  LdVariable[]
-> {
-  const groups: Record<LdVarSection, LdVariable[]> = {
-    input: [],
-    output: [],
-    internal: [],
-  }
-  for (const v of prog.variables) groups[v.section].push(v)
-  return groups
-}
-
 // =================================================================
 //   Construction helpers
 // =================================================================
 
 export function newContact(varName = "x", negated = false): LdNode {
   return { op: "contact", var: varName, negated }
-}
-
-export function newConst(value: boolean): LdNode {
-  return { op: "const", value }
 }
 
 /** Default new compare block — placeholder shape the user customises

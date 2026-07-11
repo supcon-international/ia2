@@ -1,6 +1,6 @@
 //! Wraps vendored ironplc parser + analyzer + codegen + VM into a single
-//! `compile(source) -> Container` and `spawn(container) -> ProgramHandle` API
-//! intended for downstream consumption by the server crate.
+//! `compile(source) -> Container` / `spawn_units(units) -> ProgramHandle`
+//! API intended for downstream consumption by the server crate.
 
 mod errors;
 mod fbd_transpile;
@@ -12,24 +12,21 @@ mod sfc_transpile;
 
 pub use problem_docs::{lookup_problem_doc, lookup_problem_explanation};
 
-pub use fbd_transpile::transpile_to_st as transpile_fbd_to_st;
 pub use fbd_transpile::{
     transpile_to_st_with_map as transpile_fbd_to_st_with_map, FbdLocation, FbdSourceMap,
 };
-pub use ld_transpile::transpile_to_st as transpile_ld_to_st;
 pub use ld_transpile::{
     transpile_to_st_with_map as transpile_ld_to_st_with_map, LdLocation, LdSourceMap,
 };
-pub use sfc_transpile::transpile_to_st as transpile_sfc_to_st;
 pub use sfc_transpile::{
     transpile_to_st_with_map as transpile_sfc_to_st_with_map, SfcLocation, SfcSourceMap,
 };
 
 pub use errors::BridgeError;
 pub use runtime::{
-    spawn, spawn_units, spawn_with_interval, spawn_with_options, DeviceHealth, DeviceReport,
-    DeviceSpec, DiscoveredSlave, ProgramHandle, ProgramUnit, RuntimeMode, RuntimeWriteError,
-    SpawnOptions, VarSnapshot, VarValue, DEFAULT_SCAN_INTERVAL_MS, RETAIN_FLUSH_INTERVAL,
+    spawn_units, DeviceHealth, DeviceReport, DeviceSpec, DiscoveredSlave, ProgramHandle,
+    ProgramUnit, RuntimeMode, RuntimeWriteError, VarSnapshot, VarValue, DEFAULT_SCAN_INTERVAL_MS,
+    RETAIN_FLUSH_INTERVAL,
 };
 
 // Re-exported so downstream crates (server / runtime) can name the
@@ -179,19 +176,6 @@ pub fn compile_project(store: &project::ProjectStore) -> Result<Container, Bridg
         .map_err(|e| BridgeError::Parse(format!("reading tasks.toml: {e}")))?
         .unwrap_or_default();
     compile_project_with_tasks(store, &tasks)
-}
-
-/// Like `compile_project` but returns metadata too. Run paths
-/// (server `/api/run`, headless `ia2-runtime`) call this so they can
-/// pass `retain_vars` into the spawn options.
-pub fn compile_project_full(
-    store: &project::ProjectStore,
-) -> Result<(Container, ProgramMetadata), BridgeError> {
-    let tasks = store
-        .read_tasks()
-        .map_err(|e| BridgeError::Parse(format!("reading tasks.toml: {e}")))?
-        .unwrap_or_default();
-    compile_project_with_tasks_full(store, &tasks)
 }
 
 /// Same as `compile_project` but takes an explicit `Tasks` instead of
@@ -462,7 +446,8 @@ pub fn extract_project_global_vars(store: &project::ProjectStore) -> Vec<(String
     out
 }
 
-/// Compile a single POU source + synthesized CONFIGURATION. Used by the
+/// Compile a single POU source + synthesized CONFIGURATION, returning
+/// the AST-derived `ProgramMetadata` alongside the bytecode. Used by the
 /// ProgramPane's ad-hoc Run path so opening cascade_pid.st and clicking
 /// Run actually runs cascade_pid in isolation — without ironplc's debug
 /// section pulling in variables from PROGRAMs declared in *other* files
@@ -470,16 +455,6 @@ pub fn extract_project_global_vars(store: &project::ProjectStore) -> Vec<(String
 ///
 /// `language` selects how `source` is interpreted: `St` → use the text
 /// verbatim, `Ld` → transpile from JSON to ST first.
-pub fn compile_isolated_source(
-    source: &str,
-    language: project::PouLanguage,
-    tasks: &project::Tasks,
-) -> Result<Container, BridgeError> {
-    compile_isolated_source_full(source, language, tasks).map(|(c, _)| c)
-}
-
-/// Like `compile_isolated_source`, but returns the AST-derived
-/// `ProgramMetadata` alongside the bytecode container.
 pub fn compile_isolated_source_full(
     source: &str,
     language: project::PouLanguage,
@@ -520,9 +495,6 @@ fn source_to_st(source: &str, language: project::PouLanguage) -> Result<String, 
                 .map_err(|e| BridgeError::Parse(format!("SFC JSON parse: {e}")))?;
             sfc_transpile::transpile_to_st(&prog)
         }
-        other => Err(BridgeError::Parse(format!(
-            "{other:?} not yet supported by the bridge"
-        ))),
     }
 }
 
@@ -754,7 +726,6 @@ fn check_pou_source_with_context(
             };
             check_inner(&st, SourceMapKind::Sfc(&map), context)
         }
-        _ => Vec::new(),
     }
 }
 
@@ -1008,7 +979,6 @@ pub fn extract_pou_declarations(
                 }
             }
         }
-        _ => vec![],
     }
 }
 
@@ -1102,7 +1072,6 @@ pub fn extract_symbols(source: &str, language: project::PouLanguage) -> Vec<Vari
                 .collect(),
             Err(_) => vec![],
         },
-        _ => vec![],
     }
 }
 

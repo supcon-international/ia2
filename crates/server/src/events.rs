@@ -21,7 +21,6 @@ use ts_rs::TS;
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
-#[allow(dead_code)]
 pub enum AppEvent {
     Snapshot(VarSnapshot),
     Started,

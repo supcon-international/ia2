@@ -21,9 +21,6 @@ impl From<StoreError> for ApiError {
             StoreError::AlreadyExists(p) => Self::Conflict(format!("already exists: {p}")),
             StoreError::InvalidName(n) => Self::BadRequest(format!("invalid name: {n}")),
             StoreError::PouNotFound(n) => Self::NotFound(format!("POU '{n}' not found")),
-            StoreError::UnsupportedLanguage(n) => {
-                Self::BadRequest(format!("POU language not yet supported: {n}"))
-            }
             StoreError::DeviceNotFound(n) => Self::NotFound(format!("device '{n}' not found")),
             StoreError::EdgeNotFound(n) => Self::NotFound(format!("edge '{n}' not found")),
             StoreError::FolderNotFound(n) => Self::NotFound(format!("folder '{n}' not found")),
@@ -43,6 +40,20 @@ pub fn project_err(e: StoreError) -> ApiError {
 impl From<BridgeError> for ApiError {
     fn from(e: BridgeError) -> Self {
         Self::BadRequest(e.to_string())
+    }
+}
+
+/// One canonical mapping for the runtime write/force family — the same
+/// three-way split that write / force / unforce each hand-rolled before:
+/// unknown variable → 404, scan loop gone → 409, VM trap → 500.
+impl From<ironplc_bridge::RuntimeWriteError> for ApiError {
+    fn from(e: ironplc_bridge::RuntimeWriteError) -> Self {
+        use ironplc_bridge::RuntimeWriteError as E;
+        match e {
+            E::UnknownVariable(n) => Self::NotFound(format!("variable '{n}' not declared")),
+            E::Disconnected => Self::Conflict("scan loop has stopped".into()),
+            E::Vm(msg) => Self::Internal(msg),
+        }
     }
 }
 

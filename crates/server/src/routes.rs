@@ -24,8 +24,7 @@ use axum::{
 use futures_util::stream::Stream;
 use futures_util::{SinkExt, StreamExt as FuturesStreamExt};
 use ironplc_bridge::{
-    CheckDiagnostic, DeviceSpec, ProgramHandle, RuntimeMode, RuntimeWriteError, VarSnapshot,
-    VariableInfo,
+    CheckDiagnostic, DeviceSpec, ProgramHandle, RuntimeMode, VarSnapshot, VariableInfo,
 };
 use project::{
     default_projects_dir, load_last_opened, save_last_opened, Device, Edge, EthercatBringup, IoMap,
@@ -1232,7 +1231,7 @@ pub async fn logs_edge_route(
         store.read_edge(&name).map_err(Into::into)
     })?;
     let tail = q.tail.unwrap_or(200).min(2000);
-    crate::edges::fetch_edge_logs(&edge, tail)
+    crate::edges::fetch_edge_json(&edge, &format!("/logs?tail={tail}"))
         .await
         .map(Json)
         .map_err(ApiError::Internal)
@@ -1249,7 +1248,7 @@ pub async fn discover_edge_route(
     let edge = with_project(&state, &project, |store| {
         store.read_edge(&name).map_err(Into::into)
     })?;
-    crate::edges::fetch_edge_discover(&edge)
+    crate::edges::fetch_edge_json(&edge, "/discover")
         .await
         .map(Json)
         .map_err(ApiError::Internal)
@@ -1265,7 +1264,7 @@ pub async fn system_edge_route(
     let edge = with_project(&state, &project, |store| {
         store.read_edge(&name).map_err(Into::into)
     })?;
-    crate::edges::fetch_edge_system(&edge)
+    crate::edges::fetch_edge_json(&edge, "/system")
         .await
         .map(Json)
         .map_err(ApiError::Internal)
@@ -1282,7 +1281,7 @@ pub async fn status_edge_route(
     let edge = with_project(&state, &project, |store| {
         store.read_edge(&name).map_err(Into::into)
     })?;
-    crate::edges::fetch_edge_status(&edge)
+    crate::edges::fetch_edge_json(&edge, "/status")
         .await
         .map(Json)
         .map_err(ApiError::Internal)
@@ -1980,14 +1979,63 @@ pub async fn run(
     let mut rx = handle.subscribe();
     let event_tx = state.event_tx.clone();
     let last_snapshot_cache = state.last_snapshot.clone();
-    // Fresh run wipes the prior error; if this run errors, the SSE error
-    // event will refill it.
+    // Fresh run wipes the prior error; if this run faults, the forwarder
+    // below refills it when the snapshot stream closes.
     *state.last_error.lock().expect("last_error mutex") = None;
 
+    let fault_state = state.clone();
+    let fault_handle = handle.clone();
+    let mut fault_rx = handle.fault_watch();
     tokio::spawn(async move {
-        while let Ok(snap) = rx.recv().await {
-            *last_snapshot_cache.lock().expect("last_snapshot mutex") = Some(snap.clone());
-            let _ = event_tx.send(AppEvent::Snapshot(snap));
+        // Forward snapshots until the run ends. "Ends" cannot be seen on
+        // the broadcast stream alone — this task and the program slot both
+        // hold ProgramHandle clones whose snapshot sender keeps the channel
+        // open — so select on the fault watch too: it fires when the scan
+        // loop records a VM trap / panic, and closes (Err) when the scan
+        // thread exits cleanly.
+        loop {
+            tokio::select! {
+                res = rx.recv() => match res {
+                    Ok(snap) => {
+                        *last_snapshot_cache.lock().expect("last_snapshot mutex") =
+                            Some(snap.clone());
+                        let _ = event_tx.send(AppEvent::Snapshot(snap));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                },
+                // `wait_for` (not `changed`) on purpose: it tests the
+                // CURRENT value, so a trap that fires on the very first
+                // scan — possibly before this task even started — still
+                // resolves immediately. `changed()` would count that
+                // early write as already-seen and sleep forever.
+                res = fault_rx.wait_for(|f| f.is_some()) => {
+                    let _ = res; // Ok = fault present; Err = clean exit
+                    break;
+                }
+            }
+        }
+        // A clean stop leaves `fault()` empty (the stop handler already
+        // cleared state and emitted Stopped). A VM trap / scan-thread
+        // panic set it — and this task is the only one that notices, so
+        // surface it: record last_error, release the dead program slot
+        // (only if it is still ours — a newer run may have replaced it),
+        // and emit Error + Stopped so /api/runtime/status and SSE watchers
+        // see the fault instead of a forever-stale "running".
+        if let Some(msg) = fault_handle.fault() {
+            *fault_state.last_error.lock().expect("last_error mutex") = Some(msg.clone());
+            {
+                let mut guard = fault_state.program.lock().expect("program mutex");
+                if guard
+                    .as_ref()
+                    .is_some_and(|rp| rp.handle.same_run(&fault_handle))
+                {
+                    guard.take();
+                    *fault_state.running_info.lock().expect("running_info mutex") = None;
+                }
+            }
+            let _ = fault_state.event_tx.send(AppEvent::Error(msg));
+            let _ = fault_state.event_tx.send(AppEvent::Stopped);
         }
     });
 
@@ -2237,16 +2285,8 @@ pub async fn write_runtime_variable(
     // mutex so we don't hold a sync lock across the .await below — see
     // the bridge::ProgramHandle docs.
     let handle: ProgramHandle = live_program(&state)?;
-    match handle.write_variable(&name, req.value).await {
-        Ok(value) => Ok(Json(WriteVariableResponse { name, value })),
-        Err(RuntimeWriteError::UnknownVariable(n)) => {
-            Err(ApiError::NotFound(format!("variable '{n}' not declared")))
-        }
-        Err(RuntimeWriteError::Disconnected) => {
-            Err(ApiError::Conflict("scan loop has stopped".into()))
-        }
-        Err(RuntimeWriteError::Vm(e)) => Err(ApiError::Internal(e)),
-    }
+    let value = handle.write_variable(&name, req.value).await?;
+    Ok(Json(WriteVariableResponse { name, value }))
 }
 
 // ============================================================
@@ -2344,16 +2384,8 @@ pub async fn force_runtime_variable(
     Json(req): Json<ForceRequest>,
 ) -> Result<Json<ForceResponse>, ApiError> {
     let handle = live_program(&state)?;
-    match handle.force_variable(&name, req.value).await {
-        Ok(value) => Ok(Json(ForceResponse { name, value })),
-        Err(RuntimeWriteError::UnknownVariable(n)) => {
-            Err(ApiError::NotFound(format!("variable '{n}' not declared")))
-        }
-        Err(RuntimeWriteError::Disconnected) => {
-            Err(ApiError::Conflict("scan loop has stopped".into()))
-        }
-        Err(RuntimeWriteError::Vm(e)) => Err(ApiError::Internal(e)),
-    }
+    let value = handle.force_variable(&name, req.value).await?;
+    Ok(Json(ForceResponse { name, value }))
 }
 
 /// Release a forced variable. No-op (200) if the variable wasn't
@@ -2364,10 +2396,7 @@ pub async fn unforce_runtime_variable(
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let handle = live_program(&state)?;
-    handle.unforce_variable(&name).await.map_err(|e| match e {
-        RuntimeWriteError::Disconnected => ApiError::Conflict("scan loop has stopped".into()),
-        other => ApiError::Internal(format!("{other:?}")),
-    })?;
+    handle.unforce_variable(&name).await?;
     Ok(Json(serde_json::json!({ "name": name, "forced": false })))
 }
 

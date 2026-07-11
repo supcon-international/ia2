@@ -202,8 +202,10 @@ pub struct AppState {
     /// ends. Cleared on close-project.
     pub last_snapshot: Arc<Mutex<Option<VarSnapshot>>>,
     /// Last bridge / runtime error surfaced to /api/runtime/status, or
-    /// `None` if the last run is clean. Updated when AppEvent::Error
-    /// fires and on a clean Started.
+    /// `None` if the last run is clean. Set by the run handler's stream
+    /// forwarder when a run dies on a VM trap or scan-thread panic
+    /// (alongside the SSE `Error` + `Stopped` events); cleared by the
+    /// next /api/run.
     pub last_error: Arc<Mutex<Option<String>>>,
     /// What the most-recent /api/run call asked the bridge to run.
     /// Lets the IDE recover "running ad-hoc / running scheduled, which

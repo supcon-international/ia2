@@ -228,11 +228,6 @@ export function setProjectFbs(fbs: FbDef[]): void {
   PROJECT_FBS = fbs.filter((f) => !builtinNames.has(f.type))
 }
 
-/** The full palette: builtins first, then project FBs. */
-export function allFbs(): FbDef[] {
-  return [...STANDARD_FBS, ...PROJECT_FBS]
-}
-
 /** Palette grouping for the block pickers: builtins under "Standard",
  *  the project's own FBs under "Project blocks", and each imported
  *  library under its own name. Groups with no members are omitted. */

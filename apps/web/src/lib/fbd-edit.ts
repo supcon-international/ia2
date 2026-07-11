@@ -14,13 +14,7 @@
  *    stack of snapshots — built in if we want it.
  */
 
-import {
-  fbByType,
-  fbInputs,
-  fbBoolOutputs,
-  fbOutputs,
-  suggestInstanceName,
-} from "./ld-fbs"
+import { fbByType, fbInputs, fbOutputs, suggestInstanceName } from "./ld-fbs"
 import type { FbdBlock } from "@/types/generated/FbdBlock"
 import type { FbdInputBinding } from "@/types/generated/FbdInputBinding"
 import type { FbdInputSource } from "@/types/generated/FbdInputSource"
@@ -314,17 +308,6 @@ export function updateVariable(
 // =================================================================
 //   Helpers / lookups
 // =================================================================
-
-/** Look up a block by id. */
-export function findBlock(prog: FbdProgram, id: string): FbdBlock | undefined {
-  return prog.blocks.find((b) => b.id === id)
-}
-
-/** All BOOL outputs of a given block, derived from the FB type's
- *  pin definitions. */
-export function blockBoolOutputs(block: FbdBlock): string[] {
-  return fbBoolOutputs(block.fb_type)
-}
 
 /** ALL outputs of a given block (any type), derived from the FB type's
  *  pin definitions. FBD wires carry whatever the pin's type is — the

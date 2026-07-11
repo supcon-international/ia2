@@ -37,13 +37,11 @@ pub enum PouType {
 #[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum PouLanguage {
-    /// Structured Text. Only one supported today; the others reserve
-    /// the schema slot so adding LD / FBD / IL / SFC later is non-
-    /// breaking for stored projects.
+    /// Structured Text — the textual source of truth; the graphical
+    /// languages below transpile to it at compile time.
     St,
     Ld,
     Fbd,
-    Il,
     Sfc,
 }
 
@@ -859,11 +857,6 @@ pub enum EthercatDataType {
 pub struct OpcuaConfig {
     /// `opc.tcp://host:4840/path` endpoint of the UA server.
     pub endpoint_url: String,
-    /// Security policy. V1 supports `None` only (site networks /
-    /// DA-gateway hops are typically unencrypted segments); Sign/
-    /// SignAndEncrypt are a later iteration.
-    #[serde(default)]
-    pub security: OpcuaSecurity,
     /// Session authentication.
     #[serde(default)]
     pub auth: OpcuaAuth,
@@ -877,14 +870,6 @@ pub struct OpcuaConfig {
 
 fn default_opcua_poll_ms() -> u32 {
     500
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
-#[ts(export)]
-#[serde(rename_all = "snake_case")]
-pub enum OpcuaSecurity {
-    #[default]
-    None,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]

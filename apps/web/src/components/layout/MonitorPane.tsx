@@ -5,6 +5,7 @@ import { Sparkline } from "@/components/charts/Sparkline"
 import { TrendChart } from "@/components/charts/TrendChart"
 import { cn } from "@/lib/utils"
 import {
+  fetchRuntimeStatus,
   forceVariable,
   pauseRuntime,
   resumeRuntime,
@@ -43,9 +44,10 @@ export function MonitorPane() {
     let cancelled = false
     const tick = async () => {
       try {
-        const r = await fetch("/api/runtime/status")
-        if (!r.ok) return
-        const data = await r.json()
+        // Typed helper, not raw fetch: apiFetch injects the X-IA2-Project
+        // header, so a multi-window session polls ITS project's runtime
+        // status rather than whichever project the server considers active.
+        const data = await fetchRuntimeStatus()
         if (cancelled) return
         const m = data?.mode?.kind as string | undefined
         if (m === "running" || m === "paused" || m === "step") setMode(m)

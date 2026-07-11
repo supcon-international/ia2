@@ -596,6 +596,11 @@ struct Status {
     mode: RuntimeMode,
     /// Currently-forced variables (name → pinned value).
     forces: Vec<ForceEntry>,
+    /// Why the scan loop died, if it died: the VM-trap or panic message.
+    /// `null` while running or after a clean stop. Agents watching an
+    /// edge poll this to tell "still scanning" from "faulted and halted"
+    /// — without it a trapped program looks like a frozen snapshot.
+    fault: Option<String>,
 }
 
 async fn status(State(state): State<AppState>) -> Json<Status> {
@@ -617,6 +622,7 @@ async fn status(State(state): State<AppState>) -> Json<Status> {
             .into_iter()
             .map(|(name, value)| ForceEntry { name, value })
             .collect(),
+        fault: state.handle.fault(),
     })
 }
 

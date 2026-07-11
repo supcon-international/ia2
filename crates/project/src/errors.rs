@@ -35,9 +35,6 @@ pub enum StoreError {
     #[error("POU '{0}' not found")]
     PouNotFound(String),
 
-    #[error("POU language not yet supported: {0}")]
-    UnsupportedLanguage(String),
-
     #[error("device '{0}' not found")]
     DeviceNotFound(String),
 

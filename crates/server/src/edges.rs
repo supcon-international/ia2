@@ -277,60 +277,32 @@ pub async fn probe_edge(edge: &Edge) -> EdgeProbe {
 //  Logs — pull recent runtime log lines over ssh+curl
 // ============================================================
 
-/// Fetch the last `tail` log lines from the edge runtime's `/logs`
-/// endpoint (over ssh, same trust model as `probe`). Returns the
-/// runtime's JSON body (`{ "lines": [...] }`) verbatim so the IDE/CLI
-/// can render the EtherCAT discovery / bus-health / connect errors
-/// that otherwise only live in journald on the box.
-pub async fn fetch_edge_logs(edge: &Edge, tail: usize) -> Result<serde_json::Value, String> {
+/// GET a JSON endpoint on the edge runtime (over ssh, same trust model
+/// as `probe`) and return the body verbatim. One helper behind all the
+/// read-side edge proxies:
+///   `/logs?tail=N` — recent captured log lines (EtherCAT discovery,
+///   bus health, connect errors that otherwise live only in journald);
+///   `/discover` — per-device connect status + EtherCAT topology, so
+///   the IDE can author PDO maps against the real bus;
+///   `/system` — NICs / serial ports / arch, so device configs are
+///   authored against real edge facts rather than guesses;
+///   `/status` — project, scan count, debug mode/forces, and the last
+///   VarSnapshot (with per-variable types, which `cs runtime --edge`
+///   uses to pack force/write values).
+pub async fn fetch_edge_json(
+    edge: &Edge,
+    path_and_query: &str,
+) -> Result<serde_json::Value, String> {
     let body = edge_runtime_curl(edge, |port| {
-        format!("curl --silent --max-time 4 'http://127.0.0.1:{port}/logs?tail={tail}'")
+        format!("curl --silent --max-time 4 'http://127.0.0.1:{port}{path_and_query}'")
     })
     .await?;
-    serde_json::from_str::<serde_json::Value>(&body)
-        .map_err(|e| format!("unexpected /logs body: {} ({e})", first_line(&body)))
-}
-
-// ============================================================
-//  Discover — pull device connect status + EtherCAT topology
-// ============================================================
-
-/// Fetch the edge runtime's `/discover` (over ssh, same trust model as
-/// `probe`). Returns the runtime's JSON array of per-device reports
-/// (connect status + discovered EtherCAT slaves) so the IDE can author
-/// PDO maps against the real bus topology.
-pub async fn fetch_edge_discover(edge: &Edge) -> Result<serde_json::Value, String> {
-    let body = edge_runtime_curl(edge, |port| {
-        format!("curl --silent --max-time 4 http://127.0.0.1:{port}/discover")
+    serde_json::from_str::<serde_json::Value>(&body).map_err(|e| {
+        format!(
+            "unexpected {path_and_query} body: {} ({e})",
+            first_line(&body)
+        )
     })
-    .await?;
-    serde_json::from_str::<serde_json::Value>(&body)
-        .map_err(|e| format!("unexpected /discover body: {} ({e})", first_line(&body)))
-}
-
-/// Fetch the edge's interfaces / serial ports / arch from the runtime's
-/// `/system` endpoint (over ssh). Lets the IDE author device configs
-/// against real edge facts (NIC carrier for EtherCAT, /dev/tty* for
-/// Modbus RTU) rather than guessing.
-pub async fn fetch_edge_system(edge: &Edge) -> Result<serde_json::Value, String> {
-    let body = edge_runtime_curl(edge, |port| {
-        format!("curl --silent --max-time 4 http://127.0.0.1:{port}/system")
-    })
-    .await?;
-    serde_json::from_str::<serde_json::Value>(&body)
-        .map_err(|e| format!("unexpected /system body: {} ({e})", first_line(&body)))
-}
-
-/// Fetch the edge runtime's `/status` (over ssh) — project + scan count +
-/// debug mode/forces + the last VarSnapshot (with per-variable types,
-/// which `cs runtime --edge` uses to pack force/write values).
-pub async fn fetch_edge_status(edge: &Edge) -> Result<serde_json::Value, String> {
-    let body = edge_runtime_curl(edge, |port| {
-        format!("curl --silent --max-time 4 http://127.0.0.1:{port}/status")
-    })
-    .await?;
-    serde_json::from_str::<serde_json::Value>(&body)
-        .map_err(|e| format!("unexpected /status body: {} ({e})", first_line(&body)))
 }
 
 // ============================================================

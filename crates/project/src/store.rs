@@ -270,9 +270,6 @@ impl ProjectStore {
                 self.root.join("pous").join(format!("{path}.sfc.json")),
                 template_for_sfc(leaf, type_),
             ),
-            other => {
-                return Err(StoreError::UnsupportedLanguage(format!("{other:?}")));
-            }
         };
         fs::create_dir_all(file.parent().unwrap())?;
         fs::write(&file, &source)?;
@@ -1338,7 +1335,6 @@ fn default_config_for(protocol: Protocol) -> ProtocolConfig {
         }),
         Protocol::Opcua => ProtocolConfig::Opcua(crate::types::OpcuaConfig {
             endpoint_url: "opc.tcp://127.0.0.1:4840".into(),
-            security: crate::types::OpcuaSecurity::None,
             auth: crate::types::OpcuaAuth::Anonymous,
             poll_interval_ms: 500,
             channels: vec![],

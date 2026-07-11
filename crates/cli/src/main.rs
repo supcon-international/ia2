@@ -638,8 +638,10 @@ enum IomapCmd {
         server: String,
     },
     /// Replace the entire IoMap from a JSON file. The shape matches
-    /// `get` output: `{ mappings: [{ variable, device, channel,
-    /// direction }] }`.
+    /// `get` output: `{ mappings: [{ application, variable, device,
+    /// channel, direction }] }`. `application` is the PROGRAM the
+    /// variable belongs to — omitting it is the most common cause of
+    /// a 422 here.
     Set {
         #[arg(long)]
         from: String,
@@ -1105,7 +1107,6 @@ fn cmd_transpile(file: &Path, with_map: bool) -> Result<i32> {
             }
             Ok(0)
         }
-        other => bail!("transpile: language {other:?} is not yet supported"),
     }
 }
 
