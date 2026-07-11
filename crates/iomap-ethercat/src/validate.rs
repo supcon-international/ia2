@@ -8,9 +8,36 @@
 //! the *connect* with a precise message instead of dribbling per-cycle
 //! `Transport` errors out of the PDI accessors later.
 
-use project::{EthercatChannel, EthercatPdoDirection, EthercatSlave};
+use project::{EthercatChannel, EthercatGear, EthercatPdoDirection, EthercatSlave, GearMaster};
 
 use crate::SlaveDiscovery;
+
+/// Reject channel *references* before either driver touches the bus: no
+/// two channels may share a name (iomap entries and the PDI/value maps are
+/// keyed by it, so a collision would silently alias) and every channel's
+/// `slave_index` must name a declared slave. An empty slave list means the
+/// topology wasn't authored and skips the index check — back-compat with
+/// sim-only configs that predate the slave table. Run first by both the
+/// real and sim connect paths.
+pub(crate) fn validate_channel_refs(
+    channels: &[EthercatChannel],
+    slaves: &[EthercatSlave],
+) -> Result<(), String> {
+    let known_slaves: std::collections::HashSet<u16> = slaves.iter().map(|s| s.index).collect();
+    let mut seen_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for ch in channels {
+        if !seen_names.insert(ch.name.as_str()) {
+            return Err(format!("duplicate channel name '{}'", ch.name));
+        }
+        if !known_slaves.is_empty() && !known_slaves.contains(&ch.slave_index) {
+            return Err(format!(
+                "channel '{}' references unknown slave_index={}",
+                ch.name, ch.slave_index
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// Compare each configured slave's identity against what the bus walk
 /// found at that index. A `vendor_id`/`product_id` of 0 means "not
@@ -107,6 +134,63 @@ pub(crate) fn validate_pdi_ranges(
     } else {
         Err(problems.join("; "))
     }
+}
+
+/// Hold each `[[gear]]` axis against the discovered bus: the follower's
+/// target_position (i32) must fit its output PDI, and its actual_position
+/// (i32) plus statusword (u16) must fit its input PDI; an `Axis` master's
+/// actual_position (i32) must fit that slave's input PDI. Returns one
+/// message per offending offset (empty when clean) so the caller folds
+/// them into the same post-discovery batch as the identity and PDI-range
+/// checks. Real mode only — sim stores gear parameters by name and has no
+/// cyclic gear PDI to overflow.
+pub(crate) fn validate_gear_offsets(
+    gear: &[EthercatGear],
+    discovered: &[SlaveDiscovery],
+) -> Vec<String> {
+    let mut problems: Vec<String> = Vec::new();
+    let find = |idx: u16| discovered.iter().find(|d| d.index == idx);
+    for g in gear {
+        match find(g.slave_index) {
+            Some(d) => {
+                if g.target_pos_offset as usize + 4 > d.output_bytes as usize {
+                    problems.push(format!(
+                        "gear follower slave {} target_pos_offset {}+4 exceeds output PDI ({} B)",
+                        g.slave_index, g.target_pos_offset, d.output_bytes
+                    ));
+                }
+                if g.actual_pos_offset as usize + 4 > d.input_bytes as usize
+                    || g.status_word_offset as usize + 2 > d.input_bytes as usize
+                {
+                    problems.push(format!(
+                        "gear follower slave {} actual/status offsets exceed input PDI ({} B)",
+                        g.slave_index, d.input_bytes
+                    ));
+                }
+            }
+            None => problems.push(format!(
+                "gear follower slave_index {} not on the discovered bus",
+                g.slave_index
+            )),
+        }
+        if let GearMaster::Axis {
+            slave_index,
+            actual_pos_offset,
+        } = g.master
+        {
+            match find(slave_index) {
+                Some(d) if (actual_pos_offset as usize + 4) <= d.input_bytes as usize => {}
+                Some(d) => problems.push(format!(
+                    "gear master slave {} actual_pos_offset {}+4 exceeds input PDI ({} B)",
+                    slave_index, actual_pos_offset, d.input_bytes
+                )),
+                None => problems.push(format!(
+                    "gear master slave_index {slave_index} not on the discovered bus"
+                )),
+            }
+        }
+    }
+    problems
 }
 
 /// Reject channel shapes the PDI bit accessors cannot serve: zero-length
@@ -246,6 +330,70 @@ mod tests {
         }
     }
 
+    fn gear(
+        slave_index: u16,
+        target_pos_offset: u16,
+        actual_pos_offset: u16,
+        status_word_offset: u16,
+        master: GearMaster,
+    ) -> EthercatGear {
+        EthercatGear {
+            slave_index,
+            target_pos_offset,
+            actual_pos_offset,
+            status_word_offset,
+            master,
+            engage_channel: "engage".into(),
+            ratio_num_channel: "ratio_num".into(),
+            ratio_den_channel: "ratio_den".into(),
+            ratio_step_channel: "ratio_step".into(),
+            phase_channel: "phase".into(),
+            master_vel_channel: "master_vel".into(),
+            max_travel_channel: "max_travel".into(),
+            engaged_channel: "engaged".into(),
+            trip_channel: "trip".into(),
+        }
+    }
+
+    // ---- channel refs ------------------------------------------------------
+
+    #[test]
+    fn duplicate_channel_name_is_rejected() {
+        let slaves = vec![slave(0, "io", 0, 0)];
+        let chans = vec![
+            channel("dup", 0, EthercatPdoDirection::TxPdo, 0, 0, 1),
+            channel("dup", 0, EthercatPdoDirection::RxPdo, 1, 0, 1),
+        ];
+        let err = validate_channel_refs(&chans, &slaves).unwrap_err();
+        assert!(err.contains("duplicate channel name 'dup'"), "{err}");
+    }
+
+    #[test]
+    fn channel_referencing_unknown_slave_is_rejected() {
+        let slaves = vec![slave(0, "io", 0, 0)];
+        let chans = vec![channel("ghost", 5, EthercatPdoDirection::TxPdo, 0, 0, 1)];
+        let err = validate_channel_refs(&chans, &slaves).unwrap_err();
+        assert!(err.contains("references unknown slave_index=5"), "{err}");
+    }
+
+    #[test]
+    fn unique_names_on_known_slaves_pass() {
+        let slaves = vec![slave(0, "a", 0, 0), slave(1, "b", 0, 0)];
+        let chans = vec![
+            channel("in", 0, EthercatPdoDirection::TxPdo, 0, 0, 8),
+            channel("out", 1, EthercatPdoDirection::RxPdo, 0, 0, 8),
+        ];
+        assert!(validate_channel_refs(&chans, &slaves).is_ok());
+    }
+
+    #[test]
+    fn empty_slave_list_skips_the_index_check() {
+        // Back-compat: sim-only configs predating the slave table carry no
+        // slaves, so the slave_index check is skipped (names still checked).
+        let chans = vec![channel("in", 9, EthercatPdoDirection::TxPdo, 0, 0, 8)];
+        assert!(validate_channel_refs(&chans, &[]).is_ok());
+    }
+
     // ---- identity ---------------------------------------------------------
 
     #[test]
@@ -369,6 +517,93 @@ mod tests {
         ];
         let err = validate_pdi_ranges(&chans, &bus).unwrap_err();
         assert_eq!(err.matches("channel '").count(), 3, "{err}");
+    }
+
+    // ---- gear offsets -------------------------------------------------------
+
+    #[test]
+    fn gear_target_offset_overflowing_output_pdi_is_reported() {
+        // output PDI = 4 B; target_pos_offset 2 needs [2..6) → overflow.
+        let bus = vec![found(0, "drive", 0, 0, 8, 4)];
+        let g = vec![gear(0, 2, 0, 0, GearMaster::Virtual)];
+        let problems = validate_gear_offsets(&g, &bus);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("target_pos_offset 2+4 exceeds output PDI (4 B)"),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn gear_actual_offset_overflowing_input_pdi_is_reported() {
+        // input PDI = 4 B; actual_pos_offset 4 needs [4..8) → overflow.
+        let bus = vec![found(0, "drive", 0, 0, 4, 8)];
+        let g = vec![gear(0, 0, 4, 0, GearMaster::Virtual)];
+        let problems = validate_gear_offsets(&g, &bus);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("actual/status offsets exceed input PDI (4 B)"),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn gear_on_undiscovered_slave_is_reported() {
+        let bus = vec![found(0, "only", 0, 0, 8, 8)];
+        let g = vec![gear(3, 0, 0, 0, GearMaster::Virtual)];
+        let problems = validate_gear_offsets(&g, &bus);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("gear follower slave_index 3 not on the discovered bus"),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn gear_master_axis_offset_overflowing_input_pdi_is_reported() {
+        // follower fits; the Axis master's actual_pos_offset overflows.
+        let bus = vec![
+            found(0, "follower", 0, 0, 8, 8),
+            found(1, "master", 0, 0, 4, 8),
+        ];
+        let g = vec![gear(
+            0,
+            0,
+            0,
+            4,
+            GearMaster::Axis {
+                slave_index: 1,
+                actual_pos_offset: 4,
+            },
+        )];
+        let problems = validate_gear_offsets(&g, &bus);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0]
+                .contains("gear master slave 1 actual_pos_offset 4+4 exceeds input PDI (4 B)"),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn valid_gear_offsets_report_nothing() {
+        // Follower output ≥ target+4, input ≥ max(actual+4, status+2); the
+        // Axis master's actual_position fits its own input PDI.
+        let bus = vec![
+            found(0, "follower", 0, 0, 8, 8),
+            found(1, "master", 0, 0, 8, 8),
+        ];
+        let g = vec![gear(
+            0,
+            0,
+            0,
+            4,
+            GearMaster::Axis {
+                slave_index: 1,
+                actual_pos_offset: 0,
+            },
+        )];
+        assert!(validate_gear_offsets(&g, &bus).is_empty());
     }
 
     // ---- channel shapes -----------------------------------------------------

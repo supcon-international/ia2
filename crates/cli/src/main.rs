@@ -20,12 +20,27 @@
 //!   `vendor/ironplc/compiler/mcp/src/server.rs`.
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use ironplc_bridge::CheckDiagnostic;
-use project::{PouLanguage, ProjectStore};
+
+mod announce;
+mod cmd;
+mod http;
+
+use crate::announce::{announce_agent, announce_target};
+use crate::cmd::agent::cmd_agent;
+use crate::cmd::analysis::{cmd_check, cmd_explain, cmd_symbols, cmd_transpile};
+use crate::cmd::config::{cmd_iomap, cmd_library, cmd_northbound, cmd_tasks};
+use crate::cmd::device::cmd_device;
+use crate::cmd::edge::{cmd_deploy, cmd_edge, cmd_probe};
+use crate::cmd::pou::cmd_pou;
+use crate::cmd::project::{
+    cmd_project_check, cmd_project_close, cmd_project_create, cmd_project_info, cmd_project_list,
+    cmd_project_open,
+};
+use crate::cmd::runtime::{cmd_run, cmd_runtime, cmd_stop};
+use crate::http::{ServerOpt, PROJECT_OVERRIDE};
 
 // =================================================================
 //   Top-level command surface
@@ -78,14 +93,16 @@ struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
-enum Command {
+pub(crate) enum Command {
     /// Validate a POU file (ST or LD). Primary tool for the
     /// edit-validate-fix loop.
     ///
     /// Returns the same diagnostics as `POST /api/check`. Auto-detects
     /// language from the file extension (`.st` → ST, `.ld.json` → LD).
-    /// Multiple files: each is checked independently and all diagnostics
-    /// are aggregated. Exit code is 1 if any file has errors.
+    /// Multiple files are checked TOGETHER: each file sees the others'
+    /// declarations, so `cs check pous/*.st` resolves FUNCTION_BLOCKs
+    /// declared in sibling files exactly like a project compile. Exit
+    /// code is 1 if any file has errors.
     ///
     /// Use this in CI, pre-commit hooks, or any time an agent wants to
     /// confirm a change is well-formed before invoking `compile` or
@@ -166,14 +183,14 @@ enum Command {
         /// File path for an isolated, off-task run. Requires `--program`.
         #[arg(long)]
         file: Option<PathBuf>,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
 
     /// Stop the running runtime. No-op if nothing is running.
     Stop {
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
 
     /// Print the full RST documentation for an ironplc problem code.
@@ -221,8 +238,8 @@ enum Command {
         /// JSON output on stdout (deploy report).
         #[arg(long)]
         json: bool,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
 
     /// Probe a configured edge — quick SSH+curl reachability check.
@@ -237,8 +254,8 @@ enum Command {
         /// JSON output on stdout.
         #[arg(long)]
         json: bool,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
 
     /// CRUD on devices in the open project. Mirrors the IDE's
@@ -331,23 +348,23 @@ enum Command {
 /// `http://127.0.0.1:3001` and accepts `--server URL` to point elsewhere
 /// (e.g. an edge box reachable via SSH-forwarded port).
 #[derive(Subcommand, Debug)]
-enum RuntimeCmd {
+pub(crate) enum RuntimeCmd {
     /// Halt the scan loop. IO is frozen and `run_round` is skipped
     /// until `resume` or `step`. Variable writes / forces still apply.
     Pause {
         /// Target this edge runtime instead of the local server.
         #[arg(long)]
         edge: Option<String>,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
     /// Resume continuous scanning.
     Resume {
         /// Target this edge runtime instead of the local server.
         #[arg(long)]
         edge: Option<String>,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
     /// Run N scan cycles then auto-pause.
     Step {
@@ -357,8 +374,8 @@ enum RuntimeCmd {
         /// Target this edge runtime instead of the local server.
         #[arg(long)]
         edge: Option<String>,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
     /// Print the current mode (running / paused / step{N}) and the
     /// list of currently-forced variables.
@@ -368,8 +385,8 @@ enum RuntimeCmd {
         /// Target this edge runtime instead of the local server.
         #[arg(long)]
         edge: Option<String>,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
     /// Pin a variable to a value — applied every scan until unforced.
     /// Use a one-shot `cs runtime write` if you want the program to
@@ -391,8 +408,8 @@ enum RuntimeCmd {
         /// Target this edge runtime instead of the local server.
         #[arg(long)]
         edge: Option<String>,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
     /// Release a forced variable.
     Unforce {
@@ -400,8 +417,8 @@ enum RuntimeCmd {
         /// Target this edge runtime instead of the local server.
         #[arg(long)]
         edge: Option<String>,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
     /// One-shot write (overwritable by the program next cycle). For a
     /// persistent override use `force`. Same value-encoding rules as
@@ -412,13 +429,13 @@ enum RuntimeCmd {
         /// Target this edge runtime instead of the local server.
         #[arg(long)]
         edge: Option<String>,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
 }
 
 #[derive(Subcommand, Debug)]
-enum ProjectCmd {
+pub(crate) enum ProjectCmd {
     /// Validate every POU + the synthesised CONFIGURATION block.
     ///
     /// This is the strongest "is this project shippable?" check —
@@ -449,23 +466,23 @@ enum ProjectCmd {
     /// Create a new project under `~/Documents/IA2/<name>/`.
     Create {
         name: String,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
 
     /// Open an existing project by absolute path; becomes the active
     /// project on the server until `close` (or another `open`) replaces it.
     Open {
         path: PathBuf,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
 
     /// Close the currently open project. The runtime is stopped and
     /// state caches are cleared.
     Close {
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
 
     /// List every project the server currently has open, plus which
@@ -477,8 +494,8 @@ enum ProjectCmd {
         /// JSON output on stdout instead of human pretty-print.
         #[arg(long)]
         json: bool,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
 }
 
@@ -486,7 +503,7 @@ enum ProjectCmd {
 //   cs device — CRUD on devices
 // =================================================================
 #[derive(Subcommand, Debug)]
-enum DeviceCmd {
+pub(crate) enum DeviceCmd {
     /// Create an empty device of the given protocol. Channels (the
     /// per-coil / per-PDO addresses) default to empty — populate
     /// them via `cs device set --from cfg.json`.
@@ -495,23 +512,23 @@ enum DeviceCmd {
         name: String,
         #[arg(long, value_parser = ["modbus","ethercat"])]
         protocol: String,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
     /// List every device in the open project (name + protocol).
     List {
         #[arg(long)]
         json: bool,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
     /// Dump the full device config (protocol-specific) as JSON. Use
     /// before `set --from` to edit a snapshot rather than build the
     /// shape from scratch.
     Get {
         name: String,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
     /// Replace a device's entire config from a JSON file. The shape
     /// is the same one `get` returns — round-trip-friendly.
@@ -521,15 +538,15 @@ enum DeviceCmd {
         /// to read from stdin.
         #[arg(long)]
         from: String,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
     /// Delete a device. Any iomap bindings against it are left in
     /// place but will warn-skip at run time.
     Delete {
         name: String,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
     /// Assemble a modular EtherCAT coupler's channels from its ESI file
     /// (the device's `bringup.esi_path`) + the modules it reports. The
@@ -543,8 +560,8 @@ enum DeviceCmd {
         /// the modules you've physically installed.
         #[arg(long)]
         idents: String,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
 }
 
@@ -552,29 +569,29 @@ enum DeviceCmd {
 //   cs edge — CRUD on deploy targets
 // =================================================================
 #[derive(Subcommand, Debug)]
-enum EdgeCmd {
+pub(crate) enum EdgeCmd {
     /// Create an edge entry. `host` is anything ssh(1) accepts —
     /// `user@host`, a `~/.ssh/config` alias, etc.
     Create {
         name: String,
         #[arg(long)]
         host: String,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
     /// List every edge in the open project.
     List {
         #[arg(long)]
         json: bool,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
     /// Dump the full edge config as JSON (host, ssh_port, ssh_user,
     /// install_dir, runtime_port, notes).
     Get {
         name: String,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
     /// Replace an edge's full config from a JSON file. Shape matches
     /// `get` output. Use this to set `install_dir` or `runtime_port`.
@@ -582,15 +599,15 @@ enum EdgeCmd {
         name: String,
         #[arg(long)]
         from: String,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
     /// Delete an edge. If a tunnel is attached for it, it's torn
     /// down at the same time.
     Delete {
         name: String,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
     /// Tail recent log lines from the edge runtime (over ssh). Surfaces
     /// EtherCAT discovery, bus health, and device connect errors that
@@ -601,8 +618,8 @@ enum EdgeCmd {
         /// How many recent lines to fetch (default 200, capped 2000).
         #[arg(long, default_value_t = 200)]
         tail: usize,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
     /// Scan the edge bus: per-device connect status + discovered EtherCAT
     /// topology (slave index/name/vendor/product + PDI byte sizes). Author
@@ -612,8 +629,8 @@ enum EdgeCmd {
         name: String,
         #[arg(long)]
         json: bool,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
     /// List the edge's interfaces, serial ports, and arch — pick a NIC
     /// for an EtherCAT device or a /dev/tty* for a Modbus RTU device.
@@ -622,8 +639,8 @@ enum EdgeCmd {
         name: String,
         #[arg(long)]
         json: bool,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
 }
 
@@ -631,11 +648,11 @@ enum EdgeCmd {
 //   cs iomap — read / write the variable-to-channel binding table
 // =================================================================
 #[derive(Subcommand, Debug)]
-enum IomapCmd {
+pub(crate) enum IomapCmd {
     /// Print the project's current IoMap as JSON.
     Get {
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
     /// Replace the entire IoMap from a JSON file. The shape matches
     /// `get` output: `{ mappings: [{ application, variable, device,
@@ -645,8 +662,8 @@ enum IomapCmd {
     Set {
         #[arg(long)]
         from: String,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
 }
 
@@ -654,19 +671,19 @@ enum IomapCmd {
 //   cs northbound — read / write northbound.toml (MQTT publishing)
 // =================================================================
 #[derive(Subcommand, Debug)]
-enum NorthboundCmd {
+pub(crate) enum NorthboundCmd {
     /// Print the project's northbound config as JSON.
     Get {
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
     /// Replace northbound.toml from a JSON file. Shape matches `get`:
     /// `{ "mqtt": { "broker_host": …, "publish_interval_ms": …, … } }`.
     Set {
         #[arg(long)]
         from: String,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
 }
 
@@ -674,14 +691,14 @@ enum NorthboundCmd {
 //   cs library — list / import / remove FB libraries
 // =================================================================
 #[derive(Subcommand, Debug)]
-enum LibraryCmd {
+pub(crate) enum LibraryCmd {
     /// List registry libraries with their version and per-project
     /// import state. Add `--json` for the raw `LibrarySummary[]`.
     List {
         #[arg(long)]
         json: bool,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
     /// Vendor library blocks into the open project under
     /// `pous/lib/<name>/`. Omit `--blocks` to import the whole
@@ -693,16 +710,16 @@ enum LibraryCmd {
         /// Omit to import every block in the library.
         #[arg(long, value_delimiter = ',')]
         blocks: Vec<String>,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
     /// Remove an imported library — drops `pous/lib/<name>/` and the
     /// project.toml entry. Idempotent.
     Remove {
         /// Imported library name.
         name: String,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
 }
 
@@ -710,12 +727,12 @@ enum LibraryCmd {
 //   cs tasks — read / write tasks.toml
 // =================================================================
 #[derive(Subcommand, Debug)]
-enum TasksCmd {
+pub(crate) enum TasksCmd {
     /// Print the project's current Tasks (tasks + program bindings)
     /// as JSON.
     Get {
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
     /// Replace the entire tasks.toml content from a JSON file.
     /// Shape: `{ tasks: [{name, interval_ms, priority}], programs:
@@ -723,8 +740,8 @@ enum TasksCmd {
     Set {
         #[arg(long)]
         from: String,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
 }
 
@@ -732,7 +749,7 @@ enum TasksCmd {
 //   cs agent — explicit takeover-session enter / leave / wrap
 // =================================================================
 #[derive(Subcommand, Debug)]
-enum AgentCmd {
+pub(crate) enum AgentCmd {
     /// Wrap a command in an agent takeover session. The IDE banner
     /// stays on with `--label` text for the entire duration, instead
     /// of flickering between every `cs` call. On exit (whether the
@@ -748,8 +765,8 @@ enum AgentCmd {
         /// tank controller" reads better than "agent".
         #[arg(long)]
         label: String,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
         /// The command + args to run. Use `--` to separate from `cs`
         /// own flags. Example: `cs agent run -l X -- bash -c 'foo'`.
         #[arg(last = true, required = true)]
@@ -763,8 +780,8 @@ enum AgentCmd {
     Enter {
         #[arg(long)]
         label: String,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
     /// Close the agent session whose id is in the
     /// `IA2_AGENT_SESSION` env var (or the value passed to
@@ -772,13 +789,13 @@ enum AgentCmd {
     Leave {
         #[arg(long)]
         id: Option<String>,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
 }
 
 #[derive(Subcommand, Debug)]
-enum PouCmd {
+pub(crate) enum PouCmd {
     /// Create an empty POU file in the open project's `pous/` dir.
     /// The server seeds a minimal compileable skeleton for the chosen
     /// language; agents typically `cs pou save` real content right after.
@@ -793,8 +810,8 @@ enum PouCmd {
         #[arg(long, default_value = "program",
               value_parser = ["program","function_block","function"])]
         r#type: String,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
 
     /// Overwrite a POU's source. Body is read from `--from <file>`,
@@ -810,8 +827,8 @@ enum PouCmd {
         /// neither `--from` nor `--stdin` is passed and stdin isn't a TTY.
         #[arg(long, conflicts_with = "from")]
         stdin: bool,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
 
     /// Delete a POU file. The runtime is NOT stopped — if the POU was
@@ -819,8 +836,8 @@ enum PouCmd {
     /// undefined until next `cs run`.
     Delete {
         path: String,
-        #[arg(long, default_value = "http://127.0.0.1:3001")]
-        server: String,
+        #[command(flatten)]
+        server: ServerOpt,
     },
 }
 
@@ -855,22 +872,28 @@ fn main() {
         Command::Transpile { file, with_map } => cmd_transpile(&file, with_map),
         Command::Project(ProjectCmd::Check { path, json }) => cmd_project_check(&path, json),
         Command::Project(ProjectCmd::Info { path, json }) => cmd_project_info(&path, json),
-        Command::Project(ProjectCmd::Create { name, server }) => cmd_project_create(&name, &server),
-        Command::Project(ProjectCmd::Open { path, server }) => cmd_project_open(&path, &server),
-        Command::Project(ProjectCmd::Close { server }) => cmd_project_close(&server),
-        Command::Project(ProjectCmd::List { json, server }) => cmd_project_list(&server, json),
+        Command::Project(ProjectCmd::Create { name, server }) => {
+            cmd_project_create(&name, &server.server)
+        }
+        Command::Project(ProjectCmd::Open { path, server }) => {
+            cmd_project_open(&path, &server.server)
+        }
+        Command::Project(ProjectCmd::Close { server }) => cmd_project_close(&server.server),
+        Command::Project(ProjectCmd::List { json, server }) => {
+            cmd_project_list(&server.server, json)
+        }
         Command::Pou(p) => cmd_pou(p),
         Command::Run {
             program,
             file,
             server,
-        } => cmd_run(program.as_deref(), file.as_deref(), &server),
-        Command::Stop { server } => cmd_stop(&server),
+        } => cmd_run(program.as_deref(), file.as_deref(), &server.server),
+        Command::Stop { server } => cmd_stop(&server.server),
         Command::Explain { code } => cmd_explain(&code),
         Command::Symbols { file, name, json } => cmd_symbols(&file, name.as_deref(), json),
         Command::Runtime(r) => cmd_runtime(r),
-        Command::Deploy { name, json, server } => cmd_deploy(&name, json, &server),
-        Command::Probe { name, json, server } => cmd_probe(&name, json, &server),
+        Command::Deploy { name, json, server } => cmd_deploy(&name, json, &server.server),
+        Command::Probe { name, json, server } => cmd_probe(&name, json, &server.server),
         Command::Device(d) => cmd_device(d),
         Command::Edge(e) => cmd_edge(e),
         Command::Iomap(i) => cmd_iomap(i),
@@ -888,1679 +911,4 @@ fn main() {
             std::process::exit(3);
         }
     }
-}
-
-// =================================================================
-//   Subcommand: check
-// =================================================================
-
-fn cmd_check(files: &[PathBuf], json: bool, explain: bool) -> Result<i32> {
-    // The files are checked TOGETHER: each one is analysed with the
-    // others as declaration context, so `cs check pous/*.st` resolves
-    // FUNCTION_BLOCKs declared in sibling files exactly like a project
-    // compile would. A single file behaves as before (empty context).
-    let mut inputs = Vec::with_capacity(files.len());
-    for file in files {
-        let language = language_for_path(file)?;
-        let source =
-            std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
-        inputs.push((file.display().to_string(), source, language));
-    }
-    let per_file = ironplc_bridge::check_sources_together(&inputs);
-
-    let mut all: Vec<FileDiagnostics> = Vec::with_capacity(files.len());
-    let mut any_errors = false;
-    for (file, diags) in files.iter().zip(per_file) {
-        if !diags.is_empty() {
-            any_errors = true;
-        }
-        all.push(FileDiagnostics {
-            file: file.clone(),
-            diagnostics: diags,
-        });
-    }
-
-    if json {
-        let value: serde_json::Value = serde_json::json!({
-            "ok": !any_errors,
-            "files": all.iter().map(|f| serde_json::json!({
-                "file": f.file.to_string_lossy(),
-                "diagnostics": &f.diagnostics,
-            })).collect::<Vec<_>>(),
-        });
-        println!("{}", serde_json::to_string_pretty(&value)?);
-    } else {
-        for f in &all {
-            print_diagnostics_human(&f.file, &f.diagnostics, explain);
-        }
-        let total: usize = all.iter().map(|f| f.diagnostics.len()).sum();
-        if total == 0 {
-            eprintln!(
-                "✓ {} file{} clean",
-                files.len(),
-                if files.len() == 1 { "" } else { "s" }
-            );
-        } else {
-            eprintln!(
-                "✗ {} error{} across {} file{}",
-                total,
-                if total == 1 { "" } else { "s" },
-                all.iter().filter(|f| !f.diagnostics.is_empty()).count(),
-                if files.len() == 1 { "" } else { "s" },
-            );
-        }
-    }
-
-    Ok(if any_errors { 1 } else { 0 })
-}
-
-struct FileDiagnostics {
-    file: PathBuf,
-    diagnostics: Vec<CheckDiagnostic>,
-}
-
-fn print_diagnostics_human(file: &Path, diags: &[CheckDiagnostic], explain: bool) {
-    if diags.is_empty() {
-        return;
-    }
-    let f = file.display();
-    for d in diags {
-        // Exactly one of ld / fbd / sfc location is populated for
-        // graphical POUs; all are None for ST. Order doesn't matter —
-        // they're mutually exclusive by construction.
-        let loc_hint = if let Some(loc) = &d.ld_location {
-            format!(" [{}]", describe_ld_location(loc))
-        } else if let Some(loc) = &d.fbd_location {
-            format!(" [{}]", describe_fbd_location(loc))
-        } else if let Some(loc) = &d.sfc_location {
-            format!(" [{}]", describe_sfc_location(loc))
-        } else {
-            String::new()
-        };
-        eprintln!(
-            "{f}:{}:{}: {} {}{loc_hint}: {}",
-            d.start_line, d.start_column, d.severity, d.code, d.message,
-        );
-        // Context lines under the primary message, indented. These
-        // are ironplc's `described` entries — almost always one short
-        // structured fragment like `variable=foo` or `type=BOOL`.
-        for c in &d.context {
-            eprintln!("    {c}");
-        }
-        // Related labels — point at secondary locations like "did you
-        // mean: bar?" or "first declared here". We print them as
-        // file:line:col-prefixed notes so they're parseable by the
-        // same regex an editor would use to jump.
-        for r in &d.related {
-            eprintln!(
-                "    note: {f}:{}:{}: {}",
-                r.start_line, r.start_column, r.message,
-            );
-        }
-        // Full explanation when `--explain` is set. Indent every
-        // line by two spaces so the prose is visually nested under
-        // the diagnostic rather than competing with it.
-        if explain {
-            if let Some(expl) = &d.explanation {
-                eprintln!();
-                for line in expl.lines() {
-                    eprintln!("  {line}");
-                }
-                eprintln!();
-            }
-        }
-    }
-}
-
-fn describe_ld_location(loc: &ironplc_bridge::LdLocation) -> String {
-    use ironplc_bridge::LdLocation::*;
-    match loc {
-        Variable { name } => format!("var {name}"),
-        Rung { rung_id } => format!("rung {rung_id}"),
-        Coil {
-            rung_id,
-            coil_index,
-        } => format!("rung {rung_id} · coil {coil_index}"),
-        FbCall { rung_id, instance } => format!("rung {rung_id} · {instance}(…)"),
-    }
-}
-
-fn describe_fbd_location(loc: &ironplc_bridge::FbdLocation) -> String {
-    use ironplc_bridge::FbdLocation::*;
-    match loc {
-        Variable { name } => format!("var {name}"),
-        Block { block_id } => format!("block {block_id}"),
-        Output { variable } => format!("output {variable}"),
-    }
-}
-
-fn describe_sfc_location(loc: &ironplc_bridge::SfcLocation) -> String {
-    use ironplc_bridge::SfcLocation::*;
-    match loc {
-        Variable { name } => format!("var {name}"),
-        Step { name } => format!("step {name}"),
-        Action { step, action_index } => format!("step {step} · action {action_index}"),
-        Transition { index } => format!("transition #{index}"),
-    }
-}
-
-// =================================================================
-//   Subcommand: transpile
-// =================================================================
-
-fn cmd_transpile(file: &Path, with_map: bool) -> Result<i32> {
-    let language = language_for_path(file)?;
-    let source =
-        std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
-
-    match language {
-        PouLanguage::St => {
-            // ST is its own intermediate; nothing to do. Echo it so the
-            // command remains useful in pipelines that don't care about
-            // language at the caller's side.
-            if with_map {
-                eprintln!("note: --with-map has no effect for ST sources");
-            }
-            print!("{source}");
-            Ok(0)
-        }
-        PouLanguage::Ld => {
-            let prog: project::LdProgram = serde_json::from_str(&source)
-                .with_context(|| format!("parsing LD JSON in {}", file.display()))?;
-            let (st, map) = ironplc_bridge::transpile_ld_to_st_with_map(&prog)
-                .with_context(|| format!("transpiling {}", file.display()))?;
-            if with_map {
-                // Serialise the map alongside the ST — JSON output, one
-                // pair per call. The map.lines field is a Vec<Option<…>>
-                // which serde renders as `[null, {…}, null, …]`.
-                let payload = serde_json::json!({
-                    "st": st,
-                    "source_map": map.lines,
-                });
-                println!("{}", serde_json::to_string_pretty(&payload)?);
-            } else {
-                print!("{st}");
-            }
-            Ok(0)
-        }
-        PouLanguage::Fbd => {
-            let prog: project::FbdProgram = serde_json::from_str(&source)
-                .with_context(|| format!("parsing FBD JSON in {}", file.display()))?;
-            let (st, map) = ironplc_bridge::transpile_fbd_to_st_with_map(&prog)
-                .with_context(|| format!("transpiling {}", file.display()))?;
-            if with_map {
-                let payload = serde_json::json!({
-                    "st": st,
-                    "source_map": map.lines,
-                });
-                println!("{}", serde_json::to_string_pretty(&payload)?);
-            } else {
-                print!("{st}");
-            }
-            Ok(0)
-        }
-        PouLanguage::Sfc => {
-            let prog: project::SfcProgram = serde_json::from_str(&source)
-                .with_context(|| format!("parsing SFC JSON in {}", file.display()))?;
-            let (st, map) = ironplc_bridge::transpile_sfc_to_st_with_map(&prog)
-                .with_context(|| format!("transpiling {}", file.display()))?;
-            if with_map {
-                let payload = serde_json::json!({
-                    "st": st,
-                    "source_map": map.lines,
-                });
-                println!("{}", serde_json::to_string_pretty(&payload)?);
-            } else {
-                print!("{st}");
-            }
-            Ok(0)
-        }
-    }
-}
-
-// =================================================================
-//   Subcommand: project check
-// =================================================================
-
-fn cmd_project_check(path: &Path, json: bool) -> Result<i32> {
-    let store = open_project(path)?;
-    let outcome = ironplc_bridge::compile_project(&store);
-    let (ok, message): (bool, String) = match outcome {
-        Ok(_) => (true, "clean".into()),
-        Err(e) => (false, format!("{e:?}")),
-    };
-
-    if json {
-        let value = serde_json::json!({
-            "ok": ok,
-            "project": store.name(),
-            "message": message,
-        });
-        println!("{}", serde_json::to_string_pretty(&value)?);
-    } else if ok {
-        eprintln!("✓ project {} compiles cleanly", store.name());
-    } else {
-        eprintln!("✗ project {} failed to compile:", store.name());
-        eprintln!("{message}");
-    }
-
-    Ok(if ok { 0 } else { 1 })
-}
-
-// =================================================================
-//   Subcommand: project info
-// =================================================================
-
-fn cmd_project_info(path: &Path, json: bool) -> Result<i32> {
-    let store = open_project(path)?;
-    let pous = store
-        .list_pou_paths()
-        .with_context(|| "listing POU files")?;
-    let devices = store.list_devices().with_context(|| "listing devices")?;
-    let edges = store.list_edges().with_context(|| "listing edges")?;
-
-    if json {
-        let value = serde_json::json!({
-            "name": store.name(),
-            "root": store.root().display().to_string(),
-            "pous": pous,
-            "devices": devices.iter().map(|d| serde_json::json!({
-                "name": &d.name,
-                "protocol": format!("{:?}", d.config.protocol()),
-            })).collect::<Vec<_>>(),
-            "edges": edges.iter().map(|e| serde_json::json!({
-                "name": &e.name,
-                "host": &e.host,
-            })).collect::<Vec<_>>(),
-        });
-        println!("{}", serde_json::to_string_pretty(&value)?);
-    } else {
-        println!("project: {}", store.name());
-        println!("root:    {}", store.root().display());
-        println!();
-        println!("POUs ({}):", pous.len());
-        for p in &pous {
-            println!("  {p}");
-        }
-        println!();
-        println!("Devices ({}):", devices.len());
-        for d in &devices {
-            println!("  {} ({:?})", d.name, d.config.protocol());
-        }
-        println!();
-        println!("Edges ({}):", edges.len());
-        for e in &edges {
-            println!("  {} → {}", e.name, e.host);
-        }
-    }
-
-    Ok(0)
-}
-
-// =================================================================
-//   Subcommand: explain
-// =================================================================
-
-fn cmd_explain(code: &str) -> Result<i32> {
-    match ironplc_bridge::lookup_problem_doc(code) {
-        Some((rst, title)) => {
-            // Print the title line first so a quick `cs explain P4007`
-            // tells you what the code is for without scanning the body.
-            // The full RST follows verbatim — agents and humans can
-            // both read it. (rST format is text-friendly so we don't
-            // try to render it.)
-            println!("{code} — {title}");
-            println!();
-            print!("{rst}");
-            Ok(0)
-        }
-        None => {
-            eprintln!("error: no documentation for `{code}` — not in ironplc's problem registry");
-            Ok(1)
-        }
-    }
-}
-
-// =================================================================
-//   Subcommand: project create / open / close
-// =================================================================
-//
-// Wrap the HTTP API so agents call `cs project create foo` instead
-// of `curl -X POST localhost:3001/api/projects -d '{"name":"foo"}'`.
-// Symmetric with `cs project info / check` which already operate on
-// project directories.
-
-fn cmd_project_create(name: &str, server: &str) -> Result<i32> {
-    let resp = post_json(
-        &format!("{server}/api/projects"),
-        &serde_json::json!({ "name": name }),
-    )?;
-    println!("{}", serde_json::to_string_pretty(&resp)?);
-    Ok(0)
-}
-
-fn cmd_project_open(path: &Path, server: &str) -> Result<i32> {
-    let abs = path
-        .canonicalize()
-        .with_context(|| format!("resolving {}", path.display()))?;
-    let resp = post_json(
-        &format!("{server}/api/projects/open"),
-        &serde_json::json!({ "path": abs.display().to_string() }),
-    )?;
-    println!("{}", serde_json::to_string_pretty(&resp)?);
-    Ok(0)
-}
-
-fn cmd_project_close(server: &str) -> Result<i32> {
-    let resp = post_json(&format!("{server}/api/projects/close"), &())?;
-    println!("{}", serde_json::to_string_pretty(&resp)?);
-    Ok(0)
-}
-
-fn cmd_project_list(server: &str, json: bool) -> Result<i32> {
-    let value = get_json(&format!("{server}/api/projects/open-list"))?;
-    if json {
-        println!("{}", serde_json::to_string_pretty(&value)?);
-        return Ok(0);
-    }
-    // Human-readable: active marked with `*`, names padded into a
-    // column. Path on the right for orientation.
-    let active = value
-        .get("active")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let projects = value
-        .get("projects")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
-    if projects.is_empty() {
-        eprintln!("no projects open");
-        return Ok(0);
-    }
-    let name_width = projects
-        .iter()
-        .filter_map(|p| p.get("name").and_then(|v| v.as_str()).map(str::len))
-        .max()
-        .unwrap_or(0);
-    for p in &projects {
-        let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-        let path = p.get("path").and_then(|v| v.as_str()).unwrap_or("?");
-        let marker = if name == active { "*" } else { " " };
-        println!("{marker} {name:<name_width$}  {path}");
-    }
-    eprintln!(
-        "{} project{} open · active marked with *",
-        projects.len(),
-        if projects.len() == 1 { "" } else { "s" },
-    );
-    Ok(0)
-}
-
-// =================================================================
-//   Subcommand: pou create / save / delete
-// =================================================================
-
-fn cmd_pou(cmd: PouCmd) -> Result<i32> {
-    match cmd {
-        PouCmd::Create {
-            path,
-            language,
-            r#type,
-            server,
-        } => {
-            let resp = post_json(
-                &format!("{server}/api/pous"),
-                // Server's CreatePouRequest uses `type` (renamed
-                // from Rust `type_` via serde). Language values match
-                // the on-disk extensions: st / ld / fbd / sfc.
-                &serde_json::json!({
-                    "path": path,
-                    "type": r#type,
-                    "language": language,
-                }),
-            )?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
-            Ok(0)
-        }
-        PouCmd::Save {
-            path,
-            from,
-            stdin,
-            server,
-        } => {
-            let source = if let Some(file) = from {
-                std::fs::read_to_string(&file)
-                    .with_context(|| format!("reading {}", file.display()))?
-            } else {
-                // Read stdin (whether `--stdin` is set or it's the
-                // implicit default).
-                let _ = stdin;
-                let mut s = String::new();
-                use std::io::Read;
-                std::io::stdin()
-                    .read_to_string(&mut s)
-                    .context("reading source from stdin")?;
-                s
-            };
-            // `save_pou` accepts text/plain, not JSON — wire format
-            // matches the IDE editor's auto-save path.
-            let url = format!("{server}/api/pous/{}", url_encode(&path));
-            let resp = http_agent()
-                .put(&url)
-                .set("Content-Type", "text/plain")
-                .send_string(&source)
-                .map_err(|e| anyhow::anyhow!("PUT {url}: {e}"))?;
-            let value: serde_json::Value = resp
-                .into_json()
-                .map_err(|e| anyhow::anyhow!("decode JSON from {url}: {e}"))?;
-            println!("{}", serde_json::to_string_pretty(&value)?);
-            Ok(0)
-        }
-        PouCmd::Delete { path, server } => {
-            let resp = delete_json(&format!("{server}/api/pous/{}", url_encode(&path)))?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
-            Ok(0)
-        }
-    }
-}
-
-// =================================================================
-//   Subcommand: run / stop
-// =================================================================
-
-fn cmd_run(program: Option<&str>, file: Option<&Path>, server: &str) -> Result<i32> {
-    // The server distinguishes three run shapes by the presence of
-    // `program` / `file_path`. Mirror that here.
-    let body = match (program, file) {
-        (None, None) => serde_json::json!({ "kind": "project" }),
-        (Some(name), None) => serde_json::json!({
-            "kind": "isolated",
-            "program": name,
-        }),
-        (Some(name), Some(path)) => {
-            let abs = path
-                .canonicalize()
-                .with_context(|| format!("resolving {}", path.display()))?;
-            serde_json::json!({
-                "kind": "isolated",
-                "program": name,
-                "file_path": abs.display().to_string(),
-            })
-        }
-        (None, Some(_)) => {
-            anyhow::bail!("--file requires --program to name the PROGRAM inside it")
-        }
-    };
-    let resp = post_json(&format!("{server}/api/run"), &body)?;
-    println!("{}", serde_json::to_string_pretty(&resp)?);
-    Ok(0)
-}
-
-fn cmd_stop(server: &str) -> Result<i32> {
-    let resp = post_json(&format!("{server}/api/stop"), &())?;
-    println!("{}", serde_json::to_string_pretty(&resp)?);
-    Ok(0)
-}
-
-// =================================================================
-//   Subcommand: deploy / probe (edge orchestration)
-// =================================================================
-
-fn cmd_deploy(name: &str, json: bool, server: &str) -> Result<i32> {
-    // The server's /api/edges/{name}/deploy route owns the SSH+tar
-    // dance — see crates/server/src/edges.rs. We just trigger it and
-    // surface the report. Bigger timeout than the default agent
-    // (30s) because the tar+ssh round-trip can take minutes for a
-    // large project on a slow link.
-    let url = format!("{server}/api/edges/{}/deploy", url_encode(name));
-    let resp = http_agent()
-        .post(&url)
-        .timeout(std::time::Duration::from_secs(600))
-        .set("Content-Type", "application/json")
-        .send_json(serde_json::json!({}))
-        .map_err(|e| anyhow::anyhow!("POST {url}: {e}"))?;
-    let value: serde_json::Value = resp
-        .into_json()
-        .map_err(|e| anyhow::anyhow!("decode JSON from {url}: {e}"))?;
-
-    if json {
-        println!("{}", serde_json::to_string_pretty(&value)?);
-    } else {
-        // Human-readable form: pull the version + the streamed deploy
-        // log so the user sees what actually happened on the box.
-        let version = value.get("version").and_then(|v| v.as_str()).unwrap_or("?");
-        let log = value.get("log").and_then(|v| v.as_str()).unwrap_or("");
-        if !log.is_empty() {
-            eprintln!("{log}");
-        }
-        eprintln!("✓ deployed to '{name}' as version {version}");
-    }
-    // ok=false means the script ran but exited non-zero (remote failure).
-    let ok = value.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-    Ok(if ok { 0 } else { 1 })
-}
-
-fn cmd_probe(name: &str, json: bool, server: &str) -> Result<i32> {
-    let url = format!("{server}/api/edges/{}/probe", url_encode(name));
-    let value = get_json(&url)?;
-    if json {
-        println!("{}", serde_json::to_string_pretty(&value)?);
-    } else {
-        let reachable = value
-            .get("reachable")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if reachable {
-            let scans = value
-                .get("scan_count")
-                .and_then(|v| v.as_u64())
-                .map(|n| n.to_string())
-                .unwrap_or_else(|| "?".into());
-            let uptime = value
-                .get("uptime_secs")
-                .and_then(|v| v.as_u64())
-                .map(|n| format!("{n}s"))
-                .unwrap_or_else(|| "?".into());
-            let version = value
-                .get("runtime_version")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
-            println!("✓ {name} reachable · v{version} · {scans} scans · up {uptime}");
-        } else {
-            let err = value
-                .get("error")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unreachable");
-            eprintln!("✗ {name}: {err}");
-        }
-    }
-    let reachable = value
-        .get("reachable")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    Ok(if reachable { 0 } else { 1 })
-}
-
-// =================================================================
-//   Subcommand: device CRUD
-// =================================================================
-
-fn cmd_device(cmd: DeviceCmd) -> Result<i32> {
-    match cmd {
-        DeviceCmd::Create {
-            name,
-            protocol,
-            server,
-        } => {
-            let resp = post_json(
-                &format!("{server}/api/devices"),
-                &serde_json::json!({ "name": name, "protocol": protocol }),
-            )?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
-            Ok(0)
-        }
-        DeviceCmd::List { json, server } => {
-            // Devices live inside ProjectTree — call /api/project and
-            // pluck the `devices` array. Cheap enough; avoids a new
-            // dedicated endpoint for what's already exposed.
-            let tree = get_json(&format!("{server}/api/project"))?;
-            let devices = tree
-                .get("devices")
-                .cloned()
-                .unwrap_or(serde_json::json!([]));
-            if json {
-                println!("{}", serde_json::to_string_pretty(&devices)?);
-            } else if let Some(arr) = devices.as_array() {
-                if arr.is_empty() {
-                    eprintln!("no devices");
-                } else {
-                    for d in arr {
-                        let n = d.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-                        let p = d.get("protocol").and_then(|v| v.as_str()).unwrap_or("?");
-                        println!("{p:<10}  {n}");
-                    }
-                }
-            }
-            Ok(0)
-        }
-        DeviceCmd::Get { name, server } => {
-            let resp = get_json(&format!("{server}/api/devices/{}", url_encode(&name)))?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
-            Ok(0)
-        }
-        DeviceCmd::Set { name, from, server } => {
-            let body = read_json_blob(&from)?;
-            let resp = put_json(
-                &format!("{server}/api/devices/{}", url_encode(&name)),
-                &body,
-            )?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
-            Ok(0)
-        }
-        DeviceCmd::Delete { name, server } => {
-            let resp = delete_json(&format!("{server}/api/devices/{}", url_encode(&name)))?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
-            Ok(0)
-        }
-        DeviceCmd::EsiAssemble {
-            name,
-            idents,
-            server,
-        } => {
-            let detected = idents
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(parse_module_ident)
-                .collect::<Result<Vec<u32>>>()?;
-            let body = serde_json::json!({ "detected": detected });
-            let resp = post_json(
-                &format!("{server}/api/devices/{}/esi-assemble", url_encode(&name)),
-                &body,
-            )?;
-            // Summarize the assembled channels. The Device JSON is flat —
-            // protocol fields (including `channels`) sit at the top level.
-            let n = resp
-                .get("channels")
-                .and_then(|c| c.as_array())
-                .map(|a| a.len())
-                .unwrap_or(0);
-            println!(
-                "✓ assembled {n} channels from ESI for '{name}' ({} modules)",
-                detected.len()
-            );
-            println!("{}", serde_json::to_string_pretty(&resp)?);
-            Ok(0)
-        }
-    }
-}
-
-/// Parse a module ident in `0x..` hex or decimal form.
-fn parse_module_ident(s: &str) -> Result<u32> {
-    let t = s.trim();
-    let parsed = if let Some(h) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
-        u32::from_str_radix(h, 16)
-    } else {
-        t.parse::<u32>()
-    };
-    parsed.map_err(|e| anyhow::anyhow!("bad module ident {s:?}: {e}"))
-}
-
-// =================================================================
-//   Subcommand: edge CRUD
-// =================================================================
-
-fn cmd_edge(cmd: EdgeCmd) -> Result<i32> {
-    match cmd {
-        EdgeCmd::Create { name, host, server } => {
-            let resp = post_json(
-                &format!("{server}/api/edges"),
-                &serde_json::json!({ "name": name, "host": host }),
-            )?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
-            Ok(0)
-        }
-        EdgeCmd::List { json, server } => {
-            let tree = get_json(&format!("{server}/api/project"))?;
-            let edges = tree.get("edges").cloned().unwrap_or(serde_json::json!([]));
-            if json {
-                println!("{}", serde_json::to_string_pretty(&edges)?);
-            } else if let Some(arr) = edges.as_array() {
-                if arr.is_empty() {
-                    eprintln!("no edges");
-                } else {
-                    for e in arr {
-                        let n = e.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-                        let h = e.get("host").and_then(|v| v.as_str()).unwrap_or("?");
-                        println!("{n:<24}  {h}");
-                    }
-                }
-            }
-            Ok(0)
-        }
-        EdgeCmd::Get { name, server } => {
-            let resp = get_json(&format!("{server}/api/edges/{}", url_encode(&name)))?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
-            Ok(0)
-        }
-        EdgeCmd::Set { name, from, server } => {
-            let body = read_json_blob(&from)?;
-            let resp = put_json(&format!("{server}/api/edges/{}", url_encode(&name)), &body)?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
-            Ok(0)
-        }
-        EdgeCmd::Delete { name, server } => {
-            let resp = delete_json(&format!("{server}/api/edges/{}", url_encode(&name)))?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
-            Ok(0)
-        }
-        EdgeCmd::Logs { name, tail, server } => {
-            let url = format!("{server}/api/edges/{}/logs?tail={tail}", url_encode(&name));
-            let resp = get_json(&url)?;
-            if let Some(lines) = resp.get("lines").and_then(|v| v.as_array()) {
-                for line in lines {
-                    if let Some(s) = line.as_str() {
-                        println!("{s}");
-                    }
-                }
-            } else {
-                println!("{}", serde_json::to_string_pretty(&resp)?);
-            }
-            Ok(0)
-        }
-        EdgeCmd::Scan { name, json, server } => {
-            let url = format!("{server}/api/edges/{}/discover", url_encode(&name));
-            let resp = get_json(&url)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&resp)?);
-                return Ok(0);
-            }
-            let Some(devs) = resp.as_array() else {
-                println!("{}", serde_json::to_string_pretty(&resp)?);
-                return Ok(0);
-            };
-            if devs.is_empty() {
-                eprintln!("no devices in project");
-            }
-            for d in devs {
-                let dname = d.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-                let proto = d.get("protocol").and_then(|v| v.as_str()).unwrap_or("?");
-                let connected = d
-                    .get("connected")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                if !connected {
-                    let err = d
-                        .get("error")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("not connected");
-                    println!("✗ {dname} ({proto}) — {err}");
-                    continue;
-                }
-                let slaves = d.get("slaves").and_then(|v| v.as_array());
-                let n = slaves.map(|a| a.len()).unwrap_or(0);
-                println!("✓ {dname} ({proto}) connected · {n} slave(s)");
-                if let Some(arr) = slaves {
-                    for s in arr {
-                        let idx = s.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let sn = s.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-                        let vid = s.get("vendor_id").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let pid = s.get("product_id").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let inb = s.get("input_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let outb = s.get("output_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
-                        println!(
-                            "    [{idx}] {sn}  vendor=0x{vid:08x} product=0x{pid:08x}  in={inb}B out={outb}B"
-                        );
-                    }
-                }
-            }
-            Ok(0)
-        }
-        EdgeCmd::System { name, json, server } => {
-            let url = format!("{server}/api/edges/{}/system", url_encode(&name));
-            let resp = get_json(&url)?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&resp)?);
-                return Ok(0);
-            }
-            let arch = resp.get("arch").and_then(|v| v.as_str()).unwrap_or("?");
-            let os = resp.get("os").and_then(|v| v.as_str()).unwrap_or("?");
-            println!("{os}/{arch}");
-            if let Some(nics) = resp.get("nics").and_then(|v| v.as_array()) {
-                println!("NICs:");
-                for n in nics {
-                    let nm = n.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-                    let st = n.get("operstate").and_then(|v| v.as_str()).unwrap_or("?");
-                    let carrier = n.get("carrier").and_then(|v| v.as_bool()).unwrap_or(false);
-                    let mac = n.get("mac").and_then(|v| v.as_str()).unwrap_or("");
-                    let link = if carrier { "carrier" } else { "no-carrier" };
-                    println!("  {nm:<16} {st:<8} {link:<11} {mac}");
-                }
-            }
-            match resp.get("serial_ports").and_then(|v| v.as_array()) {
-                Some(ports) if !ports.is_empty() => {
-                    println!("serial ports:");
-                    for p in ports {
-                        if let Some(s) = p.as_str() {
-                            println!("  {s}");
-                        }
-                    }
-                }
-                _ => println!("serial ports: (none)"),
-            }
-            Ok(0)
-        }
-    }
-}
-
-// =================================================================
-//   Subcommand: iomap / tasks  (small read/write helpers)
-// =================================================================
-
-fn cmd_iomap(cmd: IomapCmd) -> Result<i32> {
-    match cmd {
-        IomapCmd::Get { server } => {
-            let resp = get_json(&format!("{server}/api/iomap"))?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
-            Ok(0)
-        }
-        IomapCmd::Set { from, server } => {
-            let body = read_json_blob(&from)?;
-            let resp = put_json(&format!("{server}/api/iomap"), &body)?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
-            Ok(0)
-        }
-    }
-}
-
-fn cmd_tasks(cmd: TasksCmd) -> Result<i32> {
-    match cmd {
-        TasksCmd::Get { server } => {
-            let resp = get_json(&format!("{server}/api/tasks"))?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
-            Ok(0)
-        }
-        TasksCmd::Set { from, server } => {
-            let body = read_json_blob(&from)?;
-            let resp = put_json(&format!("{server}/api/tasks"), &body)?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
-            Ok(0)
-        }
-    }
-}
-
-fn cmd_northbound(cmd: NorthboundCmd) -> Result<i32> {
-    match cmd {
-        NorthboundCmd::Get { server } => {
-            let resp = get_json(&format!("{server}/api/northbound"))?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
-            Ok(0)
-        }
-        NorthboundCmd::Set { from, server } => {
-            let body = read_json_blob(&from)?;
-            let resp = put_json(&format!("{server}/api/northbound"), &body)?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
-            Ok(0)
-        }
-    }
-}
-
-fn cmd_library(cmd: LibraryCmd) -> Result<i32> {
-    match cmd {
-        LibraryCmd::List { json, server } => {
-            let resp = get_json(&format!("{server}/api/library"))?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&resp)?);
-            } else if let Some(arr) = resp.as_array() {
-                // Concise table: name · version · import state.
-                for l in arr {
-                    let name = l.get("name").and_then(|v| v.as_str()).unwrap_or("?");
-                    let version = l.get("version").and_then(|v| v.as_str()).unwrap_or("?");
-                    let files = l
-                        .get("imported_files")
-                        .and_then(|v| v.as_array())
-                        .map(|a| a.len())
-                        .unwrap_or(0);
-                    match l.get("imported_version").and_then(|v| v.as_str()) {
-                        Some(iv) => println!(
-                            "{name}  v{version}  imported(v{iv}, {files} block{})",
-                            if files == 1 { "" } else { "s" }
-                        ),
-                        None => println!("{name}  v{version}  (not imported)"),
-                    }
-                }
-            }
-            Ok(0)
-        }
-        LibraryCmd::Import {
-            library,
-            blocks,
-            server,
-        } => {
-            let body = serde_json::json!({ "library": library, "blocks": blocks });
-            let resp = post_json(&format!("{server}/api/library/import"), &body)?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
-            Ok(0)
-        }
-        LibraryCmd::Remove { name, server } => {
-            let resp = delete_json(&format!("{server}/api/library/{}", url_encode(&name)))?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
-            Ok(0)
-        }
-    }
-}
-
-// =================================================================
-//   Subcommand: agent — explicit takeover session
-// =================================================================
-
-/// Env var holding the active session id between `cs agent enter`
-/// and `cs agent leave`. Set by the user (`export
-/// IA2_AGENT_SESSION=$(cs agent enter --label ...)`) or by `cs
-/// agent run` when it spawns the inner command.
-const SESSION_ENV: &str = "IA2_AGENT_SESSION";
-
-fn cmd_agent(cmd: AgentCmd) -> Result<i32> {
-    match cmd {
-        AgentCmd::Run { label, server, cmd } => cmd_agent_run(&label, &server, cmd),
-        AgentCmd::Enter { label, server } => {
-            let id = session_id().to_string();
-            agent_session_start(&server, &id, &label)?;
-            // Print the id on stdout so shell scripts can capture it:
-            //   SESSION=$(cs agent enter --label ...)
-            //   ...
-            //   cs agent leave --id "$SESSION"
-            println!("{id}");
-            Ok(0)
-        }
-        AgentCmd::Leave { id, server } => {
-            let target = id.or_else(|| std::env::var(SESSION_ENV).ok());
-            let body = match target {
-                Some(id) => serde_json::json!({ "id": id }),
-                None => serde_json::json!({}),
-            };
-            let _ = post_json(&format!("{server}/api/agent/session/end"), &body)?;
-            Ok(0)
-        }
-    }
-}
-
-fn cmd_agent_run(label: &str, server: &str, cmd: Vec<String>) -> Result<i32> {
-    use std::process::{Command, Stdio};
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
-
-    if cmd.is_empty() {
-        anyhow::bail!("cs agent run: expected a command after `--`");
-    }
-
-    // Generate session id. We reuse the same per-process id helper
-    // the heartbeat path uses so a session id is comparable in logs
-    // to a heartbeat session hint.
-    let id = session_id().to_string();
-    agent_session_start(server, &id, label)?;
-
-    // Background heartbeat keeper. Every second, refresh the
-    // session-side last_heartbeat so the server-side watchdog
-    // (SESSION_TTL = 30s) doesn't age us out mid-execution.
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop_for_keeper = stop.clone();
-    let server_owned = server.to_string();
-    let id_for_keeper = id.clone();
-    let keeper = std::thread::spawn(move || {
-        while !stop_for_keeper.load(Ordering::Relaxed) {
-            // Best-effort — short timeout, swallow errors. A failed
-            // heartbeat only matters after SESSION_TTL of failures
-            // in a row.
-            let _ = http_agent()
-                .post(&format!("{server_owned}/api/agent/heartbeat"))
-                .timeout(std::time::Duration::from_millis(500))
-                .set("Content-Type", "application/json")
-                .send_json(serde_json::json!({
-                    "command": null,
-                    "session": id_for_keeper,
-                }));
-            std::thread::sleep(std::time::Duration::from_secs(1));
-        }
-    });
-
-    // Run the inner command. Expose the session id in its env so
-    // any cs subcalls within `bash -c '...'` carry the same session.
-    let mut child = Command::new(&cmd[0]);
-    child
-        .args(&cmd[1..])
-        .env(SESSION_ENV, &id)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-    let status = child
-        .status()
-        .with_context(|| format!("spawning `{}`", cmd[0]))?;
-
-    // Cleanup: stop the keeper, then close the session. Done in
-    // try/finally style — even if the inner command crashed, we
-    // close so the overlay doesn't get stuck on.
-    stop.store(true, Ordering::Relaxed);
-    let _ = keeper.join();
-    let _ = post_json(
-        &format!("{server}/api/agent/session/end"),
-        &serde_json::json!({ "id": id }),
-    );
-
-    Ok(status.code().unwrap_or(1))
-}
-
-/// Open a session on the server. Errors propagate so the caller
-/// can decide whether to still run the wrapped command — current
-/// policy is "fail fast" since the user explicitly asked for
-/// session-mode visual feedback.
-fn agent_session_start(server: &str, id: &str, label: &str) -> Result<()> {
-    let url = format!("{server}/api/agent/session/start");
-    let resp = http_agent()
-        .post(&url)
-        .set("Content-Type", "application/json")
-        .send_json(serde_json::json!({ "id": id, "label": label }))
-        .map_err(|e| anyhow::anyhow!("POST {url}: {e}"))?;
-    // Drain the body so the connection can be reused.
-    let _: serde_json::Value = resp
-        .into_json()
-        .map_err(|e| anyhow::anyhow!("decode JSON from {url}: {e}"))?;
-    Ok(())
-}
-
-/// Shared helper: read a JSON document from a file path, or from
-/// stdin if `from == "-"`. Used by every `set --from` subcommand
-/// so the shape is consistent (matches what `cs pou save` already
-/// does for source text).
-fn read_json_blob(from: &str) -> Result<serde_json::Value> {
-    use std::io::Read;
-    let bytes = if from == "-" {
-        let mut buf = String::new();
-        std::io::stdin()
-            .read_to_string(&mut buf)
-            .context("reading stdin")?;
-        buf.into_bytes()
-    } else {
-        std::fs::read(from).with_context(|| format!("reading {from}"))?
-    };
-    serde_json::from_slice(&bytes).with_context(|| format!("parsing JSON from {from}"))
-}
-
-fn put_json(url: &str, body: &impl serde::Serialize) -> Result<serde_json::Value> {
-    let resp = with_project_header(http_agent().put(url))
-        .set("Content-Type", "application/json")
-        .send_json(body)
-        .map_err(|e| anyhow::anyhow!("PUT {url}: {e}"))?;
-    let value: serde_json::Value = resp
-        .into_json()
-        .map_err(|e| anyhow::anyhow!("decode JSON from {url}: {e}"))?;
-    Ok(value)
-}
-
-// =================================================================
-//   Subcommand: symbols
-// =================================================================
-
-fn cmd_symbols(file: &Path, name_filter: Option<&str>, json: bool) -> Result<i32> {
-    let language = language_for_path(file)?;
-    let source =
-        std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
-    let mut syms = ironplc_bridge::extract_symbols(&source, language);
-    if let Some(needle) = name_filter {
-        syms.retain(|s| s.name.contains(needle));
-    }
-    if json {
-        println!("{}", serde_json::to_string_pretty(&syms)?);
-    } else {
-        // Tabular: aligned `direction  name : type_name`. Direction
-        // pads to the widest width so columns line up.
-        let pad = syms.iter().map(|s| s.direction.len()).max().unwrap_or(0);
-        for s in &syms {
-            println!(
-                "{:<pad$}  {} : {}",
-                s.direction,
-                s.name,
-                s.type_name,
-                pad = pad,
-            );
-        }
-        eprintln!(
-            "{} symbol{}",
-            syms.len(),
-            if syms.len() == 1 { "" } else { "s" },
-        );
-    }
-    Ok(if syms.is_empty() && name_filter.is_some() {
-        1
-    } else {
-        0
-    })
-}
-
-// =================================================================
-//   Subcommand: runtime (debug control trio)
-// =================================================================
-
-fn cmd_runtime(cmd: RuntimeCmd) -> Result<i32> {
-    match cmd {
-        RuntimeCmd::Pause { edge, server } => {
-            let resp = match &edge {
-                Some(e) => post_json(
-                    &format!("{server}/api/edges/{}/runtime/pause", url_encode(e)),
-                    &serde_json::json!({}),
-                )?,
-                None => post_json(&format!("{server}/api/runtime/pause"), &())?,
-            };
-            println!("{}", serde_json::to_string_pretty(&resp)?);
-            Ok(0)
-        }
-        RuntimeCmd::Resume { edge, server } => {
-            let resp = match &edge {
-                Some(e) => post_json(
-                    &format!("{server}/api/edges/{}/runtime/resume", url_encode(e)),
-                    &serde_json::json!({}),
-                )?,
-                None => post_json(&format!("{server}/api/runtime/resume"), &())?,
-            };
-            println!("{}", serde_json::to_string_pretty(&resp)?);
-            Ok(0)
-        }
-        RuntimeCmd::Step {
-            cycles,
-            edge,
-            server,
-        } => {
-            let body = serde_json::json!({ "cycles": cycles });
-            let resp = match &edge {
-                Some(e) => post_json(
-                    &format!("{server}/api/edges/{}/runtime/step", url_encode(e)),
-                    &body,
-                )?,
-                None => post_json(&format!("{server}/api/runtime/step"), &body)?,
-            };
-            println!("{}", serde_json::to_string_pretty(&resp)?);
-            Ok(0)
-        }
-        RuntimeCmd::Status { json, edge, server } => {
-            // Local: /api/runtime/status. Edge: the runtime's /status via
-            // the server proxy (different shape, but carries mode + forces).
-            let status = match &edge {
-                Some(e) => get_json(&format!("{server}/api/edges/{}/status", url_encode(e)))?,
-                None => get_json(&format!("{server}/api/runtime/status"))?,
-            };
-            if json {
-                println!("{}", serde_json::to_string_pretty(&status)?);
-            } else {
-                // A minimal human summary; full status is one --json
-                // away.
-                let mode = status
-                    .get("mode")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
-                let forces = status
-                    .get("forces")
-                    .and_then(|v| v.as_array())
-                    .cloned()
-                    .unwrap_or_default();
-                // Edge /status has no `running` bool — derive from mode.
-                let running = status
-                    .get("running")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or_else(|| {
-                        mode.get("kind").and_then(|k| k.as_str()) == Some("running")
-                    });
-                println!(
-                    "running: {running}  mode: {}  forces: {}",
-                    serde_json::to_string(&mode)?,
-                    forces.len(),
-                );
-                for f in &forces {
-                    if let (Some(n), Some(v)) =
-                        (f.get("name").and_then(|v| v.as_str()), f.get("value"))
-                    {
-                        println!("  {n} := {v}");
-                    }
-                }
-            }
-            Ok(0)
-        }
-        RuntimeCmd::Force {
-            name,
-            value,
-            edge,
-            server,
-        } => {
-            let resp = match &edge {
-                Some(e) => {
-                    let encoded =
-                        pack_value(&name, edge_var_type(&server, e, &name).as_deref(), &value)?;
-                    post_json(
-                        &format!("{server}/api/edges/{}/runtime/force", url_encode(e)),
-                        &serde_json::json!({ "name": name, "value": encoded }),
-                    )?
-                }
-                None => {
-                    let encoded = parse_value(&server, &name, &value)?;
-                    post_json(
-                        &format!("{server}/api/runtime/forces/{}", url_encode(&name)),
-                        &serde_json::json!({ "value": encoded }),
-                    )?
-                }
-            };
-            println!("{}", serde_json::to_string_pretty(&resp)?);
-            Ok(0)
-        }
-        RuntimeCmd::Unforce { name, edge, server } => {
-            let resp = match &edge {
-                Some(e) => post_json(
-                    &format!("{server}/api/edges/{}/runtime/unforce", url_encode(e)),
-                    &serde_json::json!({ "name": name }),
-                )?,
-                None => delete_json(&format!(
-                    "{server}/api/runtime/forces/{}",
-                    url_encode(&name)
-                ))?,
-            };
-            println!("{}", serde_json::to_string_pretty(&resp)?);
-            Ok(0)
-        }
-        RuntimeCmd::Write {
-            name,
-            value,
-            edge,
-            server,
-        } => {
-            let resp = match &edge {
-                Some(e) => {
-                    let encoded =
-                        pack_value(&name, edge_var_type(&server, e, &name).as_deref(), &value)?;
-                    post_json(
-                        &format!("{server}/api/edges/{}/runtime/write", url_encode(e)),
-                        &serde_json::json!({ "name": name, "value": encoded }),
-                    )?
-                }
-                None => {
-                    let encoded = parse_value(&server, &name, &value)?;
-                    post_json(
-                        &format!("{server}/api/runtime/variables/{}", url_encode(&name)),
-                        &serde_json::json!({ "value": encoded }),
-                    )?
-                }
-            };
-            println!("{}", serde_json::to_string_pretty(&resp)?);
-            Ok(0)
-        }
-    }
-}
-
-/// Convert a human-typed value into the i32 the runtime wire protocol
-/// expects, type-aware via the runtime's snapshot.
-///
-/// Why: the bridge stores all variables — BOOL, INT, REAL, … — in
-/// 32-bit slots and the force/write endpoint takes a raw `i32`. For
-/// REAL the i32 is the IEEE-754 bit pattern of the float, NOT the
-/// integer value. Without type info, `cs runtime force x 50.0` would
-/// have to send `1112014848`. This helper does the conversion so
-/// humans (and agents) can use natural notation.
-///
-/// Strategy:
-///   1. If the value is obviously BOOL ("true"/"false" case-insensitive)
-///      → 0 / 1.
-///   2. Otherwise fetch `/api/runtime/snapshot`, look up the variable,
-///      encode based on its `type_name` (REAL → bit-pack, INT-family
-///      → as-is).
-///   3. If the snapshot doesn't include the variable (runtime not
-///      running yet, or the variable lives in a POU instance the
-///      bridge's snapshot extractor doesn't traverse — a known bridge
-///      bug as of 2026-05), fall back to format-based sniffing: a
-///      decimal point implies REAL, otherwise INT. Print a stderr
-///      note so users know we guessed.
-fn parse_value(server: &str, name: &str, raw: &str) -> Result<i32> {
-    let var_type = snapshot_var_type(server, name).unwrap_or_default();
-    pack_value(name, var_type.as_deref(), raw)
-}
-
-/// Resolve an edge variable's type from the edge runtime's `/status`
-/// (last snapshot, which carries per-variable `type_name`).
-fn edge_var_type(server: &str, edge: &str, name: &str) -> Option<String> {
-    let status = get_json(&format!("{server}/api/edges/{}/status", url_encode(edge))).ok()?;
-    let vars = status.get("last_snapshot")?.get("vars")?.as_array()?;
-    for v in vars {
-        if v.get("name").and_then(|n| n.as_str()) == Some(name) {
-            return v
-                .get("type_name")
-                .and_then(|t| t.as_str())
-                .map(String::from);
-        }
-    }
-    None
-}
-
-/// Bit-pack a human value string into the i32 force/write wire, given the
-/// variable's IEC `var_type` (None = unknown → guess from value format).
-fn pack_value(name: &str, var_type: Option<&str>, raw: &str) -> Result<i32> {
-    // BOOL shortcuts. Case-insensitive because TRUE/FALSE are the IEC
-    // canonical form but agents type either.
-    match raw.to_ascii_lowercase().as_str() {
-        "true" => return Ok(1),
-        "false" => return Ok(0),
-        _ => {}
-    }
-
-    match var_type {
-        Some("BOOL") => {
-            // We already handled TRUE/FALSE above; accept 0/1 too.
-            let n: i32 = raw.parse().with_context(|| {
-                format!("value `{raw}` doesn't fit BOOL (expected TRUE/FALSE/1/0)")
-            })?;
-            Ok(if n != 0 { 1 } else { 0 })
-        }
-        Some("REAL") => {
-            let f: f32 = raw
-                .parse()
-                .with_context(|| format!("value `{raw}` doesn't parse as REAL (32-bit float)"))?;
-            Ok(f.to_bits() as i32)
-        }
-        Some("LREAL") => {
-            anyhow::bail!(
-                "LREAL (64-bit float) doesn't fit the 32-bit force wire — \
-                 use a REAL variable, or write the low 32 bits manually"
-            )
-        }
-        Some(int_type)
-            if matches!(
-                int_type,
-                "INT" | "DINT" | "SINT" | "UINT" | "UDINT" | "USINT" | "BYTE" | "WORD" | "DWORD"
-            ) =>
-        {
-            let n: i64 = raw.parse().with_context(|| {
-                format!("value `{raw}` doesn't parse as integer for {int_type}")
-            })?;
-            // Wire is i32; for unsigned and larger types we just bit-
-            // truncate. Users wanting precise unsigned semantics can
-            // pass the i32 reinterpretation directly.
-            Ok(n as i32)
-        }
-        Some(other) => {
-            anyhow::bail!("don't know how to encode value `{raw}` for type {other} (yet)")
-        }
-        None => {
-            // No type info — guess from format and warn loudly.
-            if raw.contains('.') || raw.contains('e') || raw.contains('E') {
-                let f: f32 = raw.parse().with_context(|| {
-                    format!("value `{raw}` looks like a float but doesn't parse as f32")
-                })?;
-                eprintln!(
-                    "note: runtime didn't expose `{name}`'s type — guessed REAL from value format"
-                );
-                Ok(f.to_bits() as i32)
-            } else {
-                let n: i32 = raw.parse().with_context(|| {
-                    format!("value `{raw}` doesn't parse as i32; if you meant REAL, use `{raw}.0`")
-                })?;
-                eprintln!("note: runtime didn't expose `{name}`'s type — assumed INT family");
-                Ok(n)
-            }
-        }
-    }
-}
-
-/// Best-effort variable type lookup via `/api/runtime/snapshot`. The
-/// snapshot returns one record per live variable with `type_name`. If
-/// the runtime isn't running, or the bridge's extractor doesn't
-/// include this variable's POU, return Ok(None) and let the caller
-/// fall back to format-sniffing.
-fn snapshot_var_type(server: &str, name: &str) -> Result<Option<String>> {
-    let snap = match get_json(&format!("{server}/api/runtime/snapshot")) {
-        Ok(v) => v,
-        Err(_) => return Ok(None),
-    };
-    let vars = match snap.get("vars").and_then(|v| v.as_array()) {
-        Some(a) => a,
-        None => return Ok(None),
-    };
-    for v in vars {
-        if v.get("name").and_then(|n| n.as_str()) == Some(name) {
-            return Ok(v
-                .get("type_name")
-                .and_then(|t| t.as_str())
-                .map(String::from));
-        }
-    }
-    Ok(None)
-}
-
-// =================================================================
-//   Agent heartbeat
-// =================================================================
-//
-// Short-lived `cs` commands ping POST /api/agent/heartbeat at start.
-// The server keeps the "agent active" flag set for ~3 s after the
-// last heartbeat; the IDE renders its takeover overlay while it's
-// set. Read-only commands (check, info, status, symbols, explain,
-// transpile) deliberately skip the heartbeat — querying state isn't
-// "operating" and shouldn't trigger the overlay.
-
-/// Return `Some((server, label))` for commands that should announce
-/// before dispatching, `None` for read-only commands. The label is
-/// what shows up in the IDE banner ("Agent in control · pou create").
-fn announce_target(cmd: &Command) -> Option<(&str, &'static str)> {
-    match cmd {
-        // Static analysis / self-managed — no IDE server to announce to.
-        // (`project check`/`info` operate on a directory on disk.)
-        Command::Check { .. }
-        | Command::Transpile { .. }
-        | Command::Explain { .. }
-        | Command::Symbols { .. }
-        | Command::Project(ProjectCmd::Check { .. })
-        | Command::Project(ProjectCmd::Info { .. })
-        | Command::Agent(_) => None,
-
-        // Everything that talks to the IDE server announces — reads
-        // INCLUDED — so the takeover overlay renders whenever an agent
-        // drives IA2 over the HTTP API, not only on mutations. (Inside a
-        // `cs agent run`/`enter` session the forwarded IA2_AGENT_SESSION
-        // keeps these on the steady session banner instead of flashing.)
-        Command::Project(ProjectCmd::List { server, .. }) => Some((server, "project list")),
-        Command::Project(ProjectCmd::Create { server, .. }) => Some((server, "project create")),
-        Command::Project(ProjectCmd::Open { server, .. }) => Some((server, "project open")),
-        Command::Project(ProjectCmd::Close { server, .. }) => Some((server, "project close")),
-
-        Command::Pou(PouCmd::Create { server, .. }) => Some((server, "pou create")),
-        Command::Pou(PouCmd::Save { server, .. }) => Some((server, "pou save")),
-        Command::Pou(PouCmd::Delete { server, .. }) => Some((server, "pou delete")),
-
-        Command::Device(DeviceCmd::List { server, .. }) => Some((server, "device list")),
-        Command::Device(DeviceCmd::Get { server, .. }) => Some((server, "device get")),
-        Command::Device(DeviceCmd::Create { server, .. }) => Some((server, "device create")),
-        Command::Device(DeviceCmd::Set { server, .. }) => Some((server, "device set")),
-        Command::Device(DeviceCmd::Delete { server, .. }) => Some((server, "device delete")),
-        Command::Device(DeviceCmd::EsiAssemble { server, .. }) => {
-            Some((server, "device esi-assemble"))
-        }
-
-        Command::Edge(EdgeCmd::List { server, .. }) => Some((server, "edge list")),
-        Command::Edge(EdgeCmd::Get { server, .. }) => Some((server, "edge get")),
-        Command::Edge(EdgeCmd::Logs { server, .. }) => Some((server, "edge logs")),
-        Command::Edge(EdgeCmd::Scan { server, .. }) => Some((server, "edge scan")),
-        Command::Edge(EdgeCmd::System { server, .. }) => Some((server, "edge system")),
-        Command::Edge(EdgeCmd::Create { server, .. }) => Some((server, "edge create")),
-        Command::Edge(EdgeCmd::Set { server, .. }) => Some((server, "edge set")),
-        Command::Edge(EdgeCmd::Delete { server, .. }) => Some((server, "edge delete")),
-
-        Command::Iomap(IomapCmd::Get { server, .. }) => Some((server, "iomap get")),
-        Command::Iomap(IomapCmd::Set { server, .. }) => Some((server, "iomap set")),
-        Command::Tasks(TasksCmd::Get { server, .. }) => Some((server, "tasks get")),
-        Command::Northbound(NorthboundCmd::Get { server, .. }) => Some((server, "northbound get")),
-        Command::Northbound(NorthboundCmd::Set { server, .. }) => Some((server, "northbound set")),
-        Command::Tasks(TasksCmd::Set { server, .. }) => Some((server, "tasks set")),
-
-        Command::Library(LibraryCmd::List { server, .. }) => Some((server, "library list")),
-        Command::Library(LibraryCmd::Import { server, .. }) => Some((server, "library import")),
-        Command::Library(LibraryCmd::Remove { server, .. }) => Some((server, "library remove")),
-
-        Command::Probe { server, .. } => Some((server, "probe")),
-        Command::Run { server, .. } => Some((server, "run")),
-        Command::Stop { server, .. } => Some((server, "stop")),
-        Command::Deploy { server, .. } => Some((server, "deploy")),
-
-        Command::Runtime(RuntimeCmd::Status { server, .. }) => Some((server, "runtime status")),
-        Command::Runtime(RuntimeCmd::Pause { server, .. }) => Some((server, "runtime pause")),
-        Command::Runtime(RuntimeCmd::Resume { server, .. }) => Some((server, "runtime resume")),
-        Command::Runtime(RuntimeCmd::Step { server, .. }) => Some((server, "runtime step")),
-        Command::Runtime(RuntimeCmd::Force { server, .. }) => Some((server, "runtime force")),
-        Command::Runtime(RuntimeCmd::Unforce { server, .. }) => Some((server, "runtime unforce")),
-        Command::Runtime(RuntimeCmd::Write { server, .. }) => Some((server, "runtime write")),
-    }
-}
-
-/// Per-process session id. Generated lazily so commands that don't
-/// announce don't pay the cost. Format: `cs-<pid>-<nanos>` — random
-/// enough for "tell agents apart" without pulling the uuid crate.
-fn session_id() -> &'static str {
-    use std::sync::OnceLock;
-    static SESSION: OnceLock<String> = OnceLock::new();
-    SESSION.get_or_init(|| {
-        let pid = std::process::id();
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        format!("cs-{pid}-{nanos:x}")
-    })
-}
-
-/// Fire-and-forget heartbeat. Short timeout because we'd rather miss
-/// the visual cue than hold up a command's actual work.
-///
-/// Session attribution: if the caller is inside a `cs agent run`
-/// wrapper (or a manually-`enter`ed session), the parent's session
-/// id lives in `IA2_AGENT_SESSION`. We forward it so the server's
-/// session-watchdog refreshes the right session instead of starting
-/// a competing transient heartbeat that would race the overlay's
-/// label back and forth.
-fn announce_agent(server: &str, command_label: &str) {
-    let session = std::env::var(SESSION_ENV)
-        .ok()
-        .unwrap_or_else(|| session_id().to_string());
-    let _ = http_agent()
-        .post(&format!("{server}/api/agent/heartbeat"))
-        .timeout(std::time::Duration::from_millis(300))
-        .send_json(serde_json::json!({
-            "command": command_label,
-            "session": session,
-        }));
-}
-
-/// Tiny URL-component escaper. Variable names should be IEC identifiers
-/// (alphanumeric + `_`), but operators sometimes write `instance.pin`
-/// in `cs runtime force foo.bar` — the dot is safe but slashes
-/// wouldn't be. Cover the common cases without pulling a full
-/// percent-encoding crate.
-fn url_encode(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-' | '~') {
-                c.to_string()
-            } else {
-                format!("%{:02X}", c as u32)
-            }
-        })
-        .collect()
-}
-
-/// Build a no-proxy ureq Agent. ureq 2.x auto-picks up `HTTP_PROXY` /
-/// `HTTPS_PROXY` env vars at request time, which routes our localhost
-/// API traffic through the user's developer proxy (Clash etc.). Users
-/// running a system-wide proxy see "Header field didn't end with \n"
-/// because their proxy speaks SOCKS / Trojan, not HTTP. Building an
-/// explicit Agent with no proxy fixes it.
-///
-/// We cache the Agent in a OnceLock so each `cs` invocation pays the
-/// build cost once even if it makes several requests.
-fn http_agent() -> &'static ureq::Agent {
-    use std::sync::OnceLock;
-    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        ureq::AgentBuilder::new()
-            // No `.proxy(...)` call — ureq treats absence as "direct
-            // connection". Without this Agent, the static `ureq::post(...)`
-            // path defaults to reading proxy from env.
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-    })
-}
-
-/// Stores the `--project NAME` value parsed off the command line.
-/// When present, every HTTP request adds an `X-IA2-Project` header
-/// so the server routes the call to the named project; otherwise
-/// the header is omitted and the server uses its active fallback
-/// (back-compat with all the existing single-window flows).
-pub static PROJECT_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-
-/// Wrap a `ureq::Request` so it carries the X-IA2-Project header when
-/// the user passed `--project NAME`. The builder pattern means each
-/// call site is a one-line `with_project_header(http_agent().post(url))`
-/// or similar.
-fn with_project_header(req: ureq::Request) -> ureq::Request {
-    if let Some(name) = PROJECT_OVERRIDE.get() {
-        req.set("X-IA2-Project", name)
-    } else {
-        req
-    }
-}
-
-fn post_json(url: &str, body: &impl serde::Serialize) -> Result<serde_json::Value> {
-    let resp = with_project_header(http_agent().post(url))
-        .set("Content-Type", "application/json")
-        .send_json(body)
-        .map_err(|e| anyhow::anyhow!("POST {url}: {e}"))?;
-    let value: serde_json::Value = resp
-        .into_json()
-        .map_err(|e| anyhow::anyhow!("decode JSON from {url}: {e}"))?;
-    Ok(value)
-}
-
-fn get_json(url: &str) -> Result<serde_json::Value> {
-    let resp = with_project_header(http_agent().get(url))
-        .call()
-        .map_err(|e| anyhow::anyhow!("GET {url}: {e}"))?;
-    let value: serde_json::Value = resp
-        .into_json()
-        .map_err(|e| anyhow::anyhow!("decode JSON from {url}: {e}"))?;
-    Ok(value)
-}
-
-fn delete_json(url: &str) -> Result<serde_json::Value> {
-    let resp = with_project_header(http_agent().delete(url))
-        .call()
-        .map_err(|e| anyhow::anyhow!("DELETE {url}: {e}"))?;
-    let value: serde_json::Value = resp
-        .into_json()
-        .map_err(|e| anyhow::anyhow!("decode JSON from {url}: {e}"))?;
-    Ok(value)
-}
-
-// =================================================================
-//   Shared helpers
-// =================================================================
-
-/// Map a file path to its POU language by extension. `.ld.json` is the
-/// canonical LD extension (see MEMORY/graphical-languages.md); plain
-/// `.st` is ST. Anything else is an error rather than a silent default
-/// — agents should know which path they're on.
-fn language_for_path(path: &Path) -> Result<PouLanguage> {
-    let name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .with_context(|| format!("invalid filename: {}", path.display()))?;
-    // Order: longest known suffix first (`.ld.json` must beat `.st`'s
-    // would-be ".json" eyeball check; `.fbd.json` and `.sfc.json` must
-    // not collide with a generic `.json`).
-    if name.ends_with(".ld.json") {
-        Ok(PouLanguage::Ld)
-    } else if name.ends_with(".fbd.json") {
-        Ok(PouLanguage::Fbd)
-    } else if name.ends_with(".sfc.json") {
-        Ok(PouLanguage::Sfc)
-    } else if name.ends_with(".st") {
-        Ok(PouLanguage::St)
-    } else {
-        bail!(
-            "can't infer language from filename {name:?} — expected .st, .ld.json, .fbd.json, or .sfc.json"
-        )
-    }
-}
-
-/// Open a project store at `path`. Resolves `.` to the current working
-/// directory so `cs project check` (no args) does the right thing.
-fn open_project(path: &Path) -> Result<ProjectStore> {
-    let abs = if path.as_os_str() == "." {
-        std::env::current_dir().context("resolving current directory")?
-    } else {
-        path.to_path_buf()
-    };
-    ProjectStore::open(abs.clone()).with_context(|| format!("opening project at {}", abs.display()))
 }

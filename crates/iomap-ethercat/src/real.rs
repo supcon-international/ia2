@@ -299,24 +299,16 @@ impl RealEthercat {
             ));
         }
 
-        // Validate channels up front (same shape as sim).
+        // Validate channel references up front (unique names + known slave
+        // indices), same shape as sim.
+        validate::validate_channel_refs(&config.channels, &config.slaves)
+            .map_err(IoError::Connect)?;
+        // Rebuilt for the gear checks below: declared slave indices and the
+        // set of PDO channel names gear params must not shadow.
         let known_slaves: std::collections::HashSet<u16> =
             config.slaves.iter().map(|s| s.index).collect();
-        let mut seen_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for ch in &config.channels {
-            if !seen_names.insert(ch.name.as_str()) {
-                return Err(IoError::Connect(format!(
-                    "duplicate channel name '{}'",
-                    ch.name
-                )));
-            }
-            if !known_slaves.is_empty() && !known_slaves.contains(&ch.slave_index) {
-                return Err(IoError::Connect(format!(
-                    "channel '{}' references unknown slave_index={}",
-                    ch.name, ch.slave_index
-                )));
-            }
-        }
+        let pdo_names: std::collections::HashSet<&str> =
+            config.channels.iter().map(|c| c.name.as_str()).collect();
 
         // Shape problems (zero-length / misaligned entries) are knowable
         // before touching the bus — reject them before spawning anything.
@@ -326,7 +318,7 @@ impl RealEthercat {
         // Gear axes: channel names must be unique (across gears and within
         // each gear) and must not shadow PDO channels — the routing check in
         // read/write_channel runs first and would silently eat a collision.
-        crate::gear::validate_channels(&config.gear, &seen_names).map_err(IoError::Connect)?;
+        crate::gear::validate_channels(&config.gear, &pdo_names).map_err(IoError::Connect)?;
         // Every referenced slave must exist in the declared topology.
         for g in &config.gear {
             if !known_slaves.is_empty() && !known_slaves.contains(&g.slave_index) {
@@ -402,11 +394,11 @@ impl RealEthercat {
                 // The bus is walked and the cyclic worker is live — now
                 // hold the discovered topology against the configuration.
                 // Identity first (wrong/missing module), then PDI ranges
-                // (channel windows that the real PDI cannot serve). Fail
-                // the connect with everything found at once, instead of
-                // letting each problem surface later as per-cycle
-                // Transport errors or, worse, bits driven on the wrong
-                // module.
+                // (channel windows that the real PDI cannot serve), then the
+                // gear axes' target/actual/status offsets. Fail the connect
+                // with everything found at once, instead of letting each
+                // problem surface later as per-cycle Transport errors or,
+                // worse, bits driven on the wrong module.
                 let mut problems: Vec<String> = Vec::new();
                 if let Err(m) = validate::validate_identities(&config.slaves, &discovered) {
                     problems.push(m);
@@ -414,47 +406,7 @@ impl RealEthercat {
                 if let Err(m) = validate::validate_pdi_ranges(&config.channels, &discovered) {
                     problems.push(m);
                 }
-                for g in &config.gear {
-                    let find = |idx: u16| discovered.iter().find(|d| d.index == idx);
-                    match find(g.slave_index) {
-                        Some(d) => {
-                            if g.target_pos_offset as usize + 4 > d.output_bytes as usize {
-                                problems.push(format!(
-                                    "gear follower slave {} target_pos_offset {}+4 exceeds output PDI ({} B)",
-                                    g.slave_index, g.target_pos_offset, d.output_bytes
-                                ));
-                            }
-                            if g.actual_pos_offset as usize + 4 > d.input_bytes as usize
-                                || g.status_word_offset as usize + 2 > d.input_bytes as usize
-                            {
-                                problems.push(format!(
-                                    "gear follower slave {} actual/status offsets exceed input PDI ({} B)",
-                                    g.slave_index, d.input_bytes
-                                ));
-                            }
-                        }
-                        None => problems.push(format!(
-                            "gear follower slave_index {} not on the discovered bus",
-                            g.slave_index
-                        )),
-                    }
-                    if let project::GearMaster::Axis {
-                        slave_index,
-                        actual_pos_offset,
-                    } = g.master
-                    {
-                        match find(slave_index) {
-                            Some(d) if (actual_pos_offset as usize + 4) <= d.input_bytes as usize => {}
-                            Some(d) => problems.push(format!(
-                                "gear master slave {} actual_pos_offset {}+4 exceeds input PDI ({} B)",
-                                slave_index, actual_pos_offset, d.input_bytes
-                            )),
-                            None => problems.push(format!(
-                                "gear master slave_index {slave_index} not on the discovered bus"
-                            )),
-                        }
-                    }
-                }
+                problems.extend(validate::validate_gear_offsets(&config.gear, &discovered));
                 if !problems.is_empty() {
                     // A failed connect must not leak a live cyclic thread
                     // driving the bus: signal it down and join (bounded).

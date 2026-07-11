@@ -32,25 +32,10 @@ pub struct SimEthercat {
 
 impl SimEthercat {
     pub async fn connect(name: String, config: &EthercatConfig) -> Result<Self, IoError> {
-        // Validation: each channel must point at a known slave index, and
-        // no two channels may share a name.
-        let known_slaves: std::collections::HashSet<u16> =
-            config.slaves.iter().map(|s| s.index).collect();
-        let mut seen_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for ch in &config.channels {
-            if !seen_names.insert(ch.name.as_str()) {
-                return Err(IoError::Connect(format!(
-                    "duplicate channel name '{}'",
-                    ch.name
-                )));
-            }
-            if !known_slaves.is_empty() && !known_slaves.contains(&ch.slave_index) {
-                return Err(IoError::Connect(format!(
-                    "channel '{}' references unknown slave_index={}",
-                    ch.name, ch.slave_index
-                )));
-            }
-        }
+        // Each channel must point at a known slave index, and no two
+        // channels may share a name — same references check as the real path.
+        validate::validate_channel_refs(&config.channels, &config.slaves)
+            .map_err(IoError::Connect)?;
 
         let channels: HashMap<String, EthercatChannel> = config
             .channels
