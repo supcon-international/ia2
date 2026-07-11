@@ -430,7 +430,7 @@ async fn agent_watchdog(state: AppState) {
     loop {
         tick.tick().await;
         let event = {
-            let mut s = state.agent.lock().expect("agent mutex");
+            let mut s = state.agent.lock();
             if !s.active {
                 continue;
             }
@@ -551,7 +551,7 @@ fn try_open_last_project(state: &AppState) {
     // authoritative source and we skip the legacy `last_opened` path
     // — multi-window users have multiple projects to restore.
     crate::routes::load_open_projects(state);
-    if !state.projects.lock().expect("projects mutex").is_empty() {
+    if !state.projects.lock().is_empty() {
         return;
     }
     // Legacy fallback (pre-multi-project IDE installations): the
@@ -564,11 +564,7 @@ fn try_open_last_project(state: &AppState) {
     match ProjectStore::open(path.clone()) {
         Ok(store) => {
             tracing::info!(path = %store.root().display(), "reopened last project");
-            state
-                .projects
-                .lock()
-                .expect("projects mutex")
-                .insert_and_activate(store);
+            state.projects.lock().insert_and_activate(store);
         }
         Err(e) => tracing::warn!(?path, %e, "failed to reopen last project"),
     }

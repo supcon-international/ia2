@@ -895,14 +895,22 @@ fn main() {
 // =================================================================
 
 fn cmd_check(files: &[PathBuf], json: bool, explain: bool) -> Result<i32> {
-    let mut all: Vec<FileDiagnostics> = Vec::with_capacity(files.len());
-    let mut any_errors = false;
-
+    // The files are checked TOGETHER: each one is analysed with the
+    // others as declaration context, so `cs check pous/*.st` resolves
+    // FUNCTION_BLOCKs declared in sibling files exactly like a project
+    // compile would. A single file behaves as before (empty context).
+    let mut inputs = Vec::with_capacity(files.len());
     for file in files {
         let language = language_for_path(file)?;
         let source =
             std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
-        let diags = ironplc_bridge::check_pou_source(&source, language);
+        inputs.push((file.display().to_string(), source, language));
+    }
+    let per_file = ironplc_bridge::check_sources_together(&inputs);
+
+    let mut all: Vec<FileDiagnostics> = Vec::with_capacity(files.len());
+    let mut any_errors = false;
+    for (file, diags) in files.iter().zip(per_file) {
         if !diags.is_empty() {
             any_errors = true;
         }

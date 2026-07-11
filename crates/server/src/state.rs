@@ -1,4 +1,5 @@
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::time::Instant;
 
 use iomap_modbus::DemoSlave;
@@ -279,7 +280,7 @@ impl AppState {
     /// edge is the watchdog's job.
     pub fn record_agent_heartbeat(&self, command: Option<String>, session_id: Option<String>) {
         let edge = {
-            let mut s = self.agent.lock().expect("agent mutex");
+            let mut s = self.agent.lock();
             let was_active = s.active;
             let now = Instant::now();
             // If a session is open and the heartbeat's session_id
@@ -303,8 +304,9 @@ impl AppState {
             let label = self
                 .agent
                 .lock()
-                .ok()
-                .and_then(|s| s.session.as_ref().map(|sess| sess.label.clone()));
+                .session
+                .as_ref()
+                .map(|sess| sess.label.clone());
             let _ = self.event_tx.send(AppEvent::AgentActivity(AgentActivity {
                 active: true,
                 command,
@@ -335,7 +337,7 @@ impl AppState {
             last_heartbeat: Instant::now(),
         };
         {
-            let mut s = self.agent.lock().expect("agent mutex");
+            let mut s = self.agent.lock();
             s.session = Some(session.clone());
             s.last_heartbeat = Some(Instant::now());
             s.active = true;
@@ -363,7 +365,7 @@ impl AppState {
     /// Returns `true` if a session was actually ended.
     pub fn end_agent_session(&self, id: Option<&str>) -> bool {
         let closed = {
-            let mut s = self.agent.lock().expect("agent mutex");
+            let mut s = self.agent.lock();
             match s.session.as_ref() {
                 Some(sess) if id.is_none_or(|i| i == sess.id) => {
                     s.session = None;
@@ -403,7 +405,7 @@ impl AppState {
     /// an already-open takeover session until the next change, leaving
     /// the overlay wrong. Mirrors the event the change-path emits.
     pub fn current_agent_activity(&self) -> AgentActivity {
-        let s = self.agent.lock().expect("agent mutex");
+        let s = self.agent.lock();
         let since_ms = s
             .last_heartbeat
             .map(|t| t.elapsed().as_millis() as u64)

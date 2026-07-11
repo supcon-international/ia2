@@ -3630,6 +3630,7 @@ dependencies = [
  "iomap-modbus",
  "ironplc-bridge",
  "libc",
+ "parking_lot",
  "project",
  "serde",
  "serde_json",

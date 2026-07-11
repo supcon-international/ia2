@@ -295,8 +295,8 @@ pub struct RunRequest {
 
 pub async fn health(State(state): State<AppState>) -> Json<HealthStatus> {
     let elapsed = state.start_time.elapsed().as_secs();
-    let project_open = !state.projects.lock().expect("projects mutex").is_empty();
-    let program_running = state.program.lock().expect("program mutex").is_some();
+    let project_open = !state.projects.lock().is_empty();
+    let program_running = state.program.lock().is_some();
     Json(HealthStatus {
         status: "ok".into(),
         uptime_secs: elapsed,
@@ -420,11 +420,7 @@ pub async fn create_project(
     };
     save_last_opened(store.root());
     let name_for_event = info.name.clone();
-    state
-        .projects
-        .lock()
-        .expect("projects mutex")
-        .insert_and_activate(store);
+    state.projects.lock().insert_and_activate(store);
     save_open_projects(&state);
     state.emit_mutation(
         name_for_event,
@@ -453,11 +449,7 @@ pub async fn open_project(
     // clients can now have several projects open simultaneously, each
     // pinned to one window via `X-IA2-Project`. The newly-opened one
     // becomes the active fallback for header-less requests.
-    state
-        .projects
-        .lock()
-        .expect("projects mutex")
-        .insert_and_activate(store);
+    state.projects.lock().insert_and_activate(store);
     save_open_projects(&state);
     state.emit_mutation(
         name_for_event,
@@ -480,7 +472,7 @@ pub async fn close_project(
     // belongs to that project.
     let target = resolve_project_name(&state, &project)?;
     {
-        let mut prog = state.program.lock().expect("program");
+        let mut prog = state.program.lock();
         if let Some(rp) = prog.as_ref() {
             if rp.project_name == target {
                 if let Some(rp) = prog.take() {
@@ -491,11 +483,7 @@ pub async fn close_project(
     }
     // Tear down any ssh tunnels attached to this project's edges.
     state.attachments.detach_all_for_project(&target);
-    let removed = state
-        .projects
-        .lock()
-        .expect("projects mutex")
-        .remove(&target);
+    let removed = state.projects.lock().remove(&target);
     if !removed {
         return Err(ApiError::NoProject);
     }
@@ -506,14 +494,13 @@ pub async fn close_project(
     let running_for_target = state
         .program
         .lock()
-        .expect("program")
         .as_ref()
         .map(|rp| rp.project_name.clone())
         == Some(target.clone());
     if running_for_target {
-        *state.last_snapshot.lock().expect("last_snapshot") = None;
-        *state.last_error.lock().expect("last_error") = None;
-        *state.running_info.lock().expect("running_info") = None;
+        *state.last_snapshot.lock() = None;
+        *state.last_error.lock() = None;
+        *state.running_info.lock() = None;
     }
     state.emit_mutation(target, topic::PROJECT_META, MutationDetail::ProjectClosed);
     Ok(Json(RunResponse { ok: true }))
@@ -524,7 +511,7 @@ pub async fn close_project(
 /// `/api/projects` (the disk-scan listing); this is the in-memory
 /// set the multi-window IDE picks from.
 pub async fn list_open_projects(State(state): State<AppState>) -> Json<OpenProjectsList> {
-    let guard = state.projects.lock().expect("projects mutex");
+    let guard = state.projects.lock();
     let active = guard.active_name().map(str::to_string);
     let projects = guard
         .iter()
@@ -1652,16 +1639,19 @@ pub async fn check(
     // Check against the open project when there is one, so FBs declared
     // in sibling files resolve (the editor-squiggle counterpart of the
     // project compile). No open project — agents checking a loose
-    // snippet — falls back to the isolated check.
-    let diags = with_project(&state, &project, |store| {
-        Ok(ironplc_bridge::check_pou_in_project(
-            store,
-            &body,
-            language,
-            q.path.as_deref(),
-        ))
+    // snippet — falls back to the isolated check. Either way the parse
+    // runs on the blocking pool, unlocked: this fires on every editor
+    // debounce and re-parses all sibling POUs.
+    let store = owned_store(&state, &project).ok();
+    let path = q.path.clone();
+    let diags = tokio::task::spawn_blocking(move || match &store {
+        Some(store) => {
+            ironplc_bridge::check_pou_in_project(store, &body, language, path.as_deref())
+        }
+        None => ironplc_bridge::check_pou_source(&body, language),
     })
-    .unwrap_or_else(|_| ironplc_bridge::check_pou_source(&body, language));
+    .await
+    .unwrap_or_default();
     Json(diags)
 }
 
@@ -1675,7 +1665,11 @@ pub async fn validate_project(
     State(state): State<AppState>,
     project: ProjectName,
 ) -> Result<Json<Vec<CheckDiagnostic>>, ApiError> {
-    with_project(&state, &project, |store| {
+    // Whole-project compile — run it unlocked on the blocking pool, same
+    // rationale as the run handler.
+    let store = owned_store(&state, &project)?;
+    tokio::task::spawn_blocking(move || -> Result<Vec<CheckDiagnostic>, ApiError> {
+        let store = &store;
         let diag = |code: &str, message: String| CheckDiagnostic {
             severity: "error".into(),
             code: code.into(),
@@ -1693,30 +1687,11 @@ pub async fn validate_project(
         };
         let tasks = store.read_tasks()?.unwrap_or_default();
         let mut out = Vec::new();
-        // ADR-0001: multi-PROGRAM projects run per-instance containers,
-        // so VAR_GLOBAL can't be shared across PROGRAMs. Same check the
-        // /api/run handler enforces — surfaced here so agents see it at
-        // validate time, before a run attempt.
-        if tasks.programs.len() > 1 {
-            let globals = ironplc_bridge::extract_project_global_vars(store);
-            if !globals.is_empty() {
-                let list = globals
-                    .iter()
-                    .map(|(file, var)| format!("'{var}' in {file}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                out.push(diag(
-                    "project-validate-globals",
-                    format!(
-                        "tasks.toml schedules {} PROGRAMs but the project declares \
-                         VAR_GLOBAL ({list}). Globals are not shared across PROGRAM \
-                         instances (each runs in an isolated container); move shared \
-                         state behind I/O mappings or FUNCTION_BLOCK parameters, or \
-                         schedule a single PROGRAM.",
-                        tasks.programs.len(),
-                    ),
-                ));
-            }
+        // ADR-0001 gate — same bridge implementation the run path
+        // enforces, surfaced at validate time so agents see it before a
+        // run attempt.
+        if let Err(msg) = ironplc_bridge::reject_shared_globals(store, &tasks) {
+            out.push(diag("project-validate-globals", msg));
         }
         // Compile exactly what the run path would execute: one container
         // per PROGRAM instance. Convert any error into a single
@@ -1750,6 +1725,8 @@ pub async fn validate_project(
         }
         Ok(out)
     })
+    .await
+    .map_err(|e| ApiError::Internal(format!("validate task failed: {e}")))?
     .map(Json)
 }
 
@@ -1873,99 +1850,96 @@ pub async fn run(
     //                                 compile_project_with_tasks (synthetic
     //                                 single-instance schedule; tasks.toml
     //                                 untouched on disk)
-    let (units, device_specs, mappings) = {
-        let mut projects_guard = state.projects.lock().expect("projects mutex");
+    // Clone the store OUT of the registry lock, then compile unlocked on a
+    // blocking thread. A full parse→analyze→codegen over every POU takes
+    // long enough that holding the global projects mutex for it would
+    // stall every other window's requests — and it would pin a tokio
+    // worker with CPU-bound work. The store is just {root, manifest};
+    // sources are read from disk on demand inside the compile.
+    let store = {
+        let mut projects_guard = state.projects.lock();
         // Locate the project in the registry; mark it active as a
         // side-effect so subsequent header-less requests follow this
         // window. Error if the named project isn't open.
         if !projects_guard.set_active(&project_name) {
             return Err(ApiError::NoProject);
         }
-        let store = projects_guard
+        projects_guard
             .get(&project_name)
-            .ok_or(ApiError::NoProject)?;
-
-        // Determine the effective Tasks for this run — tasks.toml when
-        // running the whole project, synthesised single-program when
-        // doing an ad-hoc run from a specific PROGRAM.
-        let effective_tasks = match req.program.as_deref() {
-            None => store.read_tasks()?.unwrap_or_default(),
-            Some(name) => single_program_tasks(name),
-        };
-
-        // ADR-0001 constraint: multi-PROGRAM projects run one container
-        // per PROGRAM instance, which isolates the address spaces — a
-        // VAR_GLOBAL would be duplicated into every instance instead of
-        // shared, and the copies would silently diverge. Refuse loudly
-        // with the fix spelled out. Single-PROGRAM projects keep their
-        // historical globals behaviour.
-        if effective_tasks.programs.len() > 1 {
-            let globals = ironplc_bridge::extract_project_global_vars(store);
-            if !globals.is_empty() {
-                let list = globals
-                    .iter()
-                    .map(|(file, var)| format!("'{var}' in {file}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                return Err(ApiError::BadRequest(format!(
-                    "tasks.toml schedules {} PROGRAMs but the project declares \
-                     VAR_GLOBAL ({list}). Each PROGRAM instance runs in its own \
-                     isolated container, so globals are NOT shared across PROGRAMs \
-                     — every instance would get a private copy that silently \
-                     diverges. Move the shared state behind I/O mappings or \
-                     FUNCTION_BLOCK parameters, or reduce tasks.toml to a single \
-                     PROGRAM.",
-                    effective_tasks.programs.len(),
-                )));
-            }
-        }
-
-        let units = match (req.program.as_deref(), req.file_path.as_deref()) {
-            (None, _) => {
-                // Whole-project schedule: one unit per tasks.toml
-                // PROGRAM instance, each with its own container and
-                // its own task's interval/priority.
-                ironplc_bridge::compile_project_units(store, &effective_tasks)?
-            }
-            (Some(name), Some(file_path)) => {
-                // Ad-hoc isolated run: compile only the named file's
-                // source + a single-PROGRAM CONFIGURATION. ironplc's
-                // debug section then only knows about this file's
-                // declarations, so Monitor + /api/runtime/snapshot show
-                // exactly the variables the user is looking at.
-                let language = store.pou_file_language(file_path)?;
-                let source = store.read_pou_source(file_path)?;
-                let tasks = single_program_tasks(name);
-                let (container, metadata) =
-                    ironplc_bridge::compile_isolated_source_full(&source, language, &tasks)?;
-                vec![adhoc_unit(&tasks, container, metadata.retain_vars)]
-            }
-            (Some(name), None) => {
-                // Ad-hoc but no file scope — fall back to whole-project
-                // concatenation with a single-PROGRAM schedule. Other
-                // files' variables WILL bleed into the debug section
-                // (ironplc limitation); document this if a client hits
-                // it.
-                let tasks = single_program_tasks(name);
-                let (container, metadata) =
-                    ironplc_bridge::compile_project_with_tasks_full(store, &tasks)?;
-                vec![adhoc_unit(&tasks, container, metadata.retain_vars)]
-            }
-        };
-        let devices = store.list_devices()?;
-        let iomap = store.read_iomap()?;
-        let specs = devices
-            .into_iter()
-            .map(|d| DeviceSpec {
-                name: d.name,
-                config: d.config,
-            })
-            .collect::<Vec<_>>();
-        (units, specs, iomap.mappings)
+            .ok_or(ApiError::NoProject)?
+            .clone()
     };
+    let req_program = req.program.clone();
+    let req_file_path = req.file_path.clone();
+    let (units, device_specs, mappings) =
+        tokio::task::spawn_blocking(move || -> Result<_, ApiError> {
+            let store = &store;
+            let req = RunRequest {
+                program: req_program,
+                file_path: req_file_path,
+            };
+
+            // Determine the effective Tasks for this run — tasks.toml when
+            // running the whole project, synthesised single-program when
+            // doing an ad-hoc run from a specific PROGRAM.
+            let effective_tasks = match req.program.as_deref() {
+                None => store.read_tasks()?.unwrap_or_default(),
+                Some(name) => single_program_tasks(name),
+            };
+
+            // ADR-0001 gate — one authoritative implementation in the bridge,
+            // shared with /api/project/validate and the edge runtime.
+            ironplc_bridge::reject_shared_globals(store, &effective_tasks)
+                .map_err(ApiError::BadRequest)?;
+
+            let units = match (req.program.as_deref(), req.file_path.as_deref()) {
+                (None, _) => {
+                    // Whole-project schedule: one unit per tasks.toml
+                    // PROGRAM instance, each with its own container and
+                    // its own task's interval/priority.
+                    ironplc_bridge::compile_project_units(store, &effective_tasks)?
+                }
+                (Some(name), Some(file_path)) => {
+                    // Ad-hoc isolated run: compile only the named file's
+                    // source + a single-PROGRAM CONFIGURATION. ironplc's
+                    // debug section then only knows about this file's
+                    // declarations, so Monitor + /api/runtime/snapshot show
+                    // exactly the variables the user is looking at.
+                    let language = store.pou_file_language(file_path)?;
+                    let source = store.read_pou_source(file_path)?;
+                    let tasks = single_program_tasks(name);
+                    let (container, metadata) =
+                        ironplc_bridge::compile_isolated_source_full(&source, language, &tasks)?;
+                    vec![adhoc_unit(&tasks, container, metadata.retain_vars)]
+                }
+                (Some(name), None) => {
+                    // Ad-hoc but no file scope — fall back to whole-project
+                    // concatenation with a single-PROGRAM schedule. Other
+                    // files' variables WILL bleed into the debug section
+                    // (ironplc limitation); document this if a client hits
+                    // it.
+                    let tasks = single_program_tasks(name);
+                    let (container, metadata) =
+                        ironplc_bridge::compile_project_with_tasks_full(store, &tasks)?;
+                    vec![adhoc_unit(&tasks, container, metadata.retain_vars)]
+                }
+            };
+            let devices = store.list_devices()?;
+            let iomap = store.read_iomap()?;
+            let specs = devices
+                .into_iter()
+                .map(|d| DeviceSpec {
+                    name: d.name,
+                    config: d.config,
+                })
+                .collect::<Vec<_>>();
+            Ok((units, specs, iomap.mappings))
+        })
+        .await
+        .map_err(|e| ApiError::Internal(format!("compile task failed: {e}")))??;
 
     {
-        let mut guard = state.program.lock().expect("program mutex");
+        let mut guard = state.program.lock();
         if let Some(old) = guard.take() {
             old.handle.stop();
         }
@@ -1981,7 +1955,7 @@ pub async fn run(
     let last_snapshot_cache = state.last_snapshot.clone();
     // Fresh run wipes the prior error; if this run faults, the forwarder
     // below refills it when the snapshot stream closes.
-    *state.last_error.lock().expect("last_error mutex") = None;
+    *state.last_error.lock() = None;
 
     let fault_state = state.clone();
     let fault_handle = handle.clone();
@@ -1997,7 +1971,7 @@ pub async fn run(
             tokio::select! {
                 res = rx.recv() => match res {
                     Ok(snap) => {
-                        *last_snapshot_cache.lock().expect("last_snapshot mutex") =
+                        *last_snapshot_cache.lock() =
                             Some(snap.clone());
                         let _ = event_tx.send(AppEvent::Snapshot(snap));
                     }
@@ -2023,15 +1997,15 @@ pub async fn run(
         // and emit Error + Stopped so /api/runtime/status and SSE watchers
         // see the fault instead of a forever-stale "running".
         if let Some(msg) = fault_handle.fault() {
-            *fault_state.last_error.lock().expect("last_error mutex") = Some(msg.clone());
+            *fault_state.last_error.lock() = Some(msg.clone());
             {
-                let mut guard = fault_state.program.lock().expect("program mutex");
+                let mut guard = fault_state.program.lock();
                 if guard
                     .as_ref()
                     .is_some_and(|rp| rp.handle.same_run(&fault_handle))
                 {
                     guard.take();
-                    *fault_state.running_info.lock().expect("running_info mutex") = None;
+                    *fault_state.running_info.lock() = None;
                 }
             }
             let _ = fault_state.event_tx.send(AppEvent::Error(msg));
@@ -2039,14 +2013,10 @@ pub async fn run(
         }
     });
 
-    state
-        .program
-        .lock()
-        .expect("program mutex")
-        .replace(RunningProgram {
-            project_name: project_name.clone(),
-            handle,
-        });
+    state.program.lock().replace(RunningProgram {
+        project_name: project_name.clone(),
+        handle,
+    });
 
     // Record what kind of run this is so /api/runtime/status can label
     // the Monitor pane on a fresh page load (which would otherwise have
@@ -2067,7 +2037,6 @@ pub async fn run(
             let programs = state
                 .projects
                 .lock()
-                .expect("projects mutex")
                 .get(&project_name)
                 .and_then(|s| s.read_tasks().ok().flatten())
                 .map(|t| t.programs.into_iter().map(|p| p.program).collect())
@@ -2075,7 +2044,7 @@ pub async fn run(
             Some(RunningInfo::Scheduled { programs })
         }
     };
-    *state.running_info.lock().expect("running_info mutex") = info;
+    *state.running_info.lock() = info;
 
     let _ = state.event_tx.send(AppEvent::Started);
 
@@ -2086,10 +2055,10 @@ pub async fn stop(State(state): State<AppState>) -> Json<RunResponse> {
     // Global stop — only one program can be running at a time
     // (hardware constraint), so a single `/api/stop` always targets
     // it regardless of which window the request came from.
-    if let Some(rp) = state.program.lock().expect("program mutex").take() {
+    if let Some(rp) = state.program.lock().take() {
         rp.handle.stop();
     }
-    *state.running_info.lock().expect("running_info mutex") = None;
+    *state.running_info.lock() = None;
     let _ = state.event_tx.send(AppEvent::Stopped);
     Json(RunResponse { ok: true })
 }
@@ -2143,7 +2112,7 @@ pub async fn events(
 /// project was just closed). Lets agents poll one-shot without
 /// subscribing to /api/events SSE.
 pub async fn runtime_snapshot(State(state): State<AppState>) -> Json<Option<VarSnapshot>> {
-    Json(state.last_snapshot.lock().expect("last_snapshot").clone())
+    Json(state.last_snapshot.lock().clone())
 }
 
 #[derive(Debug, Serialize, TS)]
@@ -2195,11 +2164,11 @@ pub async fn runtime_status(
     State(state): State<AppState>,
     project: ProjectName,
 ) -> Json<RuntimeStatus> {
-    let running = state.program.lock().expect("program").is_some();
+    let running = state.program.lock().is_some();
     // Project-scoped fields: pulled from whichever project the
     // header (or active fallback) names. None if no project matched.
     let (project_name, programs, devices) = {
-        let guard = state.projects.lock().expect("projects mutex");
+        let guard = state.projects.lock();
         let store = match project.as_deref() {
             Some(name) => guard.get(name),
             None => guard.active(),
@@ -2217,14 +2186,14 @@ pub async fn runtime_status(
             None => (None, vec![], vec![]),
         }
     };
-    let snap = state.last_snapshot.lock().expect("last_snapshot").clone();
-    let last_error = state.last_error.lock().expect("last_error").clone();
-    let running_info = state.running_info.lock().expect("running_info").clone();
+    let snap = state.last_snapshot.lock().clone();
+    let last_error = state.last_error.lock().clone();
+    let running_info = state.running_info.lock().clone();
     // Mode + forces come from the live ProgramHandle, when there is
     // one. Clone the handle out of the mutex briefly to avoid holding
     // the sync lock across the calls.
     let (mode, forces) = {
-        let guard = state.program.lock().expect("program");
+        let guard = state.program.lock();
         match guard.as_ref() {
             Some(rp) => {
                 let forces = rp
@@ -2333,7 +2302,6 @@ fn live_program(state: &AppState) -> Result<ProgramHandle, ApiError> {
     state
         .program
         .lock()
-        .expect("program")
         .as_ref()
         .map(|rp| rp.handle.clone())
         .ok_or(ApiError::Conflict("no program running".into()))
@@ -2406,7 +2374,6 @@ pub async fn list_runtime_forces(State(state): State<AppState>) -> Json<Vec<Forc
     let forces = state
         .program
         .lock()
-        .expect("program")
         .as_ref()
         .map(|rp| {
             rp.handle
@@ -2697,12 +2664,21 @@ fn resolve_user_path(raw: &str) -> PathBuf {
     }
 }
 
+/// Clone the addressed project's store out of the registry lock. For
+/// handlers that go on to do CPU-bound work (compile / whole-project
+/// check): the clone is `{root, manifest}`-cheap, and compiling unlocked
+/// on `spawn_blocking` keeps the global registry responsive to every
+/// other window. Prefer `with_project` for quick metadata reads.
+fn owned_store(state: &AppState, project: &ProjectName) -> Result<ProjectStore, ApiError> {
+    with_project(state, project, |store| Ok(store.clone()))
+}
+
 fn with_project<T>(
     state: &AppState,
     project: &ProjectName,
     f: impl FnOnce(&ProjectStore) -> Result<T, ApiError>,
 ) -> Result<T, ApiError> {
-    let mut guard = state.projects.lock().expect("projects mutex");
+    let mut guard = state.projects.lock();
     let store = match project.as_deref() {
         Some(name) => {
             if !guard.set_active(name) {
@@ -2740,7 +2716,7 @@ fn emit_mutation(
 /// callsites that need to tag the event with `project: …` but don't
 /// need the full store.
 fn resolve_project_name(state: &AppState, project: &ProjectName) -> Result<String, ApiError> {
-    let guard = state.projects.lock().expect("projects mutex");
+    let guard = state.projects.lock();
     match project.as_deref() {
         Some(name) => {
             if guard.get(name).is_some() {
@@ -2766,7 +2742,7 @@ fn resolve_project_name(state: &AppState, project: &ProjectName) -> Result<Strin
 /// projects so the file travels with the user's workspace.
 pub fn save_open_projects(state: &AppState) {
     let path = open_projects_state_path();
-    let guard = state.projects.lock().expect("projects mutex");
+    let guard = state.projects.lock();
     let paths: Vec<String> = guard
         .iter()
         .map(|store| store.root().display().to_string())
@@ -2807,7 +2783,7 @@ pub fn load_open_projects(state: &AppState) {
             return;
         }
     };
-    let mut guard = state.projects.lock().expect("projects mutex");
+    let mut guard = state.projects.lock();
     for p in &payload.paths {
         match ProjectStore::open(PathBuf::from(p)) {
             Ok(store) => guard.insert_and_activate(store),

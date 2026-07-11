@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 axum.workspace = true
 tokio.workspace = true
+parking_lot.workspace = true
 tokio-stream.workspace = true
 futures-util.workspace = true
 tower.workspace = true

@@ -412,6 +412,43 @@ pub fn compile_project_units(
 /// surface. VAR_GLOBAL inside a stray CONFIGURATION block is ignored
 /// for the same reason the compile path ignores it: those blocks are
 /// stripped before compilation.
+/// ADR-0001 gate, in its ONE authoritative form: multi-PROGRAM projects
+/// run one container per PROGRAM instance, which isolates the address
+/// spaces — a `VAR_GLOBAL` would be duplicated into every instance
+/// instead of shared, and the copies would silently diverge. Refuses
+/// (with the fix spelled out) when `tasks` schedules 2+ PROGRAMs and the
+/// project declares globals; single-PROGRAM projects keep their
+/// historical globals behaviour.
+///
+/// The server's run and validate paths and the headless edge runtime all
+/// call this instead of restating the rule, so the invariant and its
+/// message cannot drift between surfaces.
+pub fn reject_shared_globals(
+    store: &project::ProjectStore,
+    tasks: &project::Tasks,
+) -> Result<(), String> {
+    if tasks.programs.len() <= 1 {
+        return Ok(());
+    }
+    let globals = extract_project_global_vars(store);
+    if globals.is_empty() {
+        return Ok(());
+    }
+    let list = globals
+        .iter()
+        .map(|(file, var)| format!("'{var}' in {file}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "tasks.toml schedules {} PROGRAMs but the project declares VAR_GLOBAL \
+         ({list}). Each PROGRAM instance runs in its own isolated container, so \
+         globals are NOT shared across PROGRAMs — every instance would get a \
+         private copy that silently diverges. Move the shared state behind I/O \
+         mappings or FUNCTION_BLOCK parameters, or schedule a single PROGRAM.",
+        tasks.programs.len(),
+    ))
+}
+
 pub fn extract_project_global_vars(store: &project::ProjectStore) -> Vec<(String, String)> {
     let Ok(paths) = store.list_pou_paths() else {
         return Vec::new();
@@ -684,6 +721,51 @@ pub fn check_pou_in_project(
 ) -> Vec<CheckDiagnostic> {
     let context = project_context_libraries(store, source, language, buffer_path);
     check_pou_source_with_context(source, language, &context)
+}
+
+/// Check a set of loose files TOGETHER: each file is analysed with every
+/// other file as declaration context, so FUNCTION_BLOCKs / FUNCTIONs
+/// declared in sibling files resolve exactly as they would in a project
+/// compile. This is `cs check a.st b.st …`'s group mode — the offline
+/// counterpart of `check_pou_in_project` for directories that aren't
+/// projects (the FB library, a folder of loose sources). Diagnostics
+/// come back per input file, in input order; context files contribute
+/// declarations only, never squiggles.
+///
+/// Inputs are `(display_id, source, language)`; the display id becomes
+/// the diagnostic `FileId` so tooling can attribute results.
+pub fn check_sources_together(
+    files: &[(String, String, project::PouLanguage)],
+) -> Vec<Vec<CheckDiagnostic>> {
+    let options = CompilerOptions {
+        allow_empty_var_blocks: true,
+        ..Default::default()
+    };
+    // Parse every file once up front; a file that doesn't parse simply
+    // contributes no declarations (its own slot still gets checked and
+    // reports the parse error there).
+    let libs: Vec<Option<Library>> = files
+        .iter()
+        .map(|(id, raw, language)| {
+            let st = source_to_st(raw, *language).ok()?;
+            let cleaned = strip_any_configuration(&st);
+            let file_id = FileId::from_string(id);
+            ironplc_parser::parse_program(&cleaned, &file_id, &options).ok()
+        })
+        .collect();
+    files
+        .iter()
+        .enumerate()
+        .map(|(i, (_, raw, language))| {
+            let context: Vec<Library> = libs
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .filter_map(|(_, l)| l.clone())
+                .collect();
+            check_pou_source_with_context(raw, *language, &context)
+        })
+        .collect()
 }
 
 fn check_pou_source_with_context(

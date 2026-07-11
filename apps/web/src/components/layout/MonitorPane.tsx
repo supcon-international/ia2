@@ -24,10 +24,12 @@ import {
   type VarCategory,
 } from "@/lib/var-history"
 import { useRuntime, type RunningInfo } from "@/state/runtime"
+import { useLastSnapshot } from "@/state/live-feed"
 import type { VarValue } from "@/types/generated/VarValue"
 
 export function MonitorPane() {
-  const { lastSnapshot, isRunning, currentPou, running, attached } = useRuntime()
+  const { isRunning, currentPou, running, attached } = useRuntime()
+  const lastSnapshot = useLastSnapshot()
   // Variable writes go through the local bridge. When attached to a
   // remote edge runtime we don't (yet) proxy writes — disable the
   // controls in that case to avoid silently losing the user's input.

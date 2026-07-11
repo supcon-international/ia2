@@ -62,6 +62,7 @@ import {
   updateTransition,
 } from "@/lib/sfc-edit"
 import { useRuntime } from "@/state/runtime"
+import { useLastSnapshot } from "@/state/live-feed"
 import type { CheckDiagnostic } from "@/types/generated/CheckDiagnostic"
 import type { SfcAction } from "@/types/generated/SfcAction"
 import type { SfcLocation } from "@/types/generated/SfcLocation"
@@ -104,7 +105,8 @@ export function SFCEditor({
   const parsed = useMemo(() => safeParse(value), [value])
 
   // Online-mode current step lookup (see also LDEditor / FBDEditor).
-  const { lastSnapshot, isRunning, projectEpoch } = useRuntime()
+  const { isRunning, projectEpoch } = useRuntime()
+  const lastSnapshot = useLastSnapshot()
   const activeStep = useMemo<string | null>(() => {
     if (!isRunning || !lastSnapshot) return null
     const v = lastSnapshot.vars.find((x) => x.name === "__sfc_step")

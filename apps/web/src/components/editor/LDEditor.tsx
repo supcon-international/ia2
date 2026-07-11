@@ -58,6 +58,7 @@ import {
 } from "@/lib/ld-edit"
 import { fbByType, fbInputs, fbOutputs, fbPinHint, groupedFbs } from "@/lib/ld-fbs"
 import { useRuntime } from "@/state/runtime"
+import { useLastSnapshot } from "@/state/live-feed"
 import type { LdCoilKind } from "@/types/generated/LdCoilKind"
 import type { LdNode } from "@/types/generated/LdNode"
 import type { LdProgram } from "@/types/generated/LdProgram"
@@ -110,7 +111,8 @@ export function LDEditor({
   //   numerics → Compare-block evaluation
   // Both null when nothing's running; the renderer falls back to
   // static (uncoloured) glyphs in that case.
-  const { lastSnapshot, isRunning, projectEpoch } = useRuntime()
+  const { isRunning, projectEpoch } = useRuntime()
+  const lastSnapshot = useLastSnapshot()
   const liveValues = useMemo<{
     bools: Record<string, boolean>
     numerics: Record<string, number>

@@ -9,6 +9,10 @@ use crate::types::{
 
 const SAMPLE_MAIN_ST: &str = include_str!("../templates/main.st");
 
+/// Cheap to clone (a path + the parsed manifest): the server clones one
+/// out of its registry lock before compiling, so CPU-bound compiles never
+/// run under the global projects mutex.
+#[derive(Clone)]
 pub struct ProjectStore {
     root: PathBuf,
     manifest: ProjectManifest,

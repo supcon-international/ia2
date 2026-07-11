@@ -57,6 +57,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { useRuntime } from "@/state/runtime"
+import { useLastSnapshot } from "@/state/live-feed"
 import type { CheckDiagnostic } from "@/types/generated/CheckDiagnostic"
 import type { FbdBlock } from "@/types/generated/FbdBlock"
 import type { FbdInputSource } from "@/types/generated/FbdInputSource"
@@ -124,7 +125,8 @@ export function FBDEditor({
   const parsed = useMemo(() => safeParse(value), [value])
 
   // Live values for online-mode wire coloring.
-  const { lastSnapshot, isRunning, projectEpoch } = useRuntime()
+  const { isRunning, projectEpoch } = useRuntime()
+  const lastSnapshot = useLastSnapshot()
   const liveValues = useMemo<{ bools: Record<string, boolean> } | null>(() => {
     if (!isRunning || !lastSnapshot) return null
     const bools: Record<string, boolean> = {}

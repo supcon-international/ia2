@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -23,6 +24,7 @@ import type { Protocol } from "@/types/generated/Protocol"
 import type { Tasks } from "@/types/generated/Tasks"
 import type { VarSnapshot } from "@/types/generated/VarSnapshot"
 import { agentActivityStore } from "@/state/agent-activity"
+import { liveFeedStore } from "@/state/live-feed"
 import { buildProjectFbDefs, setProjectFbs, type FbPin } from "@/lib/ld-fbs"
 import { invalidationBus, Topic } from "@/state/invalidation"
 import {
@@ -166,10 +168,11 @@ type AppState = {
   /** Live attachment to an edge runtime (or null when running locally). */
   attached: AttachedEdge
 
-  // Runtime
+  // Runtime. High-frequency feed state (last snapshot, SSE link) lives
+  // in `state/live-feed.ts` — subscribe with useLastSnapshot() /
+  // useConnected() instead of through this context, so snapshot ticks
+  // don't re-render every context consumer.
   isRunning: boolean
-  connected: boolean
-  lastSnapshot: VarSnapshot | null
   /** What the runtime is currently executing — see `RunningInfo`. */
   running: RunningInfo
 
@@ -248,8 +251,6 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   const [tasks, setTasks] = useState<Tasks>({ tasks: [], programs: [] })
 
   const [isRunning, setIsRunning] = useState(false)
-  const [connected, setConnected] = useState(false)
-  const [lastSnapshot, setLastSnapshot] = useState<VarSnapshot | null>(null)
   const [error, setError] = useState<string | null>(null)
   const clearError = useCallback(() => setError(null), [])
   // What's actually executing right now. Tracked client-side because
@@ -352,19 +353,20 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       const tree = await fetchProject()
       setProject(tree)
       setProjectEpoch((e) => e + 1)
-      // Drop currentPou if the project lost it (e.g. deleted).
-      if (
-        tree &&
-        currentPou &&
-        !tree.pous.some((p) => p.path === currentPou.path)
-      ) {
+      // Drop currentPou if the project lost it (e.g. deleted). Read
+      // through the ref (kept in sync above) so this callback keeps ONE
+      // identity for the provider's lifetime — fifteen-odd CRUD actions
+      // depend on it, and a per-POU-switch identity change used to
+      // cascade new identities through all of them.
+      const cur = currentPouRef.current
+      if (tree && cur && !tree.pous.some((p) => p.path === cur.path)) {
         setCurrentPou(null)
         setSource("")
       }
     } catch (e) {
       setError(String(e))
     }
-  }, [currentPou])
+  }, [])
 
   const refreshProjects = useCallback(async () => {
     try {
@@ -448,7 +450,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     const es = new EventSource(url)
     esRef.current = es
     es.onopen = () => {
-      setConnected(true)
+      liveFeedStore.setConnected(true)
       if (attached) {
         // Edge runtime has no "started" event — the tunnel coming up is
         // good enough; the program has been running on the edge for a
@@ -458,18 +460,18 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
         setError(null)
       }
     }
-    es.onerror = () => setConnected(false)
+    es.onerror = () => liveFeedStore.setConnected(false)
     es.onmessage = (msg) => {
       try {
         if (attached) {
           // Edge runtime: payload is a VarSnapshot directly.
           const snap = JSON.parse(msg.data) as VarSnapshot
-          setLastSnapshot(snap)
+          liveFeedStore.setSnapshot(snap)
         } else {
           const ev = JSON.parse(msg.data) as AppEvent
           switch (ev.type) {
             case "snapshot":
-              setLastSnapshot(ev.data)
+              liveFeedStore.setSnapshot(ev.data)
               break
             case "started":
               setIsRunning(true)
@@ -720,7 +722,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       setSource("")
       setIsRunning(false)
       setRunning(null)
-      setLastSnapshot(null)
+      liveFeedStore.setSnapshot(null)
       setAvailableProjects(await apiFetchProjects())
     } catch (e) {
       setError(String(e))
@@ -1089,64 +1091,115 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
 
   const isDirty = !!currentPou && currentPou.source !== source
 
-  return (
-    <Ctx.Provider
-      value={{
-        project,
-        projectLoading,
-        availableProjects,
-        view,
-        currentPou,
-        source,
-        setSource,
-        isDirty,
-        diagnostics,
-        projectEpoch,
-        currentDevice,
-        currentEdge,
-        attached,
-        iomap,
-        tasks,
-        isRunning,
-        running,
-        connected,
-        lastSnapshot,
-        error,
-        clearError,
-        createProject,
-        openProject,
-        closeProject,
-        refreshProjects,
-        refreshProject,
-        selectPou,
-        selectDevice,
-        selectEdge,
-        openIoMap,
-        openTasks,
-        saveCurrentPou,
-        createPou,
-        deletePou,
-        createDevice,
-        deleteDevice,
-        createPouFolder,
-        createDeviceFolder: createDeviceFolderCb,
-        createEdge: createEdgeAction,
-        deleteEdge: deleteEdgeAction,
-        saveEdge,
-        createEdgeFolder: createEdgeFolderAction,
-        attachEdge: attachEdgeAction,
-        detachEdge: detachEdgeAction,
-        saveTasks,
-        migrateTasks,
-        saveDevice,
-        saveIomap,
-        run,
-        stop,
-      }}
-    >
-      {children}
-    </Ctx.Provider>
+  // Memoised: an inline literal would be a NEW object on every one of
+  // the provider's setState calls, re-rendering all consumers whether or
+  // not the fields they read changed. With the high-frequency feed moved
+  // to `live-feed.ts` and the actions holding stable identities, this
+  // now changes only when actual context data changes.
+  const value = useMemo(
+    () => ({
+      project,
+      projectLoading,
+      availableProjects,
+      view,
+      currentPou,
+      source,
+      setSource,
+      isDirty,
+      diagnostics,
+      projectEpoch,
+      currentDevice,
+      currentEdge,
+      attached,
+      iomap,
+      tasks,
+      isRunning,
+      running,
+      error,
+      clearError,
+      createProject,
+      openProject,
+      closeProject,
+      refreshProjects,
+      refreshProject,
+      selectPou,
+      selectDevice,
+      selectEdge,
+      openIoMap,
+      openTasks,
+      saveCurrentPou,
+      createPou,
+      deletePou,
+      createDevice,
+      deleteDevice,
+      createPouFolder,
+      createDeviceFolder: createDeviceFolderCb,
+      createEdge: createEdgeAction,
+      deleteEdge: deleteEdgeAction,
+      saveEdge,
+      createEdgeFolder: createEdgeFolderAction,
+      attachEdge: attachEdgeAction,
+      detachEdge: detachEdgeAction,
+      saveTasks,
+      migrateTasks,
+      saveDevice,
+      saveIomap,
+      run,
+      stop,
+    }),
+    [
+      project,
+      projectLoading,
+      availableProjects,
+      view,
+      currentPou,
+      source,
+      setSource,
+      isDirty,
+      diagnostics,
+      projectEpoch,
+      currentDevice,
+      currentEdge,
+      attached,
+      iomap,
+      tasks,
+      isRunning,
+      running,
+      error,
+      clearError,
+      createProject,
+      openProject,
+      closeProject,
+      refreshProjects,
+      refreshProject,
+      selectPou,
+      selectDevice,
+      selectEdge,
+      openIoMap,
+      openTasks,
+      saveCurrentPou,
+      createPou,
+      deletePou,
+      createDevice,
+      deleteDevice,
+      createPouFolder,
+      createDeviceFolderCb,
+      createEdgeAction,
+      deleteEdgeAction,
+      saveEdge,
+      createEdgeFolderAction,
+      attachEdgeAction,
+      detachEdgeAction,
+      saveTasks,
+      migrateTasks,
+      saveDevice,
+      saveIomap,
+      run,
+      stop,
+    ],
   )
+
+  return <Ctx.Provider value={value}>{children}</Ctx.Provider>
 }
 
 export function useRuntime() {

@@ -2,10 +2,12 @@ import { Moon, Sun } from "lucide-react"
 
 import { useThemeToggle } from "@/lib/dark-mode"
 import { useRuntime } from "@/state/runtime"
+import { useConnected } from "@/state/live-feed"
 import { cn } from "@/lib/utils"
 
 export function SystemIndication() {
-  const { connected, isRunning } = useRuntime()
+  const { isRunning } = useRuntime()
+  const connected = useConnected()
   const { theme, toggle } = useThemeToggle()
 
   const { label, dot, text } = connected

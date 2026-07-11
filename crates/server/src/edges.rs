@@ -10,10 +10,11 @@
 //!    via the SSH port-forward set up by `attach`. The runtime always
 //!    binds `127.0.0.1` on the edge.
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::io;
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use project::Edge;
 use serde::{Deserialize, Serialize};
@@ -53,13 +54,12 @@ impl AttachmentRegistry {
     pub fn current_port(&self, project_name: &str, edge_name: &str) -> Option<u16> {
         self.by_key
             .lock()
-            .expect("attach registry")
             .get(&(project_name.to_string(), edge_name.to_string()))
             .map(|a| a.local_port)
     }
 
     pub fn insert(&self, project_name: String, edge_name: String, local_port: u16, child: Child) {
-        self.by_key.lock().expect("attach registry").insert(
+        self.by_key.lock().insert(
             (project_name, edge_name),
             ActiveAttachment { local_port, child },
         );
@@ -68,7 +68,7 @@ impl AttachmentRegistry {
     /// Stop the port-forward for one edge (if any). Returns whether
     /// something was actually running.
     pub fn detach(&self, project_name: &str, edge_name: &str) -> bool {
-        let mut guard = self.by_key.lock().expect("attach registry");
+        let mut guard = self.by_key.lock();
         guard
             .remove(&(project_name.to_string(), edge_name.to_string()))
             .is_some()
@@ -78,7 +78,7 @@ impl AttachmentRegistry {
     /// `/api/projects/{name}/close` so closing a project tears down
     /// its tunnels without affecting other projects' tunnels.
     pub fn detach_all_for_project(&self, project_name: &str) {
-        let mut guard = self.by_key.lock().expect("attach registry");
+        let mut guard = self.by_key.lock();
         guard.retain(|(p, _), _| p != project_name);
     }
 }

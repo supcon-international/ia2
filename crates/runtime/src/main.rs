@@ -320,27 +320,11 @@ async fn main() -> Result<()> {
         }
     }
 
-    // ADR-0001 constraint, mirrored from the IDE-side `/api/run`
-    // handler: multi-PROGRAM projects run one container per instance,
-    // so a VAR_GLOBAL would be duplicated per instance instead of
-    // shared — refuse rather than let plant state silently diverge.
-    if tasks.programs.len() > 1 {
-        let globals = ironplc_bridge::extract_project_global_vars(&store);
-        if !globals.is_empty() {
-            let list = globals
-                .iter()
-                .map(|(file, var)| format!("'{var}' in {file}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            anyhow::bail!(
-                "tasks.toml schedules {} PROGRAMs but the project declares VAR_GLOBAL \
-                 ({list}). Each PROGRAM instance runs in its own isolated container, \
-                 so globals are NOT shared across PROGRAMs. Move the shared state \
-                 behind I/O mappings or FUNCTION_BLOCK parameters, or reduce \
-                 tasks.toml to a single PROGRAM, then redeploy.",
-                tasks.programs.len(),
-            );
-        }
+    // ADR-0001 gate — the same bridge implementation the IDE server
+    // enforces, so the rule and its message can't drift between the
+    // desktop and edge surfaces.
+    if let Err(msg) = ironplc_bridge::reject_shared_globals(&store, &tasks) {
+        anyhow::bail!("{msg} Then redeploy.");
     }
 
     // One container + VM per scheduled PROGRAM instance; the bridge's
