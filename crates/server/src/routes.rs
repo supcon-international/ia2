@@ -1900,16 +1900,15 @@ pub async fn run(
                     ironplc_bridge::compile_project_units(store, &effective_tasks)?
                 }
                 (Some(name), Some(file_path)) => {
-                    // Ad-hoc isolated run: compile only the named file's
-                    // source + a single-PROGRAM CONFIGURATION. ironplc's
-                    // debug section then only knows about this file's
-                    // declarations, so Monitor + /api/runtime/snapshot show
-                    // exactly the variables the user is looking at.
-                    let language = store.pou_file_language(file_path)?;
-                    let source = store.read_pou_source(file_path)?;
+                    // Ad-hoc isolated run: the named file's PROGRAM plus a
+                    // single-PROGRAM CONFIGURATION. Sibling files that
+                    // declare no PROGRAM ride along as type context, so
+                    // library FUNCTION_BLOCKs resolve — while the debug
+                    // section (and therefore Monitor) still shows exactly
+                    // the variables of the file the user is looking at.
                     let tasks = single_program_tasks(name);
                     let (container, metadata) =
-                        ironplc_bridge::compile_isolated_source_full(&source, language, &tasks)?;
+                        ironplc_bridge::compile_isolated_in_project_full(store, file_path, &tasks)?;
                     vec![adhoc_unit(&tasks, container, metadata.retain_vars)]
                 }
                 (Some(name), None) => {

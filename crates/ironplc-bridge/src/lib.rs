@@ -483,28 +483,66 @@ pub fn extract_project_global_vars(store: &project::ProjectStore) -> Vec<(String
     out
 }
 
-/// Compile a single POU source + synthesized CONFIGURATION, returning
-/// the AST-derived `ProgramMetadata` alongside the bytecode. Used by the
-/// ProgramPane's ad-hoc Run path so opening cascade_pid.st and clicking
-/// Run actually runs cascade_pid in isolation — without ironplc's debug
-/// section pulling in variables from PROGRAMs declared in *other* files
-/// (which is what happens when `compile_project` concatenates everything).
+/// Compile one POU file for an ad-hoc isolated run, returning the
+/// AST-derived `ProgramMetadata` alongside the bytecode. Used by the
+/// ProgramPane's Run button so opening cascade_pid.st and clicking Run
+/// actually runs cascade_pid in isolation — ironplc's debug section only
+/// names PROGRAM variables, and no sibling PROGRAM is included, so the
+/// Monitor shows exactly the target file's variables (unlike
+/// `compile_project`, which concatenates every PROGRAM).
 ///
-/// `language` selects how `source` is interpreted: `St` → use the text
-/// verbatim, `Ld` → transpile from JSON to ST first.
-pub fn compile_isolated_source_full(
-    source: &str,
-    language: project::PouLanguage,
+/// "Isolated" scopes the *debug surface*, not the type system: every
+/// sibling file that declares no PROGRAM (imported library blocks,
+/// helper FUNCTION_BLOCKs / FUNCTIONs) is appended as type context, so
+/// an FBD program wired to FB_PID from the library runs exactly like it
+/// compiles project-wide. Sibling files that fail to read or parse are
+/// skipped — their absence resurfaces honestly as P2008 on the
+/// reference. Sibling files that mix a PROGRAM with FBs stay excluded
+/// (the PROGRAM would pollute the debug section); keep shared blocks in
+/// their own files.
+pub fn compile_isolated_in_project_full(
+    store: &project::ProjectStore,
+    pou_path: &str,
     tasks: &project::Tasks,
 ) -> Result<(Container, ProgramMetadata), BridgeError> {
     if tasks.programs.is_empty() {
         return Err(BridgeError::Parse("no PROGRAM instance to run".into()));
     }
-    let st = source_to_st(source, language)?;
-    let mut combined = String::with_capacity(st.len() + 256);
+    let language = store
+        .pou_file_language(pou_path)
+        .map_err(|e| BridgeError::Parse(format!("language for '{pou_path}': {e}")))?;
+    let source = store
+        .read_pou_source(pou_path)
+        .map_err(|e| BridgeError::Parse(format!("reading pou '{pou_path}': {e}")))?;
+    let st = source_to_st(&source, language)?;
+    let mut combined = String::with_capacity(st.len() + 1024);
     combined.push_str(&strip_any_configuration(&st));
     if !combined.ends_with('\n') {
         combined.push('\n');
+    }
+    if let Ok(paths) = store.list_pou_paths() {
+        for path in &paths {
+            if path == pou_path {
+                continue;
+            }
+            let Ok(lang) = store.pou_file_language(path) else {
+                continue;
+            };
+            let Ok(raw) = store.read_pou_source(path) else {
+                continue;
+            };
+            let decls = extract_pou_declarations(&raw, lang);
+            if decls.is_empty() || decls.iter().any(|d| d.type_ == project::PouType::Program) {
+                continue;
+            }
+            let Ok(sibling_st) = source_to_st(&raw, lang) else {
+                continue;
+            };
+            combined.push_str(&strip_any_configuration(&sibling_st));
+            if !combined.ends_with('\n') {
+                combined.push('\n');
+            }
+        }
     }
     combined.push_str(&synthesize_configuration(tasks));
     compile_with_metadata(&combined)
@@ -1337,7 +1375,9 @@ fn lookup_locations(
 
 #[cfg(test)]
 mod project_units_tests {
-    use super::{compile_project_units, extract_project_global_vars};
+    use super::{
+        compile_isolated_in_project_full, compile_project_units, extract_project_global_vars,
+    };
     use ironplc_container::debug_format::build_var_debug_map;
     use project::{PouLanguage, PouType, ProgramInstance, ProjectStore, Task, Tasks};
 
@@ -1451,6 +1491,40 @@ mod project_units_tests {
         let b_names = debug_names(&units[1].container);
         assert!(b_names.iter().any(|n| n == "b_only"), "{b_names:?}");
         assert!(!b_names.iter().any(|n| n == "a_only"), "{b_names:?}");
+    }
+
+    /// The regression behind the ProgramPane Run button: an isolated run
+    /// of one file must resolve FUNCTION_BLOCKs declared in sibling
+    /// PROGRAM-less files (imported library blocks), while keeping other
+    /// PROGRAMs' variables out of the debug section — "isolated" scopes
+    /// the Monitor, not the type system.
+    #[test]
+    fn isolated_run_resolves_sibling_fbs_without_debug_bleed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = fixture_store(dir.path());
+
+        let tasks = Tasks {
+            tasks: vec![Task {
+                name: "adhoc".into(),
+                interval_ms: 10,
+                priority: 1,
+            }],
+            programs: vec![ProgramInstance {
+                instance: "alpha_inst".into(),
+                program: "alpha".into(),
+                task: "adhoc".into(),
+            }],
+        };
+        let (container, _meta) = compile_isolated_in_project_full(&store, "alpha", &tasks)
+            .expect("isolated run compiles with sibling FB context");
+
+        let names = debug_names(&container);
+        assert!(names.iter().any(|n| n == "a_only"), "{names:?}");
+        assert!(
+            !names.iter().any(|n| n == "b_only"),
+            "sibling PROGRAM vars must not bleed into the isolated debug \
+             section: {names:?}"
+        );
     }
 
     /// ironplc's codegen compiles the FIRST ProgramDeclaration it sees.

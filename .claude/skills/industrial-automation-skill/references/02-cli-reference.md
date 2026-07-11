@@ -117,7 +117,7 @@ Both are **replace-the-whole-document** operations — `get`, edit, `set`. There
 ```bash
 cs run                              # run the whole tasks.toml schedule
 cs run --program main               # ad-hoc single-PROGRAM run (synth schedule, tasks.toml untouched)
-cs run --program main --file pous/main.st   # isolated: compile only this file
+cs run --program main --file pous/main.st   # isolated: Monitor scoped to this file; sibling FB/FN files still resolve
 cs stop                             # stop the running program
 
 cs runtime status                   # mode + forces + which project/program is running; --json
