@@ -124,6 +124,7 @@ pub enum Protocol {
     Modbus,
     Ethercat,
     Opcua,
+    Canopen,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -133,6 +134,7 @@ pub enum ProtocolConfig {
     Modbus(ModbusConfig),
     Ethercat(EthercatConfig),
     Opcua(OpcuaConfig),
+    Canopen(CanopenConfig),
 }
 
 impl ProtocolConfig {
@@ -141,6 +143,7 @@ impl ProtocolConfig {
             ProtocolConfig::Modbus(_) => Protocol::Modbus,
             ProtocolConfig::Ethercat(_) => Protocol::Ethercat,
             ProtocolConfig::Opcua(_) => Protocol::Opcua,
+            ProtocolConfig::Canopen(_) => Protocol::Canopen,
         }
     }
 
@@ -149,6 +152,7 @@ impl ProtocolConfig {
             ProtocolConfig::Modbus(c) => c.channels.iter().map(|c| c.name.clone()).collect(),
             ProtocolConfig::Ethercat(c) => c.channels.iter().map(|c| c.name.clone()).collect(),
             ProtocolConfig::Opcua(c) => c.channels.iter().map(|c| c.name.clone()).collect(),
+            ProtocolConfig::Canopen(c) => c.channels.iter().map(|c| c.name.clone()).collect(),
         }
     }
 }
@@ -926,6 +930,120 @@ pub enum OpcuaDataType {
     F32,
     /// Server-side Double; carried as f32 in the channel lane (PLC REAL).
     F64,
+}
+
+// ---------------- CANopen ----------------
+
+/// CANopen device config (CiA 301). The runtime is the bus *master*
+/// side of a point-to-point conversation with one node: SDO for
+/// configuration-rate channels, PDO (predefined connection set) for
+/// process-rate ones, heartbeat consumption for health.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CanopenConfig {
+    /// CAN interface — a SocketCAN name (`can0`, Linux edge) or `_sim`
+    /// for the in-memory simulated bus (dev machines, tests). Same
+    /// convention as EtherCAT's `nic`.
+    pub interface: String,
+    /// The remote node's CANopen node-id (1–127).
+    pub node_id: u8,
+    /// Informational: the bus bitrate ops configured via `ip link`
+    /// (SocketCAN sets bitrate outside the process). Shown in the UI
+    /// so the project records what the wiring expects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bitrate: Option<u32>,
+    /// Cyclic SDO poll period for `sdo`-transport channels, in ms.
+    #[serde(default = "default_canopen_poll_ms")]
+    pub poll_interval_ms: u32,
+    /// Heartbeat watchdog: unhealthy when no heartbeat arrives for this
+    /// long. 0 disables monitoring (node doesn't produce heartbeats).
+    #[serde(default = "default_canopen_heartbeat_timeout_ms")]
+    pub heartbeat_timeout_ms: u32,
+    /// Send NMT Start Remote Node on connect so a node sitting in
+    /// pre-operational enters Operational (PDOs only run there).
+    #[serde(default = "default_true")]
+    pub start_on_connect: bool,
+    #[serde(default)]
+    pub channels: Vec<CanopenChannel>,
+}
+
+fn default_canopen_poll_ms() -> u32 {
+    100
+}
+
+fn default_canopen_heartbeat_timeout_ms() -> u32 {
+    3000
+}
+
+/// One object-dictionary entry the iomap can bind.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CanopenChannel {
+    /// Unique channel name — what iomap entries reference.
+    pub name: String,
+    /// Object dictionary index (hex in the UI, e.g. 0x6041 statusword).
+    pub index: u16,
+    #[serde(default)]
+    pub sub_index: u8,
+    pub data_type: CanopenDataType,
+    #[serde(default)]
+    pub access: CanopenAccess,
+    /// How the value moves on the wire. SDO = request/response at
+    /// `poll_interval_ms`; PDO = process data at the node's event/sync
+    /// rate using the CiA 301 predefined COB-IDs.
+    #[serde(default)]
+    pub transport: CanopenTransport,
+    /// Optional failsafe written on shutdown/trip (same opt-in contract
+    /// as OPC UA: absent = leave the object untouched).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failsafe: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum CanopenAccess {
+    #[default]
+    Read,
+    Write,
+}
+
+/// Wire transport for one channel. PDO slots use the CiA 301
+/// predefined connection set (TPDO1..4 = 0x180/0x280/0x380/0x480 +
+/// node-id, RPDO1..4 = 0x200/0x300/0x400/0x500 + node-id) with the
+/// node's existing PDO mapping; `byte_offset` locates the object
+/// inside the ≤8-byte frame. Devices needing PDO *re*-mapping get it
+/// configured out-of-band (vendor tool / SDO init sequence) for now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CanopenTransport {
+    #[default]
+    Sdo,
+    Tpdo {
+        /// PDO number 1–4.
+        slot: u8,
+        /// Byte offset of this object inside the PDO payload.
+        byte_offset: u8,
+    },
+    Rpdo {
+        slot: u8,
+        byte_offset: u8,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum CanopenDataType {
+    Bool,
+    I8,
+    U8,
+    I16,
+    U16,
+    I32,
+    U32,
+    F32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

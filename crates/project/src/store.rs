@@ -1442,5 +1442,17 @@ fn default_config_for(protocol: Protocol) -> ProtocolConfig {
             poll_interval_ms: 500,
             channels: vec![],
         }),
+        // `_sim` mirrors the EtherCAT default: a fresh CANopen device
+        // runs against the in-memory bus until ops point it at a real
+        // SocketCAN interface on the edge.
+        Protocol::Canopen => ProtocolConfig::Canopen(crate::types::CanopenConfig {
+            interface: "_sim".into(),
+            node_id: 1,
+            bitrate: None,
+            poll_interval_ms: 100,
+            heartbeat_timeout_ms: 3000,
+            start_on_connect: true,
+            channels: vec![],
+        }),
     }
 }

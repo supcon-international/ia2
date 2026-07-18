@@ -4,6 +4,7 @@ import { fetchPouVariables } from "@/lib/api"
 import { useRuntime } from "@/state/runtime"
 import type { VariableInfo } from "@/types/generated/VariableInfo"
 
+import { CanopenDeviceEditor } from "./CanopenDeviceEditor"
 import { EthercatDeviceEditor } from "./EthercatDeviceEditor"
 import { ModbusDeviceEditor } from "./ModbusDeviceEditor"
 import { OpcuaDeviceEditor } from "./OpcuaDeviceEditor"
@@ -13,10 +14,10 @@ import type { LinkProps } from "./deviceEditorShared"
  * Thin dispatcher: prefetch the per-POU variable lists (so the inline
  * add-binding form has autocomplete without per-row latency), then hand
  * off to the protocol-specific editor. The per-protocol column sets differ
- * enough (Modbus registers vs EtherCAT PDO offsets vs OPC UA NodeIds) that
- * each editor owns its own table — see `ModbusDeviceEditor`,
- * `EthercatDeviceEditor`, `OpcuaDeviceEditor`. Genuinely shared bits
- * (draft scaffold, save bar, LinkedToCell) live in `deviceEditorShared`.
+ * enough (Modbus registers vs EtherCAT PDO offsets vs OPC UA NodeIds vs
+ * CANopen object entries) that each editor owns its own table. Genuinely
+ * shared bits (draft scaffold, save bar, LinkedToCell) live in
+ * `deviceEditorShared`.
  */
 export function DevicePane() {
   const { currentDevice, project, iomap, saveDevice, saveIomap } = useRuntime()
@@ -73,6 +74,12 @@ export function DevicePane() {
         />
       ) : currentDevice.protocol === "opcua" ? (
         <OpcuaDeviceEditor
+          device={currentDevice}
+          onSave={saveDevice}
+          link={linkProps}
+        />
+      ) : currentDevice.protocol === "canopen" ? (
+        <CanopenDeviceEditor
           device={currentDevice}
           onSave={saveDevice}
           link={linkProps}

@@ -65,6 +65,9 @@ pub(crate) fn announce_target(cmd: &Command) -> Option<(&str, &'static str)> {
         Command::Device(DeviceCmd::EsiAssemble { server, .. }) => {
             Some((&server.server, "device esi-assemble"))
         }
+        Command::Device(DeviceCmd::OpcuaBrowse { server, .. }) => {
+            Some((&server.server, "device opcua-browse"))
+        }
 
         Command::Edge(EdgeCmd::List { server, .. }) => Some((&server.server, "edge list")),
         Command::Edge(EdgeCmd::Get { server, .. }) => Some((&server.server, "edge get")),

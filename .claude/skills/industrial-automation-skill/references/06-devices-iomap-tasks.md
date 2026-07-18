@@ -224,7 +224,6 @@ When the site already runs a DCS/PLC that owns the physical I/O, IA2 sits **abov
   "name": "dcs",
   "protocol": "opcua",
   "endpoint_url": "opc.tcp://10.0.0.10:4840",
-  "security": "none",
   "auth": { "kind": "anonymous" },
   "poll_interval_ms": 500,
   "channels": [
@@ -234,12 +233,45 @@ When the site already runs a DCS/PLC that owns the physical I/O, IA2 sits **abov
 }
 ```
 
-- `auth`: `{ "kind": "anonymous" }` or `{ "kind": "user_password", "username": "...", "password": "..." }`. `security` is `"none"` in v1 (typical for trusted control-network segments / DA-gateway hops).
-- `node_id`: the full NodeId string exactly as UaExpert shows it — `ns=2;s=Tag.Path` (string) or `ns=3;i=1042` (numeric).
+- `auth`: `{ "kind": "anonymous" }` or `{ "kind": "user_password", "username": "...", "password": "..." }`. The session security policy is None in v1 (typical for trusted control-network segments / DA-gateway hops).
+- `node_id`: the full NodeId string — `ns=2;s=Tag.Path` (string) or `ns=3;i=1042` (numeric). Don't retype them from UaExpert: `cs device opcua-browse <name> [--node <id>]` walks the live server's address space and prints NodeIds with type hints, and the device editor's "Browse server…" panel adds tags by click.
 - `data_type`: `bool` `i16` `u16` `i32` `u32` `f32` `f64`. Floats land on REAL PLC vars with fractions intact (f64 is narrowed to f32).
 - `access`: `read` tags are polled into a mirror (ONE bulk Read per `poll_interval_ms` for ALL tags — hundreds of tags stay one round-trip); `write` tags get a direct Write service call when the scan loop pushes an output.
 - `failsafe`: optional value written on shutdown/trip. **Leave unset by default** — on a supervisory layer the DCS below keeps authority; only set it for tags that are exclusively IA2's (e.g. a supervisory-enable flag).
 - **OPC DA** (classic, COM/DCOM, Windows-only): IA2 does not speak DA. Route DA servers through a DA→UA gateway (KEPServerEX, Matrikon UA Proxy) and point IA2 at the gateway's UA endpoint — the standard architecture for Linux edges.
+
+---
+
+## CANopen device (CiA 301 node on a CAN bus)
+
+A servo drive, remote I/O block or sensor gateway speaking CANopen. IA2 is the master side of a point-to-point conversation with one node; per-channel transport picks the lane.
+
+```json
+{
+  "name": "servo",
+  "protocol": "canopen",
+  "interface": "can0",
+  "node_id": 34,
+  "poll_interval_ms": 100,
+  "heartbeat_timeout_ms": 3000,
+  "start_on_connect": true,
+  "channels": [
+    { "name": "statusword", "index": 24641, "sub_index": 0, "data_type": "u16", "access": "read",
+      "transport": { "kind": "tpdo", "slot": 1, "byte_offset": 0 } },
+    { "name": "controlword", "index": 24640, "sub_index": 0, "data_type": "u16", "access": "write",
+      "transport": { "kind": "rpdo", "slot": 1, "byte_offset": 0 } },
+    { "name": "target_velocity", "index": 24831, "sub_index": 0, "data_type": "i32", "access": "write",
+      "transport": { "kind": "sdo" }, "failsafe": 0 }
+  ]
+}
+```
+
+- `interface`: a SocketCAN name (`can0`) on a Linux edge, or `"_sim"` for the in-memory simulated bus — the default on device creation, so dev machines and demos run without hardware (same convention as EtherCAT's `nic`). Ops bring the real interface up outside the process: `ip link set can0 up type can bitrate 500000`.
+- `index`/`sub_index`: the object-dictionary address. JSON carries them as decimal (`24641` = `0x6041` statusword); the device editor renders hex.
+- `transport`: `{"kind":"sdo"}` polls/writes via SDO expedited transfers at `poll_interval_ms` — the configuration-rate lane, fine for setpoints and parameters. `tpdo`/`rpdo` ride process data on the CiA 301 predefined COB-IDs (TPDO1..4 = 0x180/0x280/0x380/0x480 + node-id, RPDO1..4 = 0x200/…/0x500 + node-id) with `slot` 1–4 and `byte_offset` locating the object inside the ≤8-byte frame, using the node's existing PDO mapping. Objects >4 bytes (segmented SDO) are not supported — bind a scalar.
+- `heartbeat_timeout_ms`: the node's heartbeat is the health signal; no heartbeat for this long → device unhealthy (inputs freeze at last-known). `0` disables (then consecutive SDO failures flip health instead).
+- `start_on_connect`: sends NMT Start Remote Node so a node sitting pre-operational enters Operational — PDOs only run there. Leave on unless another master owns NMT.
+- `failsafe`: same opt-in contract as OPC UA — only `write` channels with an explicit value get written on shutdown/trip, and the adapter never sends NMT Stop (other tools may share the bus; a drive's safe state is an object write like controlword shutdown, not a bus-wide state change).
 
 ---
 

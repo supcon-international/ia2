@@ -112,6 +112,7 @@ export function NewDeviceDialog(props: Props) {
                 <SelectItem value="modbus">Modbus TCP</SelectItem>
                 <SelectItem value="ethercat">EtherCAT</SelectItem>
                 <SelectItem value="opcua">OPC UA (client)</SelectItem>
+                <SelectItem value="canopen">CANopen</SelectItem>
               </SelectContent>
             </Select>
           </div>

@@ -87,6 +87,7 @@ read-only device-template catalog used to pre-fill devices from a bus scan.
 | `PUT` | `/api/devices/{name}` | Update full device config. Body: `Device`. |
 | `DELETE` | `/api/devices/{name}` | Delete. |
 | `POST` | `/api/devices/{name}/esi-assemble` | Assemble a modular EtherCAT coupler's channels from its ESI file + the modules it reports. Body: `EsiAssembleRequest { detected: u32[] }` (module idents in slot order). Requires the device to be EtherCAT with `bringup = esi_modular`; the assembled channels **replace** the device's channel list. Returns the updated `Device`. |
+| `POST` | `/api/devices/{name}/opcua-browse` | Live-browse one level of an OPC UA device's address space using its own endpoint/auth config. Body: `OpcuaBrowseRequest { node_id? }` (omitted = ObjectsFolder). Returns `OpcuaBrowseNode[]` — NodeId, display name, node class, and for Variables the UA data type plus the channel `data_type` that fits. Backs the editor's NodeId picker and `cs device opcua-browse`. |
 
 ## Edges (deploy targets)
 

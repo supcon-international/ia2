@@ -102,6 +102,33 @@ pub(crate) fn cmd_device(cmd: DeviceCmd) -> Result<i32> {
             );
             print_json(&resp)
         }
+        DeviceCmd::OpcuaBrowse {
+            name,
+            node,
+            server: ServerOpt { server },
+        } => {
+            let body = serde_json::json!({ "node_id": node });
+            let resp = post_json(
+                &format!("{server}/api/devices/{}/opcua-browse", url_encode(&name)),
+                &body,
+            )?;
+            // Render a compact table before the raw JSON: humans scan
+            // it, agents parse the JSON below.
+            if let Some(rows) = resp.as_array() {
+                for r in rows {
+                    let class = r.get("node_class").and_then(|v| v.as_str()).unwrap_or("");
+                    let nid = r.get("node_id").and_then(|v| v.as_str()).unwrap_or("");
+                    let disp = r.get("display_name").and_then(|v| v.as_str()).unwrap_or("");
+                    let ty = r
+                        .get("data_type")
+                        .and_then(|v| v.as_str())
+                        .map(|t| format!(" [{t}]"))
+                        .unwrap_or_default();
+                    println!("{class:<9} {disp:<28} {nid}{ty}");
+                }
+            }
+            print_json(&resp)
+        }
     }
 }
 

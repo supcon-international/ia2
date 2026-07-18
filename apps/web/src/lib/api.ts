@@ -18,6 +18,7 @@ import type { OpenProjectsList } from "@/types/generated/OpenProjectsList"
 import type { ProjectListing } from "@/types/generated/ProjectListing"
 import type { ProjectPous } from "@/types/generated/ProjectPous"
 import type { ProjectTree } from "@/types/generated/ProjectTree"
+import type { OpcuaBrowseNode } from "@/types/generated/OpcuaBrowseNode"
 import type { Protocol } from "@/types/generated/Protocol"
 import type { RunResponse } from "@/types/generated/RunResponse"
 import type { RuntimeStatus } from "@/types/generated/RuntimeStatus"
@@ -245,6 +246,22 @@ export async function deleteDevice(name: string): Promise<RunResponse> {
       method: "DELETE",
     }),
     `DELETE /api/devices/${name}`,
+  )
+}
+
+/** Live-browse one level of an OPC UA device's address space.
+ *  `nodeId` empty/undefined = ObjectsFolder. */
+export async function opcuaBrowse(
+  name: string,
+  nodeId?: string,
+): Promise<OpcuaBrowseNode[]> {
+  return jsonOrThrow(
+    await apiFetch(`/api/devices/${encodeURIComponent(name)}/opcua-browse`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ node_id: nodeId ?? null }),
+    }),
+    `POST /api/devices/${name}/opcua-browse`,
   )
 }
 

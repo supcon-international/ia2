@@ -227,6 +227,11 @@ async fn main() -> anyhow::Result<()> {
             "/api/devices/{name}/esi-assemble",
             post(routes::esi_assemble_device),
         )
+        // Live-browse an OPC UA device's address space (NodeId picker).
+        .route(
+            "/api/devices/{name}/opcua-browse",
+            post(routes::opcua_browse_device),
+        )
         // Edges (deploy targets)
         .route("/api/edges", post(routes::create_edge))
         .route("/api/edges/folders", post(routes::create_edge_folder))

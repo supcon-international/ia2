@@ -304,9 +304,10 @@ function channelsOf(
 ): string[] {
   const device = project?.devices.find((d) => d.name === deviceName)
   if (!device) return []
-  if (device.protocol === "modbus") return device.channels.map((c) => c.name)
-  if (device.protocol === "ethercat") return device.channels.map((c) => c.name)
-  return []
+  // Every protocol variant carries a `channels` list with `name`s —
+  // no per-protocol casing (an earlier version listed protocols and
+  // silently returned [] for OPC UA devices).
+  return device.channels.map((c) => c.name)
 }
 
 /** Resolve a mapping's current bus value from the demo slave snapshot. */

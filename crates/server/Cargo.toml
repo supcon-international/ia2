@@ -26,4 +26,5 @@ ironplc-bridge = { path = "../ironplc-bridge" }
 iomap-ethercat = { path = "../iomap-ethercat" }
 project = { path = "../project" }
 iomap-modbus = { path = "../iomap-modbus" }
+iomap-opcua = { path = "../iomap-opcua" }
 toml.workspace = true

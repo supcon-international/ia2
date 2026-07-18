@@ -325,7 +325,7 @@ async fn bulk_read(
 /// Server variant → channel lane, honouring the *declared* channel type
 /// (the server may legitimately report a wider/narrower numeric).
 fn from_variant(v: &Variant, ty: OpcuaDataType) -> Option<ChannelValue> {
-    let as_f64 = |v: &Variant| -> Option<f64> {
+    fn as_f64(v: &Variant) -> Option<f64> {
         match v {
             Variant::Boolean(b) => Some(*b as i32 as f64),
             Variant::SByte(x) => Some(*x as f64),
@@ -338,9 +338,14 @@ fn from_variant(v: &Variant, ty: OpcuaDataType) -> Option<ChannelValue> {
             Variant::UInt64(x) => Some(*x as f64),
             Variant::Float(x) => Some(*x as f64),
             Variant::Double(x) => Some(*x),
+            // Some servers hand back container-wrapped scalars; unwrap
+            // rather than skipping the tag (seen in the wild and from
+            // naive `set_value(DataValue)` implementations).
+            Variant::Variant(inner) => as_f64(inner),
+            Variant::DataValue(dv) => dv.value.as_ref().and_then(as_f64),
             _ => None,
         }
-    };
+    }
     let n = as_f64(v)?;
     Some(match ty {
         OpcuaDataType::Bool => ChannelValue::Bool(n != 0.0),
@@ -453,5 +458,192 @@ fn default_for(ty: OpcuaDataType) -> ChannelValue {
         OpcuaDataType::I32 | OpcuaDataType::U32 => ChannelValue::I32(0),
         OpcuaDataType::F32 => ChannelValue::Real(0.0),
         OpcuaDataType::F64 => ChannelValue::F64(0.0),
+    }
+}
+
+// ---------------- Address-space browse ----------------
+
+/// One node under the browsed parent. Plain data — the server maps this
+/// into its wire/ts-rs shape, same pattern as EtherCAT's
+/// `SlaveDiscovery`.
+#[derive(Debug, Clone)]
+pub struct BrowsedNode {
+    /// Full NodeId string (`ns=2;s=Channel1.Device1.Tag1`) — exactly
+    /// what an `OpcuaChannel.node_id` wants.
+    pub node_id: String,
+    pub display_name: String,
+    /// `Object` / `Variable` / `Method` / … (UA NodeClass name).
+    pub node_class: String,
+    /// For Variables: the UA data type's name when it's a standard
+    /// scalar (`Int32`, `Double`, …), plus the closest channel
+    /// `data_type` value (`i32`, `f64`) for one-click adoption.
+    pub data_type: Option<String>,
+    pub suggested_channel_type: Option<OpcuaDataType>,
+}
+
+/// One-shot browse of the server's address space under `from` (or
+/// ObjectsFolder when `None`): connect → browse hierarchical references
+/// → read each Variable's DataType attribute → disconnect. Used by the
+/// IDE / CLI to pick NodeIds instead of retyping them from UaExpert.
+pub async fn browse_endpoint(
+    config: &OpcuaConfig,
+    from: Option<&str>,
+) -> Result<Vec<BrowsedNode>, IoError> {
+    use opcua::types::{BrowseDescription, BrowseDirection, ReferenceTypeId};
+
+    let root = match from {
+        Some(s) => {
+            NodeId::from_str(s).map_err(|e| IoError::Connect(format!("bad node id '{s}': {e}")))?
+        }
+        None => opcua::types::ObjectId::ObjectsFolder.into(),
+    };
+
+    let mut client: Client = ClientBuilder::new()
+        .application_name("IA2 browse")
+        .application_uri("urn:ia2:browse")
+        .product_uri("urn:ia2:browse")
+        .create_sample_keypair(false)
+        .trust_server_certs(true)
+        .session_retry_limit(0) // one shot — fail fast, the caller shows the error
+        .client()
+        .map_err(|e| IoError::Connect(format!("opcua client builder invalid: {e:?}")))?;
+
+    let endpoint: EndpointDescription = (
+        config.endpoint_url.as_str(),
+        SecurityPolicy::None.to_str(),
+        MessageSecurityMode::None,
+        UserTokenPolicy::anonymous(),
+    )
+        .into();
+    let identity = match &config.auth {
+        OpcuaAuth::Anonymous => IdentityToken::Anonymous,
+        OpcuaAuth::UserPassword { username, password } => {
+            IdentityToken::UserName(username.clone(), password.clone().into())
+        }
+    };
+
+    let (session, event_loop) = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        client.connect_to_matching_endpoint(endpoint, identity),
+    )
+    .await
+    .map_err(|_| {
+        IoError::Connect(format!(
+            "opcua endpoint {} unreachable within {}s",
+            config.endpoint_url,
+            CONNECT_TIMEOUT.as_secs()
+        ))
+    })?
+    .map_err(|e| IoError::Connect(format!("opcua connect {}: {e}", config.endpoint_url)))?;
+    let event_loop_task = tokio::spawn(event_loop.run());
+
+    let result = async {
+        if !session.wait_for_connection().await {
+            return Err(IoError::Connect(format!(
+                "opcua session to {} failed",
+                config.endpoint_url
+            )));
+        }
+        let desc = BrowseDescription {
+            node_id: root,
+            browse_direction: BrowseDirection::Forward,
+            reference_type_id: ReferenceTypeId::HierarchicalReferences.into(),
+            include_subtypes: true,
+            node_class_mask: 0, // every class; the UI filters visually
+            result_mask: 0x3F,  // all fields
+        };
+        let results = session
+            .browse(&[desc], 1000, None)
+            .await
+            .map_err(|e| IoError::Transport(format!("opcua browse: {e}")))?;
+        let refs = results
+            .into_iter()
+            .next()
+            .and_then(|r| r.references)
+            .unwrap_or_default();
+
+        let mut nodes: Vec<BrowsedNode> = refs
+            .into_iter()
+            .map(|r| BrowsedNode {
+                node_id: r.node_id.node_id.to_string(),
+                display_name: r.display_name.text.to_string(),
+                node_class: format!("{:?}", r.node_class),
+                data_type: None,
+                suggested_channel_type: None,
+            })
+            .collect();
+
+        // One bulk read for every Variable's DataType attribute.
+        let var_targets: Vec<(usize, NodeId)> = nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.node_class == "Variable")
+            .filter_map(|(i, n)| NodeId::from_str(&n.node_id).ok().map(|id| (i, id)))
+            .collect();
+        if !var_targets.is_empty() {
+            let reads: Vec<ReadValueId> = var_targets
+                .iter()
+                .map(|(_, id)| ReadValueId {
+                    node_id: id.clone(),
+                    attribute_id: AttributeId::DataType as u32,
+                    index_range: Default::default(),
+                    data_encoding: Default::default(),
+                })
+                .collect();
+            if let Ok(values) = session.read(&reads, TimestampsToReturn::Neither, 0.0).await {
+                for ((idx, _), dv) in var_targets.iter().zip(values) {
+                    if let Some(Variant::NodeId(type_id)) = dv.value {
+                        let (name, suggested) = ua_type_name(&type_id);
+                        nodes[*idx].data_type = name.map(str::to_string);
+                        nodes[*idx].suggested_channel_type = suggested;
+                    }
+                }
+            }
+        }
+
+        // Folders first, then variables, alphabetical inside each — the
+        // order a human expects from an address-space tree.
+        nodes.sort_by(|a, b| {
+            let rank = |n: &BrowsedNode| match n.node_class.as_str() {
+                "Object" => 0,
+                "Variable" => 1,
+                _ => 2,
+            };
+            rank(a)
+                .cmp(&rank(b))
+                .then_with(|| a.display_name.cmp(&b.display_name))
+        });
+        Ok(nodes)
+    }
+    .await;
+
+    let _ = session.disconnect().await;
+    event_loop_task.abort();
+    result
+}
+
+/// Standard scalar type ids (ns=0) → display name + channel type hint.
+fn ua_type_name(id: &NodeId) -> (Option<&'static str>, Option<OpcuaDataType>) {
+    if id.namespace != 0 {
+        return (None, None);
+    }
+    let numeric = match &id.identifier {
+        opcua::types::Identifier::Numeric(n) => *n,
+        _ => return (None, None),
+    };
+    match numeric {
+        1 => (Some("Boolean"), Some(OpcuaDataType::Bool)),
+        2 => (Some("SByte"), Some(OpcuaDataType::I16)),
+        3 => (Some("Byte"), Some(OpcuaDataType::U16)),
+        4 => (Some("Int16"), Some(OpcuaDataType::I16)),
+        5 => (Some("UInt16"), Some(OpcuaDataType::U16)),
+        6 => (Some("Int32"), Some(OpcuaDataType::I32)),
+        7 => (Some("UInt32"), Some(OpcuaDataType::U32)),
+        8 => (Some("Int64"), Some(OpcuaDataType::I32)),
+        9 => (Some("UInt64"), Some(OpcuaDataType::U32)),
+        10 => (Some("Float"), Some(OpcuaDataType::F32)),
+        11 => (Some("Double"), Some(OpcuaDataType::F64)),
+        12 => (Some("String"), None),
+        _ => (None, None),
     }
 }

@@ -43,7 +43,8 @@ pub use paths::{
 pub use sfc::{SfcAction, SfcProgram, SfcQualifier, SfcStep, SfcTransition};
 pub use store::{is_library_slug, MigrationReport, ProjectStore, LIBRARY_SLUG_PREFIX};
 pub use types::{
-    Device, Direction, Edge, EthercatBringup, EthercatChannel, EthercatConfig, EthercatDataType,
+    CanopenAccess, CanopenChannel, CanopenConfig, CanopenDataType, CanopenTransport, Device,
+    Direction, Edge, EthercatBringup, EthercatChannel, EthercatConfig, EthercatDataType,
     EthercatDcSync, EthercatGear, EthercatPdoDirection, EthercatSdoInit, EthercatSlave, GearMaster,
     IoMap, Mapping, ModbusChannel, ModbusChannelKind, ModbusConfig, ModbusDataBits, ModbusDataType,
     ModbusParity, ModbusRs485, ModbusRtuParams, ModbusStopBits, ModbusTcpParams, ModbusTransport,

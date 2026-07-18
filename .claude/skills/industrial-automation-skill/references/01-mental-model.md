@@ -103,7 +103,7 @@ Every `MutationEvent` carries a `project: String` field. Web clients filter SSE 
       reactor.fbd.json                 ← FBD as JSON
       batch_state.sfc.json             ← SFC as JSON
     devices/
-      hmi_plc.toml                     ← per-device config (modbus / ethercat)
+      hmi_plc.toml                     ← per-device config (modbus / ethercat / opcua / canopen)
     edges/
       field_pi.toml                    ← deploy targets (SSH host etc.)
     iomap.toml                         ← variable ↔ device.channel bindings

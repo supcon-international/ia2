@@ -61,11 +61,13 @@ cs pou delete main
 `--type`: `program` | `function_block` | `function`. `--language`: `st` | `ld` | `fbd` | `sfc`.
 LD/FBD/SFC sources are **JSON**, not text — `cs pou save` for those expects the graphical-program JSON shape. For hand-authoring, ST is almost always what you want.
 
-## Devices (Modbus / EtherCAT)
+## Devices (Modbus / EtherCAT / OPC UA / CANopen)
 
 ```bash
 cs device create hmi_plc   --protocol modbus      # TCP defaults (127.0.0.1:502)
 cs device create servo_bus --protocol ethercat    # sim NIC "_sim" by default
+cs device create dcs       --protocol opcua       # endpoint opc.tcp://127.0.0.1:4840
+cs device create servo_can --protocol canopen     # sim bus "_sim" by default
 cs device list                                    # name + protocol; --json
 cs device get  hmi_plc                             # full config as JSON (round-trip source)
 cs device set  hmi_plc --from cfg.json             # replace config; --from - reads stdin
@@ -73,6 +75,10 @@ cs device delete hmi_plc
 
 # modular EtherCAT coupler: build channels from its ESI + the modules present
 cs device esi-assemble coupler --idents 0x10,0x20,0x30   # slot order; hex or decimal
+
+# OPC UA: walk the live server's address space to find NodeIds
+cs device opcua-browse dcs                         # ObjectsFolder children + type hints
+cs device opcua-browse dcs --node "ns=2;s=Channel1.Device1"
 ```
 
 To configure channels / switch a Modbus device to RTU / set EtherCAT PDOs, use

@@ -37,7 +37,7 @@ cd ia2 && ./scripts/install-skill.sh
 1. **Start the server:** `ia2-server --bind 127.0.0.1:3001 &`
 2. **Restart your agent session** so it discovers the skill.
 
-Now just ask your agent to build a PLC program — it will author ST / LD / FBD / SFC, compile, wire Modbus / EtherCAT I/O, run and debug the scan loop, and deploy to edge boxes, all through `cs`. Start with `cs --help` and the skill under `.claude/skills/industrial-automation-skill/`.
+Now just ask your agent to build a PLC program — it will author ST / LD / FBD / SFC, compile, wire Modbus / EtherCAT / OPC UA / CANopen I/O, run and debug the scan loop, and deploy to edge boxes, all through `cs`. Start with `cs --help` and the skill under `.claude/skills/industrial-automation-skill/`.
 
 ## What's in the box
 
@@ -168,7 +168,7 @@ written for agent readers.
     │   ├── motor_seal.ld.json     Ladder Diagram (JSON authored)
     │   ├── click_counter.fbd.json Function Block Diagram
     │   └── batch_sequence.sfc.json Sequential Function Chart
-    ├── devices/             Modbus / EtherCAT devices
+    ├── devices/             Modbus / EtherCAT / OPC UA / CANopen devices
     └── edges/               Deploy targets (Linux edge boxes)
 ```
 

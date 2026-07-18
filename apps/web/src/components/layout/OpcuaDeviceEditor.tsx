@@ -1,12 +1,15 @@
-import { Plus, Trash2 } from "lucide-react"
+import { useState } from "react"
+import { ChevronRight, FolderTree, Plus, Trash2, X } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import { EnumSelect } from "@/components/ui/enum-select"
 import { Field } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { NumberCell } from "@/components/ui/number-cell"
+import { opcuaBrowse } from "@/lib/api"
 import type { Device } from "@/types/generated/Device"
 import type { OpcuaAccess } from "@/types/generated/OpcuaAccess"
+import type { OpcuaBrowseNode } from "@/types/generated/OpcuaBrowseNode"
 import type { OpcuaChannel } from "@/types/generated/OpcuaChannel"
 import type { OpcuaDataType } from "@/types/generated/OpcuaDataType"
 
@@ -57,6 +60,33 @@ export function OpcuaDeviceEditor({ device, onSave, link }: DeviceEditorProps) {
   }
   const removeChannel = (idx: number) => {
     update({ channels: draft.channels.filter((_, i) => i !== idx) })
+  }
+  /** Browse picker → new tag. Name derives from the display name,
+   *  cleaned to the channel-name convention; type from the hint. */
+  const addFromBrowse = (node: OpcuaBrowseNode) => {
+    const base =
+      node.display_name
+        .toLowerCase()
+        .replace(/[^a-z0-9_]+/g, "_")
+        .replace(/^_+|_+$/g, "") || "tag"
+    let name = base
+    let i = 1
+    while (draft.channels.some((c) => c.name === name)) {
+      name = `${base}_${i}`
+      i += 1
+    }
+    update({
+      channels: [
+        ...draft.channels,
+        {
+          name,
+          node_id: node.node_id,
+          data_type: node.suggested_type ?? "f32",
+          access: "read",
+          failsafe: null,
+        },
+      ],
+    })
   }
 
   const auth = draft.auth ?? { kind: "anonymous" }
@@ -131,6 +161,8 @@ export function OpcuaDeviceEditor({ device, onSave, link }: DeviceEditorProps) {
             )}
           </div>
         </section>
+
+        <BrowsePanel deviceName={device.name} onAdd={addFromBrowse} />
 
         <section>
           <SectionHeader
@@ -242,5 +274,156 @@ export function OpcuaDeviceEditor({ device, onSave, link }: DeviceEditorProps) {
         </section>
       </div>
     </>
+  )
+}
+
+/** Live address-space browser. Collapsed by default (browsing dials the
+ *  real endpoint); opening it lists ObjectsFolder, Objects drill down,
+ *  Variables land in the tag table via `onAdd`. */
+function BrowsePanel({
+  deviceName,
+  onAdd,
+}: {
+  deviceName: string
+  onAdd: (node: OpcuaBrowseNode) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [trail, setTrail] = useState<{ label: string; nodeId?: string }[]>([])
+  const [nodes, setNodes] = useState<OpcuaBrowseNode[] | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const browse = async (nodeId?: string, label = "Objects") => {
+    setBusy(true)
+    setError(null)
+    try {
+      setNodes(await opcuaBrowse(deviceName, nodeId))
+      setTrail((t) =>
+        nodeId === undefined
+          ? [{ label }]
+          : [...t, { label, nodeId }],
+      )
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  const jumpTo = async (idx: number) => {
+    const target = trail[idx]
+    setBusy(true)
+    setError(null)
+    try {
+      setNodes(await opcuaBrowse(deviceName, target.nodeId))
+      setTrail(trail.slice(0, idx + 1))
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!open) {
+    return (
+      <section>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => {
+            setOpen(true)
+            void browse()
+          }}
+        >
+          <FolderTree className="mr-1.5 size-3.5" />
+          Browse server…
+        </Button>
+      </section>
+    )
+  }
+
+  return (
+    <section className="rounded-md border border-border bg-secondary/30 p-3">
+      <div className="flex items-center justify-between">
+        <div className="flex min-w-0 items-center gap-1 text-[11px]">
+          <FolderTree className="size-3.5 shrink-0 text-muted-foreground" />
+          {trail.map((t, i) => (
+            <span key={i} className="flex min-w-0 items-center gap-1">
+              {i > 0 && (
+                <ChevronRight className="size-3 shrink-0 text-muted-foreground/60" />
+              )}
+              <button
+                type="button"
+                onClick={() => void jumpTo(i)}
+                className="truncate font-mono text-muted-foreground hover:text-foreground"
+              >
+                {t.label}
+              </button>
+            </span>
+          ))}
+          {busy && <span className="ml-1 text-muted-foreground">…</span>}
+        </div>
+        <button
+          type="button"
+          onClick={() => setOpen(false)}
+          className="rounded p-1 text-muted-foreground hover:text-foreground"
+          title="Close browser"
+        >
+          <X className="size-3.5" />
+        </button>
+      </div>
+      {error && (
+        <div className="mt-2 rounded border border-destructive/40 bg-destructive/10 px-2 py-1 text-[11px] text-destructive">
+          {error}
+        </div>
+      )}
+      {nodes && nodes.length === 0 && !error && (
+        <div className="mt-2 text-[11px] text-muted-foreground">
+          No child nodes here.
+        </div>
+      )}
+      {nodes && nodes.length > 0 && (
+        <div className="mt-2 max-h-56 overflow-auto">
+          {nodes.map((n) => (
+            <div
+              key={n.node_id}
+              className="flex items-center gap-2 rounded px-1.5 py-1 text-[12px] hover:bg-accent/30"
+            >
+              {n.node_class === "Object" ? (
+                <button
+                  type="button"
+                  onClick={() => void browse(n.node_id, n.display_name)}
+                  className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+                >
+                  <ChevronRight className="size-3 shrink-0 text-muted-foreground" />
+                  <span className="truncate text-foreground">
+                    {n.display_name}
+                  </span>
+                </button>
+              ) : (
+                <span className="flex min-w-0 flex-1 items-center gap-1.5 pl-[18px]">
+                  <span className="truncate text-foreground">
+                    {n.display_name}
+                  </span>
+                  <span className="truncate font-mono text-[10px] text-muted-foreground">
+                    {n.node_id}
+                    {n.data_type && ` · ${n.data_type}`}
+                  </span>
+                </span>
+              )}
+              {n.node_class === "Variable" && (
+                <button
+                  type="button"
+                  onClick={() => onAdd(n)}
+                  className="shrink-0 rounded border border-border bg-card px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-foreground"
+                  title="Add as tag"
+                >
+                  + Add
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
   )
 }

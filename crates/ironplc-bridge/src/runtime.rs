@@ -880,6 +880,42 @@ async fn connect_one(spec: &DeviceSpec) -> (Option<Box<dyn IoDevice>>, DeviceRep
                 }
             }
         }
+        ProtocolConfig::Canopen(cfg) => {
+            match iomap_canopen::CanopenDevice::connect(spec.name.clone(), cfg).await {
+                Ok(d) => {
+                    tracing::info!(
+                        name = %spec.name,
+                        interface = %cfg.interface,
+                        node = cfg.node_id,
+                        channels = cfg.channels.len(),
+                        "canopen connected"
+                    );
+                    (
+                        Some(Box::new(d) as Box<dyn IoDevice>),
+                        DeviceReport {
+                            name: spec.name.clone(),
+                            protocol: "canopen".into(),
+                            connected: true,
+                            error: None,
+                            slaves: Vec::new(),
+                        },
+                    )
+                }
+                Err(e) => {
+                    tracing::warn!(name = %spec.name, %e, "canopen connect failed");
+                    (
+                        None,
+                        DeviceReport {
+                            name: spec.name.clone(),
+                            protocol: "canopen".into(),
+                            connected: false,
+                            error: Some(e.to_string()),
+                            slaves: Vec::new(),
+                        },
+                    )
+                }
+            }
+        }
     }
 }
 

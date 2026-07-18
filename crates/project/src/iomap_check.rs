@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::types::{
-    Device, Direction, EthercatPdoDirection, IoMap, Mapping, ModbusChannelKind, OpcuaAccess,
-    ProtocolConfig,
+    CanopenAccess, CanopenTransport, Device, Direction, EthercatPdoDirection, IoMap, Mapping,
+    ModbusChannelKind, OpcuaAccess, ProtocolConfig,
 };
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
@@ -210,6 +210,45 @@ fn check_channel(index: usize, mapping: &Mapping, device: &Device, issues: &mut 
                 ));
             }
         }
+        ProtocolConfig::Canopen(cfg) => {
+            let Some(ch) = cfg.channels.iter().find(|c| c.name == mapping.channel) else {
+                unknown_channel(issues);
+                return;
+            };
+            // Same contract as OPC UA: the adapter mirrors every channel
+            // (SDO polls, TPDO frames, RPDO shadows), so Input always
+            // works; Output needs access=write. Additionally a TPDO is
+            // by definition device→controller — writing one is a config
+            // error even if access says write.
+            if mapping.direction == Direction::Output {
+                if ch.access != CanopenAccess::Write {
+                    issues.push(error(
+                        index,
+                        format!(
+                            "mapping '{app}.{var}': channel '{ch}' on CANopen device '{dev}' \
+                             has access=read; Output mappings need access=write",
+                            app = mapping.application,
+                            var = mapping.variable,
+                            ch = mapping.channel,
+                            dev = mapping.device
+                        ),
+                    ));
+                } else if matches!(ch.transport, CanopenTransport::Tpdo { .. }) {
+                    issues.push(error(
+                        index,
+                        format!(
+                            "mapping '{app}.{var}': channel '{ch}' on CANopen device '{dev}' \
+                             rides a TPDO (device→controller); Output mappings need SDO or \
+                             an RPDO slot",
+                            app = mapping.application,
+                            var = mapping.variable,
+                            ch = mapping.channel,
+                            dev = mapping.device
+                        ),
+                    ));
+                }
+            }
+        }
     }
 }
 
@@ -377,6 +416,58 @@ mod tests {
         }
     }
 
+    fn canopen_device(name: &str) -> Device {
+        let ch = |n: &str, access: CanopenAccess, transport: CanopenTransport| {
+            crate::types::CanopenChannel {
+                name: n.into(),
+                index: 0x6041,
+                sub_index: 0,
+                data_type: crate::types::CanopenDataType::U16,
+                access,
+                transport,
+                failsafe: None,
+            }
+        };
+        Device {
+            name: name.into(),
+            config: ProtocolConfig::Canopen(crate::types::CanopenConfig {
+                interface: "_sim".into(),
+                node_id: 34,
+                bitrate: None,
+                poll_interval_ms: 100,
+                heartbeat_timeout_ms: 3000,
+                start_on_connect: true,
+                channels: vec![
+                    ch(
+                        "statusword",
+                        CanopenAccess::Read,
+                        CanopenTransport::Tpdo {
+                            slot: 1,
+                            byte_offset: 0,
+                        },
+                    ),
+                    ch(
+                        "controlword",
+                        CanopenAccess::Write,
+                        CanopenTransport::Rpdo {
+                            slot: 1,
+                            byte_offset: 0,
+                        },
+                    ),
+                    ch("velocity_sp", CanopenAccess::Write, CanopenTransport::Sdo),
+                    ch(
+                        "wrongway",
+                        CanopenAccess::Write,
+                        CanopenTransport::Tpdo {
+                            slot: 2,
+                            byte_offset: 0,
+                        },
+                    ),
+                ],
+            }),
+        }
+    }
+
     fn mapping(variable: &str, direction: Direction, device: &str, channel: &str) -> Mapping {
         Mapping {
             application: "main".into(),
@@ -413,6 +504,7 @@ mod tests {
             modbus_device("plc"),
             ethercat_device("ec"),
             opcua_device("dcs"),
+            canopen_device("servo"),
         ];
         let map = iomap(vec![
             mapping("estop", Direction::Input, "plc", "di_estop"),
@@ -421,8 +513,52 @@ mod tests {
             mapping("command", Direction::Output, "ec", "rx_command"),
             mapping("flow_pv", Direction::Input, "dcs", "pv_flow"),
             mapping("flow_sp", Direction::Output, "dcs", "sp_flow"),
+            mapping("drive_status", Direction::Input, "servo", "statusword"),
+            mapping("drive_cmd", Direction::Output, "servo", "controlword"),
+            mapping("drive_sp", Direction::Output, "servo", "velocity_sp"),
         ]);
         assert!(validate_iomap(&map, &devices).is_empty());
+    }
+
+    // ---- CANopen-specific direction rules ------------------------------
+
+    #[test]
+    fn canopen_output_to_read_channel_is_an_error() {
+        let devices = vec![canopen_device("servo")];
+        let map = iomap(vec![mapping("x", Direction::Output, "servo", "statusword")]);
+        let issues = validate_iomap(&map, &devices);
+        assert_eq!(errors(&issues).len(), 1);
+        assert!(issues[0].message.contains("access=read"), "{issues:?}");
+    }
+
+    #[test]
+    fn canopen_output_to_tpdo_is_an_error_even_with_write_access() {
+        let devices = vec![canopen_device("servo")];
+        let map = iomap(vec![mapping("x", Direction::Output, "servo", "wrongway")]);
+        let issues = validate_iomap(&map, &devices);
+        assert_eq!(errors(&issues).len(), 1);
+        assert!(issues[0].message.contains("TPDO"), "{issues:?}");
+    }
+
+    #[test]
+    fn canopen_input_from_any_channel_is_fine() {
+        // Mirror covers SDO polls, TPDO frames and RPDO shadows alike.
+        let devices = vec![canopen_device("servo")];
+        let map = iomap(vec![
+            mapping("a", Direction::Input, "servo", "statusword"),
+            mapping("b", Direction::Input, "servo", "controlword"),
+            mapping("c", Direction::Input, "servo", "velocity_sp"),
+        ]);
+        assert!(validate_iomap(&map, &devices).is_empty());
+    }
+
+    #[test]
+    fn canopen_unknown_channel_is_an_error() {
+        let devices = vec![canopen_device("servo")];
+        let map = iomap(vec![mapping("x", Direction::Input, "servo", "nope")]);
+        let issues = validate_iomap(&map, &devices);
+        assert_eq!(errors(&issues).len(), 1);
+        assert!(issues[0].message.contains("no channel"), "{issues:?}");
     }
 
     // ---- rule 1: unknown device ----------------------------------------

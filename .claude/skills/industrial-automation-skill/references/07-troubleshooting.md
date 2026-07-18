@@ -79,6 +79,19 @@ A servo can wedge in a half-configured state after an init that aborted mid-conf
 ### `init sdo write … : object does not exist in the object directory`
 An `init_sdo` entry targets a CoE object the drive doesn't have. A failed startup SDO aborts init by design (better than silently running a mis-configured drive) — drop or fix that entry. Example: the Inovance SV660N has no `0x6080` (max motor speed); cap torque via `0x6072` and limit speed in your program instead.
 
+## OPC UA
+
+- **`Failed to read own certificate/private key` ERROR lines on connect** — harmless noise. The UA library probes its PKI store even when the session uses SecurityPolicy None (IA2's v1 posture); no certificate is needed and the connection proceeds. Ignore unless you also see the connect itself failing.
+- **`browse failed: opcua endpoint … unreachable`** — the endpoint in the device config must be reachable *from the IDE server machine* (browse connects live). Check URL/port, then whether the UA server allows anonymous None-policy sessions.
+- **Tags read as 0 while connected** — usually a `node_id` typo (the mirror skips tags the server answers with a bad status) or a wrapped/nonscalar value on the server side. `cs device opcua-browse` shows the exact NodeIds; the adapter unwraps `Variant`/`DataValue` nesting but arrays/strings don't map to channels.
+
+## CANopen
+
+- **All values frozen at 0, device unhealthy after `heartbeat_timeout_ms`** — node absent or wrong `node_id`. On a real bus check `ip link` (interface up? bitrate right?) and `candump can0` for the node's 0x700+id heartbeat.
+- **PDO channels never update but SDO ones do** — the node is not in Operational (PDOs only run there). Leave `start_on_connect` on, or start it from the vendor tool; also verify the PDO slot/offsets match the node's actual mapping.
+- **`needs a segmented SDO transfer (>4 bytes)`** — the object is a string/array/domain. Bind a scalar sub-object instead; segmented transfers are out of scope.
+- **macOS: `SocketCAN requires a Linux edge`** — expected; real CAN interfaces exist on the Linux edge only. Use `interface = "_sim"` for development.
+
 ## Known limits (not bugs — design constraints today)
 
 - **Multi-PROGRAM runs are supported** — one container per scheduled instance, round-robin on one scan thread. The sole restriction is no `VAR_GLOBAL` shared across instances (rejected with a clear error). See `01-mental-model.md` fact 2.

@@ -1053,6 +1053,68 @@ pub async fn esi_assemble_device(
     Ok(Json(updated))
 }
 
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct OpcuaBrowseRequest {
+    /// NodeId to browse under; omitted/empty = ObjectsFolder.
+    #[serde(default)]
+    pub node_id: Option<String>,
+}
+
+/// One row of an address-space browse — `OpcuaDeviceEditor`'s picker and
+/// `cs device opcua-browse` both consume this.
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct OpcuaBrowseNode {
+    pub node_id: String,
+    pub display_name: String,
+    /// `Object` / `Variable` / `Method` / …
+    pub node_class: String,
+    /// UA scalar type name for Variables (`Int32`, `Double`, …) when
+    /// the server reports a standard one.
+    pub data_type: Option<String>,
+    /// The channel `data_type` that fits — one-click adoption into an
+    /// `OpcuaChannel`.
+    pub suggested_type: Option<project::OpcuaDataType>,
+}
+
+/// Live-browse the device's OPC UA server so users pick NodeIds from
+/// the actual address space instead of retyping them from UaExpert.
+/// Connects with the device's own endpoint/auth config, browses one
+/// level, disconnects.
+pub async fn opcua_browse_device(
+    State(state): State<AppState>,
+    project: ProjectName,
+    AxumPath(name): AxumPath<String>,
+    Json(req): Json<OpcuaBrowseRequest>,
+) -> Result<Json<Vec<OpcuaBrowseNode>>, ApiError> {
+    let config = with_project(&state, &project, |store| {
+        let device = store.read_device(&name)?;
+        match device.config {
+            ProtocolConfig::Opcua(c) => Ok(c),
+            _ => Err(ApiError::BadRequest(format!(
+                "device '{name}' is not an OPC UA device"
+            ))),
+        }
+    })?;
+    let from = req.node_id.as_deref().filter(|s| !s.trim().is_empty());
+    let nodes = iomap_opcua::browse_endpoint(&config, from)
+        .await
+        .map_err(|e| ApiError::BadRequest(format!("browse failed: {e}")))?;
+    Ok(Json(
+        nodes
+            .into_iter()
+            .map(|n| OpcuaBrowseNode {
+                node_id: n.node_id,
+                display_name: n.display_name,
+                node_class: n.node_class,
+                data_type: n.data_type,
+                suggested_type: n.suggested_channel_type,
+            })
+            .collect(),
+    ))
+}
+
 pub async fn delete_device(
     State(state): State<AppState>,
     project: ProjectName,

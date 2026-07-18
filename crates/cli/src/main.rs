@@ -521,7 +521,7 @@ pub(crate) enum DeviceCmd {
     Create {
         /// Device name (project-unique, used as the iomap key).
         name: String,
-        #[arg(long, value_parser = ["modbus","ethercat"])]
+        #[arg(long, value_parser = ["modbus","ethercat","opcua","canopen"])]
         protocol: String,
         #[command(flatten)]
         server: ServerOpt,
@@ -571,6 +571,19 @@ pub(crate) enum DeviceCmd {
         /// the modules you've physically installed.
         #[arg(long)]
         idents: String,
+        #[command(flatten)]
+        server: ServerOpt,
+    },
+    /// Live-browse an OPC UA device's server address space. Lists the
+    /// children of `--node` (default: ObjectsFolder) with NodeIds,
+    /// classes and type hints — copy a Variable's `node_id` straight
+    /// into a channel via `cs device set`. The device must be OPC UA
+    /// and its endpoint reachable from this machine.
+    OpcuaBrowse {
+        name: String,
+        /// NodeId to browse under, e.g. `ns=2;s=Channel1.Device1`.
+        #[arg(long)]
+        node: Option<String>,
         #[command(flatten)]
         server: ServerOpt,
     },
