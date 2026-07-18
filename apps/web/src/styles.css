@@ -3,9 +3,9 @@
 
 /* Self-hosted, per the design's type spec: IBM Plex Sans for UI chrome,
  * JetBrains Mono everywhere code, identifiers, addresses and live values
- * appear. Bundled rather than CDN-linked because the Mac shell's
- * WKWebView must render identically with no network. Only the weights the
- * UI actually uses are pulled in; the variable mono covers 400/500/700
+ * appear. Bundled rather than CDN-linked so the IDE renders identically
+ * on offline / air-gapped plant networks. Only the weights the UI
+ * actually uses are pulled in; the variable mono covers 400/500/700
  * from a single file. */
 @import "@fontsource/ibm-plex-sans/400.css";
 @import "@fontsource/ibm-plex-sans/500.css";
@@ -375,30 +375,3 @@ body {
   }
 }
 
-/* ---- macOS titlebar safe area --------------------------------------
- *
- * The Mac shell uses `fullSizeContentView + titlebarAppearsTransparent`
- * so the WebView's content extends *under* the traffic-light area at
- * the top of the window — gives us one continuous background colour
- * with no high-contrast seam. The downside: anything clickable in the
- * top-left ~70×28pt would be obscured by the close/min/zoom buttons.
- *
- * Reserving the first 28px of the viewport with `bg-background` (which
- * the body already sets) leaves the buttons floating over the page
- * background, exactly matching how native Mac apps with hidden titles
- * (Safari's tab bar, Linear, Figma) compose. The body also becomes a
- * drag region via `-webkit-app-region`, so users can grab the empty
- * top strip to move the window the way they expect.
- *
- * The drag region is disabled per-element inside .ia2-no-drag — the
- * Workbench root opts back in for everything that's an interactive
- * surface (panels, gutters, buttons). Without this, clicking a button
- * in the top 28px would start a window-drag instead of activating it.
- */
-.ia2-mac-drag-region {
-  -webkit-app-region: drag;
-}
-.ia2-no-drag,
-.ia2-no-drag * {
-  -webkit-app-region: no-drag;
-}

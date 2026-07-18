@@ -70,7 +70,7 @@ export function AgentStatusBar() {
   return (
     <div
       data-testid="agent-status-bar"
-      className="ia2-no-drag relative z-[710] flex h-[26px] shrink-0 items-center gap-2 bg-agent px-3 font-mono text-[11px] text-agent-foreground"
+      className="relative z-[710] flex h-[26px] shrink-0 items-center gap-2 bg-agent px-3 font-mono text-[11px] text-agent-foreground"
     >
       <span aria-hidden className="size-[6px] rounded-full bg-agent-foreground" />
       {/* Bot glyph in a subtle darker-green chip, per the Figma bar. */}

@@ -37,37 +37,27 @@ const DEFAULT_DEMO_MODBUS_ADDR: &str = "127.0.0.1:5502";
 const DEFAULT_BIND: &str = "127.0.0.1:3001";
 
 /// CLI flags for the long-lived HTTP backend. Deliberately tiny — every
-/// flag here either makes the desktop shell possible (`--bind 0`,
-/// `--print-url`, `--static-dir`) or surfaces a knob that already
-/// existed as an env var (`--demo-modbus-addr` mirrors
-/// `DEMO_MODBUS_ADDR`). New flags need a rationale; we are not building
-/// a CLI here, just an embeddable backend.
+/// flag either serves the deployment story (`--bind`, `--static-dir`)
+/// or surfaces a knob that already existed as an env var
+/// (`--demo-modbus-addr` mirrors `DEMO_MODBUS_ADDR`). New flags need a
+/// rationale; we are not building a CLI here, just a backend.
 #[derive(Parser, Debug)]
 #[command(
     name = "ia2-server",
     about = "HTTP backend for the IA2 IDE (axum + ironplc bridge + iomap)."
 )]
 struct Cli {
-    /// Address to bind. Use `127.0.0.1:0` to let the OS pick a free port;
-    /// combine with `--print-url` so a parent process (e.g. the macOS
-    /// shell) can read the actual port from stdout. Default: 127.0.0.1:3001.
+    /// Address to bind. Default: 127.0.0.1:3001.
     #[arg(long, value_name = "ADDR", default_value = DEFAULT_BIND)]
     bind: String,
 
-    /// Print the actual bound URL (e.g. `http://127.0.0.1:54321`) to
-    /// stdout once the listener is ready, on its own line. The native
-    /// shell parses this to know where to point its WebView. No-op when
-    /// you're running the server interactively.
-    #[arg(long)]
-    print_url: bool,
-
     /// Directory containing a pre-built `apps/web/dist` to serve at `/`.
-    /// When omitted, only the JSON API is exposed (which is the current
-    /// `vite dev` behaviour — Vite serves the React app, proxies `/api`
+    /// When omitted, only the JSON API is exposed (which is the `vite
+    /// dev` behaviour — Vite serves the React app, proxies `/api`
     /// here). When set, the server becomes a single origin hosting both
-    /// the UI and the API, which is what the desktop shell points its
-    /// WebView at. A missing/invalid path is a hard error — better to
-    /// fail loudly than to silently 404 every page request.
+    /// the UI and the API — the single-binary deployment shape. A
+    /// missing/invalid path is a hard error — better to fail loudly
+    /// than to silently 404 every page request.
     #[arg(long, value_name = "DIR")]
     static_dir: Option<PathBuf>,
 
@@ -85,35 +75,11 @@ struct Cli {
     /// root). Without a registry, /api/library lists nothing.
     #[arg(long, value_name = "DIR")]
     library_dir: Option<PathBuf>,
-
-    /// If set, periodically check whether the given PID is still
-    /// alive and exit if not. The Mac/Windows desktop shell passes
-    /// its own PID here so the server reaps itself if the shell is
-    /// SIGKILLed, panics, or is otherwise reaped without a chance to
-    /// run cleanup. Without this, the server would orphan and keep
-    /// the port + project lock indefinitely. Set to 0 / unset to
-    /// disable.
-    #[arg(long, value_name = "PID")]
-    parent_pid: Option<i32>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-
-    // Spawn the parent-liveness watchdog at the *very top* of main,
-    // before tracing/subscribers/runtime setup. We deliberately don't
-    // tuck it next to its sibling concerns later in the file — see
-    // commit history: when spawned after `axum::serve(...).await` had
-    // initialized its state, the std::thread::spawn was silently
-    // unreachable in macOS-launchd-launched processes (the spawn line
-    // never executed; main's sync code path between bind and serve
-    // was effectively skipped). Moving it ahead of *all* other
-    // initialization made it reliable. The cost is one thread parked
-    // in read(2); pay it.
-    if cli.parent_pid.is_some() {
-        spawn_parent_watchdog();
-    }
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -389,17 +355,6 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(bind_addr).await?;
     let local = listener.local_addr()?;
     tracing::info!(addr = %local, "server listening");
-    if cli.print_url {
-        // Single line, no prefix, no trailing whitespace beyond \n.
-        // The shell's BackendSupervisor reads exactly one line and
-        // treats it as the base URL. Anything else (tracing logs,
-        // panic backtraces) goes to stderr.
-        println!("http://{}", local);
-    }
-
-    // (parent-liveness watchdog spawned earlier at the very top of
-    // main — see comment there for why)
-
     // Agent-activity watchdog: every 500 ms, check whether the last
     // CLI heartbeat aged out past the TTL; if so, flip `active=false`
     // and emit an AgentActivity event so the IDE drops its takeover
@@ -479,52 +434,6 @@ async fn agent_watchdog(state: AppState) {
             let _ = state.event_tx.send(ev);
         }
     }
-}
-
-/// Watch the parent shell for liveness. Strategy: block on a read
-/// from stdin and exit when it returns 0 (EOF). The Mac/Windows
-/// shell never writes anything to our stdin while running, so the
-/// blocking read just sits there parked. The instant the shell
-/// process dies — gracefully via SIGTERM, ungracefully via SIGKILL,
-/// or via panic — the OS closes the write end of the pipe and our
-/// read returns 0.
-///
-/// Why this instead of PPID polling?
-///   - macOS GUI apps launched via `open` / launchd have a non-
-///     obvious reparent timing window: `ps` shows ppid=1 instantly,
-///     but `getppid()` inside the child can lag (observed: up to
-///     several seconds, sometimes not at all in a single test run).
-///     stdin EOF is detected by the kernel synchronously when the
-///     pipe's write end is closed, with no zombie/launchd nuance.
-///   - Works identically regardless of launch method (direct,
-///     `open`, double-click in Finder, Spotlight, `launchctl`,
-///     ssh forwarding).
-///   - Future Linux `cs runtime` case gets the same behaviour for
-///     free.
-///
-/// We use `libc::_exit` rather than `std::process::exit` so we skip
-/// Rust runtime cleanup (atexit, destructors). The whole point is to
-/// die fast and let the OS reclaim everything — there's nothing to
-/// flush.
-fn spawn_parent_watchdog() {
-    std::thread::Builder::new()
-        .name("parent-watchdog".into())
-        .spawn(move || {
-            tracing::info!("parent watchdog armed (stdin EOF detection)");
-            let mut buf = [0u8; 64];
-            loop {
-                // SAFETY: read(2) on fd 0 is safe; we only care
-                // about whether it returns 0 (EOF) or -1 (error).
-                let rv = unsafe { libc::read(0, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
-                if rv <= 0 {
-                    // EOF (0) or error (-1) — parent gone.
-                    unsafe { libc::_exit(0) };
-                }
-                // The shell never writes to our stdin, so if we got
-                // bytes it's a misuse — drop them and keep watching.
-            }
-        })
-        .expect("spawn parent-watchdog thread");
 }
 
 /// Serve the SPA's index.html for any path that wasn't a real file

@@ -10,11 +10,7 @@ export function ProjectEmptyState() {
 
   return (
     <div className="flex h-screen flex-col text-foreground">
-      {/* macOS titlebar drag-region — transparent so vibrancy shows
-       * through behind the traffic lights. See Workbench for the full
-       * explanation. */}
-      <div aria-hidden className="ia2-mac-drag-region h-7 shrink-0" />
-      <div className="ia2-no-drag grid flex-1 place-items-center bg-background">
+      <div className="grid flex-1 place-items-center bg-background">
       <div className="w-full max-w-md space-y-6 p-8">
         <div className="space-y-1">
           <div className="flex items-center gap-2 text-xs uppercase tracking-widest text-muted-foreground">

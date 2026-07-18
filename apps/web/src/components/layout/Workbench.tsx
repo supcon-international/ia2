@@ -130,7 +130,6 @@ function Shell() {
   if (projectLoading) {
     return (
       <div className="flex h-screen flex-col text-foreground">
-        <div aria-hidden className="ia2-mac-drag-region h-7 shrink-0" />
         <div className="grid flex-1 place-items-center bg-background text-sm text-muted-foreground">
           Loading…
         </div>
@@ -165,23 +164,13 @@ function Shell() {
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden text-foreground">
-      {/* macOS titlebar safe area. The Swift shell uses
-       *   fullSizeContentView + titlebarAppearsTransparent
-       *   + drawsBackground: false on the WebView
-       *   + NSVisualEffectView underlay (titlebar material)
-       * so this 28px strip stays *transparent* and the OS-level
-       * vibrancy blur shows through behind the traffic lights — the
-       * same translucent chrome Safari / Linear / Figma get for free.
-       * The strip is also a `-webkit-app-region: drag` zone so users
-       * can grab it to move the window. On non-mac shells (Linux /
-       * Windows / browser) the strip is just a thin transparent
-       * gutter that costs ~28px of vertical space — no visual
-       * conflict, no special-casing. */}
+      {/* Slim titlebar: carries the centred project picker (the
+       * document-name-in-titlebar convention). */}
       <WindowTitleBar />
       {/* Rail + resizable panes share one horizontal row. The rail is a
        * fixed 52px outside the resizable Group so dragging the sidebar
        * gutter never touches it — it's chrome, not a pane. */}
-      <div className="ia2-no-drag flex h-full min-h-0 w-full bg-background">
+      <div className="flex h-full min-h-0 w-full bg-background">
         <IconRail />
         <Group
           orientation="horizontal"

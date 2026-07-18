@@ -105,7 +105,7 @@ export function QuickOpen({
       onClick={onClose}
     >
       <div
-        className="ia2-no-drag w-[520px] max-w-[calc(100vw-96px)] overflow-hidden rounded-lg border border-border bg-popover shadow-2xl"
+        className="w-[520px] max-w-[calc(100vw-96px)] overflow-hidden rounded-lg border border-border bg-popover shadow-2xl"
         onClick={(ev) => ev.stopPropagation()}
       >
         <div className="flex items-center gap-2 border-b border-border px-3">

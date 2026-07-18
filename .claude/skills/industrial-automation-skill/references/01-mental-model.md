@@ -6,10 +6,10 @@ Three layers. Memorise them — every other reference assumes this picture.
 ┌──────────────────────────────────────────────────────────────────┐
 │  Client(s)                                                       │
 │                                                                  │
-│   IA2.app (Mac shell, WKWebView)        Browser tab (web SPA)    │
-│   ─────────────────────────────────     ────────────────────     │
-│   one binary, embeds the server         points at any server     │
-│   `Cmd+N` → new window                  URL-scoped per ?project  │
+│   Browser tab (web SPA)                                          │
+│   ────────────────────────────────                               │
+│   vite dev :3000, or served by the server via --static-dir       │
+│   URL-scoped per ?project — one tab per project window           │
 │                                                                  │
 │   `cs` CLI (this is what you use)                                │
 │   ─────────────────────────────────                              │

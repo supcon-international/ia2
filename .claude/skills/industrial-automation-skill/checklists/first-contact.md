@@ -16,34 +16,25 @@ ls ./target/release/cs            # ...or it's the build output, if you're in a 
 
 ## 2. Discover the server URL
 
-`cs` defaults to `http://127.0.0.1:3001`. That's right for a manually-started dev server (`cargo run -p server`) but **wrong for `IA2.app`**, which binds an ephemeral port. Resolve it:
+`cs` defaults to `http://127.0.0.1:3001` — the conventional port for a dev server (`cargo run -p server`) or an installed `ia2-server`. Resolve it:
 
 ```bash
-# 1. Plain dev server on the default port?
+# 1. The conventional port?
 curl -sf -m 1 http://127.0.0.1:3001/api/health >/dev/null && SRV=http://127.0.0.1:3001
 
-# 2. IA2.app binds an OS-assigned ephemeral port (macOS: 49152-65535).
-#    Find it with lsof (`+c0` so the command name isn't truncated to
-#    "ia2-serve"), then confirm /api/health — that also skips the
-#    demo-modbus listener the same process may hold:
+# 2. A server someone started on another port? Find any listening
+#    ia2-server (`+c0` so the command name isn't truncated) and confirm
+#    /api/health — the health probe also skips the demo-modbus listener
+#    the same process may hold:
 if [ -z "$SRV" ]; then
   for p in $(lsof -nP -iTCP -sTCP:LISTEN +c0 2>/dev/null | grep ia2-server | grep -oE '127\.0\.0\.1:[0-9]+' | cut -d: -f2); do
     curl -sf -m 1 "http://127.0.0.1:$p/api/health" 2>/dev/null | grep -q '"status":"ok"' && { SRV="http://127.0.0.1:$p"; break; }
   done
 fi
-
-# 3. Fallback: scan the ephemeral range (slow; macOS starts at 49152, not 50000).
-if [ -z "$SRV" ]; then
-  for p in $(seq 49152 65535); do
-    if curl -sf -m 0.1 "http://127.0.0.1:$p/api/health" 2>/dev/null | grep -q '"status":"ok"'; then
-      SRV="http://127.0.0.1:$p"; break
-    fi
-  done
-fi
 echo "SRV=$SRV"
 ```
 
-If the scan finds nothing, no server is running. Start one — headless: `ia2-server --bind 127.0.0.1:3001 &` then `SRV=http://127.0.0.1:3001`; or from a checkout `cargo run -p server`; or have the user launch `IA2.app` (`open /Applications/IA2.app`). Don't proceed without a reachable `/api/health`.
+If nothing answers, no server is running. Start one: `ia2-server --bind 127.0.0.1:3001 &` (installed) or `cargo run -p server` (checkout), then `SRV=http://127.0.0.1:3001`. Don't proceed without a reachable `/api/health`.
 
 > Tip: some sessions persist the URL in `/tmp/ia2_srv`. Check there first: `SRV=$(cat /tmp/ia2_srv 2>/dev/null)` then validate it with a health probe before trusting it.
 

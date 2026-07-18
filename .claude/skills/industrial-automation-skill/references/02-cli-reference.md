@@ -12,7 +12,7 @@ SRV="http://127.0.0.1:60349"   # discover the real port — see checklists/first
 | Flag | Meaning |
 |---|---|
 | `--project NAME` | Target a specific open project. **Global** — works on every subcommand. Omit when only one project is open. |
-| `--server URL` | Server base URL. Default `http://127.0.0.1:3001`. **Override for IA2.app** (ephemeral port). |
+| `--server URL` | Server base URL. Default `http://127.0.0.1:3001`; override when the server runs elsewhere. |
 | `--json` | Machine output on stdout (most read subcommands). |
 
 Exit codes: `0` success · `1` clean run but source has errors · `2` usage error · `≥3` infrastructure failure.

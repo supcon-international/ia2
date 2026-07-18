@@ -13,7 +13,7 @@ The CLI is **designed for you**, not for human shells. Most flags exist so you d
 
 1. **First contact in a session** — run through `checklists/first-contact.md`. Three things to settle before any work:
    - **Is the toolchain installed?** `cs` + `ia2-server` are Rust binaries this skill drives. If the skill was installed standalone (via `npx skills`) and `cs` isn't on `PATH`, build them once: `git clone --recursive https://github.com/supcon-international/ia2 && cd ia2 && ./scripts/install-skill.sh` (needs the Rust toolchain — rustup.rs).
-   - **Where is the server?** `cs` defaults to `http://127.0.0.1:3001`; if nothing answers `/api/health`, start one headless: `ia2-server --bind 127.0.0.1:3001 &`. (`IA2.app` binds ephemeral ports — discover via `lsof` / `curl` scan.)
+   - **Where is the server?** `cs` defaults to `http://127.0.0.1:3001`; if nothing answers `/api/health`, start one: `ia2-server --bind 127.0.0.1:3001 &` (or discover a non-default port via `lsof` — see `checklists/first-contact.md`).
    - **Which projects are open?** `cs project list`; pass `--project NAME` if more than one.
 2. **For any multi-step work, wrap it in a session.** This is not optional. See `references/03-agent-sessions.md`:
    ```
@@ -29,7 +29,7 @@ The CLI is **designed for you**, not for human shells. Most flags exist so you d
 
 ## The one-paragraph version
 
-IA2 is a single Rust server (axum) that hosts N IEC 61131-3 projects (TOML on disk), compiles each via the vendored `ironplc` compiler, runs the bytecode in an in-process scan loop, and drives real Modbus TCP / Modbus RTU / EtherCAT hardware through the `iomap-*` adapters. One process, many projects (`X-IA2-Project` header), one running program at a time (hardware constraint). The web UI runs in either a browser tab or a `WKWebView` inside the macOS shell — both are URL-scoped via `?project=name`. The `cs` CLI is a thin axum client: every command is one HTTP call. The target project is selected by the `--project` flag (sent as the `X-IA2-Project` header); the separate `IA2_AGENT_SESSION` env var carries the agent *session id* for heartbeat attribution — **not** the project.
+IA2 is a single Rust server (axum) that hosts N IEC 61131-3 projects (TOML on disk), compiles each via the vendored `ironplc` compiler, runs the bytecode in an in-process scan loop, and drives real Modbus TCP / Modbus RTU / EtherCAT hardware through the `iomap-*` adapters. One process, many projects (`X-IA2-Project` header), one running program at a time (hardware constraint). The web UI runs in the browser (vite dev, or served by the server via `--static-dir`), URL-scoped via `?project=name`. The `cs` CLI is a thin axum client: every command is one HTTP call. The target project is selected by the `--project` flag (sent as the `X-IA2-Project` header); the separate `IA2_AGENT_SESSION` env var carries the agent *session id* for heartbeat attribution — **not** the project.
 
 ## Core anti-patterns to call out immediately
 
@@ -42,7 +42,6 @@ When you see yourself or the user about to do any of these, **stop**:
 - **Forgetting `application` on iomap entries** → `Mapping` has 5 fields: `application` (POU name) + `variable` + `device` + `channel` + `direction`. The server rejects with 422 if you skip `application`.
 - **Using `cs runtime force` and forgetting to `unforce`** → forces survive the agent's lifetime. Always pair them, or call out the leftover at handoff.
 - **Using `force` (esp. `force --edge`) as a *setpoint* source** → `force` is a debug override, and `--edge` is one fresh `ssh host curl` per call. Fine for a supervised poke; for a real/repeatable setpoint bind the variable via iomap or drive it from POU logic, and for unattended/tight loops run the loop on the box. See `04-workflows.md` § G.
-- **Trusting `cs --server http://127.0.0.1:3001`** with IA2.app open → IA2.app binds a random port. Discover it; don't assume.
 - **Reading `ModbusConfig.host`** without checking transport → the new schema wraps it in `transport.kind = "tcp" | "rtu"`. Reading the top-level `host` is undefined on RTU configs.
 - **Treating `cs runtime status` as "is the agent still in control"** → that's a runtime liveness check. Agent presence is separate (`/api/agent/heartbeat` + the session/start/end pair).
 

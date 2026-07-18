@@ -27,6 +27,3 @@ iomap-ethercat = { path = "../iomap-ethercat" }
 project = { path = "../project" }
 iomap-modbus = { path = "../iomap-modbus" }
 toml.workspace = true
-# Used only for the parent-pid watchdog (kill(pid, 0) probing). Tiny
-# transitive footprint and already in our tree via tokio.
-libc = "0.2"

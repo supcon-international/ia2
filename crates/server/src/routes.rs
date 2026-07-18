@@ -2653,10 +2653,10 @@ async fn handle_lsp_ws(mut socket: WebSocket) {
 /// failure would.
 fn resolve_user_path(raw: &str) -> PathBuf {
     // NOTE: home comes from `project::home_dir()` (→ dirs::home_dir,
-    // getpwuid-backed), NOT `$HOME`. A Finder/launchd-launched IA2.app
-    // has no `$HOME` in its environment, so reading the env var here
-    // returns None and tilde/relative paths silently fail to resolve
-    // in the desktop app — which is exactly the bug this fixes.
+    // getpwuid-backed), NOT `$HOME` — a service-manager-launched server
+    // (launchd/systemd) may have no `$HOME` in its environment, and the
+    // env-var path would make tilde/relative paths silently fail to
+    // resolve there.
     let trimmed = raw.trim();
     if let Some(rest) = trimmed.strip_prefix('~') {
         // `~`, `~/x`, or `~x` (treat `~x` as `~/x` — nobody means a

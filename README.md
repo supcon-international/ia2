@@ -43,9 +43,8 @@ Now just ask your agent to build a PLC program — it will author ST / LD / FBD 
 
 | Component | Tech | Purpose |
 |---|---|---|
-| **`apps/mac/`** | Swift + AppKit + WKWebView | Native macOS shell (`IA2.app`). Hosts the React UI in a system WebView; supervises the Rust backend as a child process. |
-| **`apps/web/`** | React 19 + Vite + TanStack Router + Tailwind 4 | The IDE itself. ST / LD / FBD / SFC editors, runtime Monitor, project tree, IO mapping. Single SPA, serves identically in the desktop shell and the dev `vite` browser. |
-| **`crates/server/`** | Rust + axum + tower | HTTP backend (port 3001 dev, random in desktop). REST + SSE. Owns the project, dispatches to ironplc-bridge, schedules tasks. |
+| **`apps/web/`** | React 19 + Vite + TanStack Router + Tailwind 4 | The IDE itself, in the browser. ST / LD / FBD / SFC editors, runtime Monitor, project tree, IO mapping. Single SPA — `vite dev` in development, or served by the server itself via `--static-dir`. |
+| **`crates/server/`** | Rust + axum + tower | HTTP backend (port 3001). REST + SSE. Owns the project, dispatches to ironplc-bridge, schedules tasks. |
 | **`crates/cli/`** | Rust + clap + ureq | The `cs` binary — agent-first command-line. Static analysis, project CRUD, runtime debug. See `cs --help`. |
 | **`crates/ironplc-bridge/`** | Rust | Wraps [ironplc](https://github.com/ironplc/ironplc) compiler + VM. Adds LD / FBD / SFC → ST transpilers + diagnostics enrichment. |
 | **`crates/runtime/`** | Rust | Headless edge runtime (`ia2-runtime` binary). Same scan loop as the IDE-side bridge, plus a small HTTP monitor (health / status / logs / discover) the server reaches over SSH — no LSP, no CORS, no REST project API. Designed for Linux edge boxes. |
@@ -55,18 +54,18 @@ Now just ask your agent to build a PLC program — it will author ST / LD / FBD 
 
 ## Two interfaces, one source of truth
 
-The HTTP API is the canonical contract. The desktop UI, the CLI,
+The HTTP API is the canonical contract. The web IDE, the CLI,
 agents, and (future) MCP all talk to it. Everything is JSON; everything
 is curlable.
 
 ```
-                    HTTP + SSE (port 3001 or random)
+                       HTTP + SSE (port 3001)
                               │
        ┌──────────────────────┼──────────────────────┐
        ▼                      ▼                      ▼
   apps/web (React)      crates/cli (`cs`)       agents (Claude
-   in WKWebView                                   Code / Codex /
-   or browser           in terminal / CI          MCP wrappers)
+   in the browser                                 Code / Codex /
+                        in terminal / CI          MCP wrappers)
 ```
 
 When an agent runs `cs pou create`, the server emits a `Mutation`
@@ -106,13 +105,13 @@ don't trigger the overlay — querying state isn't "operating."
 pnpm install
 cargo test -p server   # populates apps/web/src/types/generated/
 
-# desktop shell (single binary, recommended)
-./apps/mac/build.sh
-open apps/mac/build/debug/IA2.app
-
-# OR dev mode — two terminals
+# dev mode — two terminals
 pnpm --filter @cs/web dev      # → http://localhost:3000
 cargo run -p server            # → http://localhost:3001
+
+# OR single origin: server hosts the built UI itself
+pnpm --filter @cs/web build
+cargo run -p server --release -- --static-dir apps/web/dist
 ```
 
 ### Drive it from the CLI

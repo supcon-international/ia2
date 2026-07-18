@@ -49,7 +49,7 @@ export function IconRail() {
     <>
       <nav
         aria-label="Activity"
-        className="ia2-no-drag flex w-[52px] shrink-0 flex-col items-center border-r border-border bg-secondary py-2"
+        className="flex w-[52px] shrink-0 flex-col items-center border-r border-border bg-secondary py-2"
       >
         <div className="flex flex-col items-center gap-1">
           <RailButton label="Explorer" active>

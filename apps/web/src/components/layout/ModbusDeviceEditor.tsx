@@ -520,7 +520,7 @@ const BAUD_RATES = [1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200] as cons
  * the wrong port. */
 function defaultSerialPath(): string {
   // navigator.platform is deprecated but still the most reliable
-  // sync identification in browsers and WKWebView. Falls back to a
+  // sync platform identification in browsers. Falls back to a
   // POSIX-shaped guess if unavailable.
   const plat =
     typeof navigator !== "undefined" ? navigator.platform.toLowerCase() : ""

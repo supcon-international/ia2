@@ -40,12 +40,9 @@ export function WindowTitleBar() {
   const projectName = project?.name ?? currentProject() ?? null
 
   return (
-    <div className="ia2-mac-drag-region flex h-7 shrink-0 items-center justify-center gap-2 px-2 text-xs">
-      {/* Picker sits centred; macOS apps typically put the document
-       * name centre-titlebar (Finder, Mail, Pages, Linear). Same
-       * convention here. The button itself opts out of the drag
-       * region (.ia2-no-drag) so clicking it doesn't start a window
-       * drag. */}
+    <div className="flex h-7 shrink-0 items-center justify-center gap-2 px-2 text-xs">
+      {/* Picker sits centred — the document-name-in-titlebar convention
+       * (Finder, Mail, Linear), kept for the browser IDE. */}
       <ProjectPicker currentName={projectName} />
     </div>
   )
@@ -116,7 +113,7 @@ function ProjectPicker({ currentName }: { currentName: string | null }) {
   }, [])
 
   return (
-    <div ref={containerRef} className="ia2-no-drag relative">
+    <div ref={containerRef} className="relative">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}

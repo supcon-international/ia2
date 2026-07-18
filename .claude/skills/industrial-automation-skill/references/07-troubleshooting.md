@@ -21,8 +21,8 @@ Each entry: the symptom you'll see, the cause, the fix.
 **Fix:** `cs project open` it first, or pick a name from `cs project list`.
 
 ### CLI can't reach the server at all (`connection refused`)
-**Cause:** wrong port. `cs` defaults to `:3001`; IA2.app binds an **ephemeral** port.
-**Fix:** discover the real port (see `checklists/first-contact.md`). Pass it as `--server`.
+**Cause:** no server on the expected port. `cs` defaults to `:3001`.
+**Fix:** start one (`ia2-server --bind 127.0.0.1:3001 &`) or discover a non-default port (see `checklists/first-contact.md`) and pass it as `--server`.
 
 ### `cs` command works but the IDE shows nothing / a different project
 **Cause:** the IDE window is scoped to a different `?project=` than the one your command hit.
@@ -88,4 +88,3 @@ An `init_sdo` entry targets a CoE object the drive doesn't have. A failed startu
 - **RETAIN restores as i32** — wide types truncate.
 - **No per-entry iomap/tasks/device-channel edits.** Whole-document get → edit → set.
 - **WSTRING** is upstream-WIP; don't author WSTRING programs expecting them to run.
-- **Server port for IA2.app is ephemeral.** Always discover; never hard-code `:3001` when the desktop app is the server.
