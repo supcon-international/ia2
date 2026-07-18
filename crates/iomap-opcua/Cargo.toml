@@ -23,4 +23,3 @@ project = { path = "../project" }
 # feature is dev-only so the shipped adapter stays client-only.
 opcua = { package = "async-opcua", version = "0.18", features = ["client", "server"] }
 tokio = { workspace = true }
-tracing-subscriber = { workspace = true }

@@ -2017,7 +2017,6 @@ dependencies = [
  "project",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
