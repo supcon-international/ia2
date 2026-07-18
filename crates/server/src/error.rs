@@ -21,6 +21,7 @@ impl From<StoreError> for ApiError {
             StoreError::AlreadyExists(p) => Self::Conflict(format!("already exists: {p}")),
             StoreError::InvalidName(n) => Self::BadRequest(format!("invalid name: {n}")),
             StoreError::PouNotFound(n) => Self::NotFound(format!("POU '{n}' not found")),
+            StoreError::HmiNotFound(n) => Self::NotFound(format!("HMI screen '{n}' not found")),
             StoreError::DeviceNotFound(n) => Self::NotFound(format!("device '{n}' not found")),
             StoreError::EdgeNotFound(n) => Self::NotFound(format!("edge '{n}' not found")),
             StoreError::FolderNotFound(n) => Self::NotFound(format!("folder '{n}' not found")),

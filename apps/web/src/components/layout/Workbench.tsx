@@ -8,6 +8,7 @@ import { AgentStatusBar } from "./AgentStatusBar"
 import { DevicePane } from "./DevicePane"
 import { IconRail } from "./IconRail"
 import { EdgePane } from "./EdgePane"
+import { HmiPane } from "./HmiPane"
 import { IoMapPane } from "./IoMapPane"
 import { MonitorPane } from "./MonitorPane"
 import { ProgramPane } from "./ProgramPane"
@@ -146,6 +147,8 @@ function Shell() {
       <DevicePane />
     ) : view === "edge" ? (
       <EdgePane />
+    ) : view === "hmi" ? (
+      <HmiPane />
     ) : view === "iomap" ? (
       <IoMapPane />
     ) : view === "tasks" ? (

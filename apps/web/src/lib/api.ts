@@ -753,3 +753,101 @@ export async function fetchAttachment(name: string): Promise<AttachmentStatus> {
     `GET /api/edges/${name}/attachment`,
   )
 }
+
+// ============================================================
+//  HMI screens
+// ============================================================
+
+import type { HmiDoc } from "@/types/generated/HmiDoc"
+import type { HmiIssue } from "@/types/generated/HmiIssue"
+import type { HmiListEntry } from "@/types/generated/HmiListEntry"
+import type { HmiOp } from "@/types/generated/HmiOp"
+import type { HmiOpsResponse } from "@/types/generated/HmiOpsResponse"
+import type { HmiSymbolInfo } from "@/types/generated/HmiSymbolInfo"
+
+export async function fetchHmis(): Promise<HmiListEntry[]> {
+  return jsonOrThrow(await apiFetch(`/api/hmi`), "GET /api/hmi")
+}
+
+export async function fetchHmi(path: string): Promise<HmiDoc> {
+  return jsonOrThrow(
+    await apiFetch(`/api/hmi/${encodeURIComponent(path)}`),
+    "GET /api/hmi/{path}",
+  )
+}
+
+export async function createHmi(
+  path: string,
+  title?: string,
+): Promise<HmiDoc> {
+  return jsonOrThrow(
+    await apiFetch(`/api/hmi`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, title }),
+    }),
+    "POST /api/hmi",
+  )
+}
+
+export async function saveHmi(
+  path: string,
+  doc: HmiDoc,
+): Promise<HmiIssue[]> {
+  return jsonOrThrow(
+    await apiFetch(`/api/hmi/${encodeURIComponent(path)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(doc),
+    }),
+    "PUT /api/hmi/{path}",
+  )
+}
+
+export async function deleteHmi(path: string): Promise<void> {
+  await jsonOrThrow(
+    await apiFetch(`/api/hmi/${encodeURIComponent(path)}`, {
+      method: "DELETE",
+    }),
+    "DELETE /api/hmi/{path}",
+  )
+}
+
+export async function hmiOps(
+  path: string,
+  ops: HmiOp[],
+): Promise<HmiOpsResponse> {
+  return jsonOrThrow(
+    await apiFetch(`/api/hmi/${encodeURIComponent(path)}/ops`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ops }),
+    }),
+    "POST /api/hmi/{path}/ops",
+  )
+}
+
+export async function generateHmi(
+  path: string,
+  opts?: { force?: boolean; title?: string },
+): Promise<HmiDoc> {
+  return jsonOrThrow(
+    await apiFetch(`/api/hmi/${encodeURIComponent(path)}/generate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(opts ?? {}),
+    }),
+    "POST /api/hmi/{path}/generate",
+  )
+}
+
+export async function checkHmi(path: string): Promise<HmiIssue[]> {
+  return jsonOrThrow(
+    await apiFetch(`/api/hmi/${encodeURIComponent(path)}/check`),
+    "GET /api/hmi/{path}/check",
+  )
+}
+
+export async function fetchHmiSymbols(): Promise<HmiSymbolInfo[]> {
+  return jsonOrThrow(await apiFetch(`/api/hmi-symbols`), "GET /api/hmi-symbols")
+}

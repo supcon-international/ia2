@@ -29,6 +29,7 @@ import {
 import { cn } from "@/lib/utils"
 import { buildTree, type TreeNode } from "@/lib/project-tree"
 import { useRuntime } from "@/state/runtime"
+import { HmiSection } from "./HmiSection"
 import type { PouType } from "@/types/generated/PouType"
 import type { PouFile } from "@/types/generated/PouFile"
 import type { Device } from "@/types/generated/Device"
@@ -379,6 +380,8 @@ export function ProjectTree() {
           }
         />
       )}
+
+      <HmiSection />
 
       {/* Tasks and IO Mapping are project-level singletons (one
           tasks.toml and one iomap.toml per project), so they don't

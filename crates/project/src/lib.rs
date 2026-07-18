@@ -14,6 +14,7 @@
 
 mod errors;
 mod fbd;
+pub mod hmi;
 mod iomap_check;
 mod ld;
 mod paths;
@@ -24,6 +25,11 @@ mod types;
 pub use errors::StoreError;
 pub use fbd::{
     FbdBlock, FbdInputBinding, FbdInputSource, FbdOutputBinding, FbdPosition, FbdProgram,
+};
+pub use hmi::{
+    apply_hmi_ops, hmi_variables, validate_hmi, HmiAction, HmiBinding, HmiBindingSpec, HmiDoc,
+    HmiGrid, HmiIssue, HmiLayout, HmiNode, HmiNodeKind, HmiOp, HmiSeries, HmiShapeKind,
+    HmiTextStyle, HMI_SYMBOLS,
 };
 pub use iomap_check::{validate_iomap, IomapIssue, IomapIssueSeverity};
 pub use ld::{

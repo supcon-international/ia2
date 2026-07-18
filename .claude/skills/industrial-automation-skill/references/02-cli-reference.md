@@ -112,6 +112,21 @@ cs tasks set --from t.json   # replace all; --from - reads stdin
 
 Both are **replace-the-whole-document** operations — `get`, edit, `set`. There's no per-entry add/remove. Shapes in `06-devices-iomap-tasks.md`.
 
+## HMI screens
+
+```bash
+cs hmi generate overview            # deterministic baseline from project truth (409 if exists; --force)
+cs hmi symbols                      # palette contract: bindable keys + props per built-in symbol
+cs hmi get overview                 # full document JSON
+echo '[{"op":"add_node","node":{...}}]' | cs hmi op overview --from -   # incremental edits, atomic batch
+cs hmi check overview               # structure + variable-existence warnings
+cs hmi list / create / save / delete
+```
+
+Author screens incrementally — each `op` batch renders live (with a spawn
+animation) in every open IDE canvas. Full workflow + document model:
+`08-hmi.md`.
+
 ## Run + runtime debug
 
 ```bash

@@ -2,6 +2,7 @@ mod catalog;
 mod edges;
 mod error;
 mod events;
+mod hmi_routes;
 mod library;
 mod routes;
 mod state;
@@ -163,6 +164,22 @@ async fn main() -> anyhow::Result<()> {
         // POUs (PROGRAM + FB + FUNCTION side by side); declarations are
         // parsed and surfaced in /api/project + /api/project/pous.
         .route("/api/pous", post(routes::create_pou))
+        // HMI screens (docs/hmi-design.md). Slugs are percent-encoded
+        // into one path segment, same convention as /api/pous.
+        .route(
+            "/api/hmi",
+            get(hmi_routes::list_hmis).post(hmi_routes::create_hmi),
+        )
+        .route(
+            "/api/hmi/{path}",
+            get(hmi_routes::get_hmi)
+                .put(hmi_routes::put_hmi)
+                .delete(hmi_routes::delete_hmi),
+        )
+        .route("/api/hmi/{path}/ops", post(hmi_routes::hmi_ops))
+        .route("/api/hmi/{path}/check", get(hmi_routes::check_hmi))
+        .route("/api/hmi/{path}/generate", post(hmi_routes::generate_hmi))
+        .route("/api/hmi-symbols", get(hmi_routes::hmi_symbols))
         .route("/api/library", get(routes::list_libraries))
         .route("/api/library/import", post(routes::import_library))
         .route("/api/device-catalog", get(routes::list_device_catalog))

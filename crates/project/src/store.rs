@@ -151,6 +151,105 @@ impl ProjectStore {
     // driven and exposed via the bridge in the server layer; the store
     // stays parser-free.
 
+    // ============================================================
+    //  HMI screens — hmi/<slug>.hmi.json (docs/hmi-design.md)
+    // ============================================================
+
+    /// Slugs of every screen under `hmi/`, sorted. Same identity rules as
+    /// POU paths (slash-separated, no extension).
+    pub fn list_hmis(&self) -> Result<Vec<String>, StoreError> {
+        let root = self.root.join("hmi");
+        if !root.exists() {
+            return Ok(vec![]);
+        }
+        let mut out = Vec::new();
+        fn walk(dir: &Path, prefix: &str, out: &mut Vec<String>) -> Result<(), StoreError> {
+            for entry in fs::read_dir(dir)? {
+                let entry = entry?;
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') {
+                    continue;
+                }
+                let path = entry.path();
+                if path.is_dir() {
+                    let next = if prefix.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{prefix}/{name}")
+                    };
+                    walk(&path, &next, out)?;
+                } else if let Some(slug) = name.strip_suffix(".hmi.json") {
+                    out.push(if prefix.is_empty() {
+                        slug.to_string()
+                    } else {
+                        format!("{prefix}/{slug}")
+                    });
+                }
+            }
+            Ok(())
+        }
+        walk(&root, "", &mut out)?;
+        out.sort();
+        Ok(out)
+    }
+
+    fn hmi_file(&self, path: &str) -> PathBuf {
+        self.root.join("hmi").join(format!("{path}.hmi.json"))
+    }
+
+    /// Parse the screen at `path`. `HmiNotFound` when the file is absent;
+    /// a corrupt file surfaces as the JSON error (the editor shows it —
+    /// same philosophy as POU files that fail to parse).
+    pub fn read_hmi(&self, path: &str) -> Result<crate::hmi::HmiDoc, StoreError> {
+        validate_path(path)?;
+        let file = self.hmi_file(path);
+        if !file.exists() {
+            return Err(StoreError::HmiNotFound(path.into()));
+        }
+        let raw = fs::read_to_string(&file)?;
+        serde_json::from_str(&raw).map_err(|e| {
+            StoreError::InvalidName(format!("hmi '{path}' is not a valid document: {e}"))
+        })
+    }
+
+    /// Create a fresh empty screen. `AlreadyExists` if the slug is taken.
+    pub fn create_hmi(&self, path: &str, title: &str) -> Result<crate::hmi::HmiDoc, StoreError> {
+        validate_path(path)?;
+        let file = self.hmi_file(path);
+        if file.exists() {
+            return Err(StoreError::AlreadyExists(path.into()));
+        }
+        let doc = crate::hmi::empty_hmi(title);
+        self.write_hmi(path, &doc)?;
+        Ok(doc)
+    }
+
+    /// Serialize + atomically write the screen (tmp + rename, like RETAIN
+    /// persistence — a crash mid-save must not corrupt a screen).
+    pub fn write_hmi(&self, path: &str, doc: &crate::hmi::HmiDoc) -> Result<(), StoreError> {
+        validate_path(path)?;
+        let file = self.hmi_file(path);
+        if let Some(parent) = file.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string_pretty(doc)
+            .map_err(|e| StoreError::InvalidName(format!("serialize hmi: {e}")))?;
+        let tmp = file.with_extension("hmi.json.tmp");
+        fs::write(&tmp, json)?;
+        fs::rename(&tmp, &file)?;
+        Ok(())
+    }
+
+    pub fn delete_hmi(&self, path: &str) -> Result<(), StoreError> {
+        validate_path(path)?;
+        let file = self.hmi_file(path);
+        if !file.exists() {
+            return Err(StoreError::HmiNotFound(path.into()));
+        }
+        fs::remove_file(file)?;
+        Ok(())
+    }
+
     pub fn list_pou_paths(&self) -> Result<Vec<String>, StoreError> {
         let root = self.root.join("pous");
         if !root.exists() {

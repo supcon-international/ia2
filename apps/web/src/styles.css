@@ -375,3 +375,41 @@ body {
   }
 }
 
+
+/* ---- HMI canvas ---------------------------------------------------- */
+
+/* Spawn animation for elements an agent just placed (SSE `touched` ids).
+ * Deliberately subtle: a short fade/rise plus one acid-green outline
+ * pulse — the acid green marks MACHINE authorship, same vocabulary as
+ * the takeover chrome, and decays fast so the screen stays ISA-calm. */
+@keyframes hmi-spawn-in {
+  0% {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes hmi-spawn-ring {
+  0% {
+    outline-color: color-mix(in srgb, var(--agent) 90%, transparent);
+  }
+  100% {
+    outline-color: transparent;
+  }
+}
+.hmi-spawn {
+  animation:
+    hmi-spawn-in 260ms ease-out,
+    hmi-spawn-ring 850ms ease-out;
+  outline: 1.5px solid transparent;
+  outline-offset: 3px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .hmi-spawn {
+    animation: none;
+    outline: none;
+  }
+}

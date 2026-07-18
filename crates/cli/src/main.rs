@@ -282,6 +282,17 @@ pub(crate) enum Command {
     #[command(subcommand)]
     Tasks(TasksCmd),
 
+    /// Author operator screens (HMI) under the project's `hmi/`.
+    ///
+    /// The intended agent workflow is INCREMENTAL: `cs hmi generate`
+    /// lays a deterministic baseline from the project's variables, then
+    /// you reshape it one element at a time with `cs hmi op` — every op
+    /// renders live (with a spawn animation) in any open IDE canvas, so
+    /// generate → look → op → look. `cs hmi symbols` prints the palette
+    /// contract; `cs hmi check` validates structure + variable names.
+    #[command(subcommand)]
+    Hmi(HmiCmd),
+
     /// Read or write the project's northbound publishing config
     /// (northbound.toml — MQTT to supOS/Tier0; applied by the edge
     /// runtime on its next restart/deploy).
@@ -645,6 +656,97 @@ pub(crate) enum EdgeCmd {
 }
 
 // =================================================================
+//   cs hmi — operator screens: generate a baseline, then edit it
+//   element by element (each op renders live in the IDE canvas)
+// =================================================================
+#[derive(Subcommand, Debug)]
+pub(crate) enum HmiCmd {
+    /// List the project's screens (path, title, ISA level).
+    List {
+        #[command(flatten)]
+        server: ServerOpt,
+    },
+    /// Print one screen's full JSON document.
+    Get {
+        /// Screen slug (slash-separated, no extension), e.g. `overview`.
+        path: String,
+        #[command(flatten)]
+        server: ServerOpt,
+    },
+    /// Create an empty screen (then build it up with `cs hmi op`).
+    Create {
+        path: String,
+        /// Operator-facing title (defaults to the slug).
+        #[arg(long)]
+        title: Option<String>,
+        #[command(flatten)]
+        server: ServerOpt,
+    },
+    /// Replace a whole screen from a JSON file / stdin. Prefer `op` for
+    /// incremental edits — `save` refreshes canvases without the
+    /// per-element animation.
+    Save {
+        path: String,
+        /// Read the HmiDoc JSON from this file (or `-` for stdin).
+        #[arg(long)]
+        from: String,
+        #[command(flatten)]
+        server: ServerOpt,
+    },
+    /// Apply structured edits — the incremental authoring surface.
+    ///
+    /// Body is `{"ops":[...]}` or a bare `[...]` of ops. Each op is one
+    /// of:
+    ///   {"op":"add_node","parent":null,"node":{...}}   append an element
+    ///   {"op":"update_node","id":"n1","patch":{...}}   shallow-merge
+    ///   {"op":"remove_node","id":"n1"}
+    ///   {"op":"set_meta","title":"...","level":2}
+    /// Batches apply atomically; the response lists `touched` node ids
+    /// (also broadcast over SSE so open canvases animate exactly those
+    /// elements). Generate the node shapes from `cs hmi symbols` + the
+    /// skill's HMI reference.
+    Op {
+        path: String,
+        /// Read the ops JSON from this file (or `-` for stdin).
+        #[arg(long)]
+        from: String,
+        #[command(flatten)]
+        server: ServerOpt,
+    },
+    /// Structural validation + variable-existence warnings.
+    Check {
+        path: String,
+        #[command(flatten)]
+        server: ServerOpt,
+    },
+    /// Deterministic first-pass screen from project truth (alarmbar,
+    /// per-POU sections, indicators/values/setpoints, one trend). 409 if
+    /// the screen exists — pass --force to regenerate.
+    Generate {
+        path: String,
+        #[arg(long)]
+        force: bool,
+        /// Operator-facing title for the generated screen.
+        #[arg(long)]
+        title: Option<String>,
+        #[command(flatten)]
+        server: ServerOpt,
+    },
+    /// Print the built-in symbol palette: every symbol's bindable keys,
+    /// props and default size — the contract `add_node` symbols follow.
+    Symbols {
+        #[command(flatten)]
+        server: ServerOpt,
+    },
+    /// Delete a screen.
+    Delete {
+        path: String,
+        #[command(flatten)]
+        server: ServerOpt,
+    },
+}
+
+// =================================================================
 //   cs iomap — read / write the variable-to-channel binding table
 // =================================================================
 #[derive(Subcommand, Debug)]
@@ -897,6 +999,7 @@ fn main() {
         Command::Device(d) => cmd_device(d),
         Command::Edge(e) => cmd_edge(e),
         Command::Iomap(i) => cmd_iomap(i),
+        Command::Hmi(h) => cmd::hmi::cmd_hmi(h),
         Command::Northbound(n) => cmd_northbound(n),
         Command::Library(l) => cmd_library(l),
         Command::Tasks(t) => cmd_tasks(t),

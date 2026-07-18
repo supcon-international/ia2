@@ -98,29 +98,81 @@ pub struct MutationEvent {
 #[ts(export)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MutationDetail {
-    PouCreated { path: String },
-    PouUpdated { path: String },
-    PouDeleted { path: String },
-    LibraryImported { name: String },
-    LibraryRemoved { name: String },
-    PouFolderCreated { path: String },
-    PouFolderDeleted { path: String },
-    DeviceUpserted { name: String },
-    DeviceDeleted { name: String },
-    DeviceFolderCreated { path: String },
-    DeviceFolderDeleted { path: String },
-    EdgeUpserted { name: String },
-    EdgeDeleted { name: String },
-    EdgeFolderCreated { path: String },
-    EdgeFolderDeleted { path: String },
-    EdgeAttached { name: String, local_port: u16 },
-    EdgeDetached { name: String },
+    PouCreated {
+        path: String,
+    },
+    PouUpdated {
+        path: String,
+    },
+    PouDeleted {
+        path: String,
+    },
+    LibraryImported {
+        name: String,
+    },
+    LibraryRemoved {
+        name: String,
+    },
+    PouFolderCreated {
+        path: String,
+    },
+    PouFolderDeleted {
+        path: String,
+    },
+    DeviceUpserted {
+        name: String,
+    },
+    DeviceDeleted {
+        name: String,
+    },
+    DeviceFolderCreated {
+        path: String,
+    },
+    DeviceFolderDeleted {
+        path: String,
+    },
+    EdgeUpserted {
+        name: String,
+    },
+    EdgeDeleted {
+        name: String,
+    },
+    EdgeFolderCreated {
+        path: String,
+    },
+    EdgeFolderDeleted {
+        path: String,
+    },
+    /// An HMI screen was created, saved, or edited via ops. `touched`
+    /// carries the node ids the mutation created/modified (empty for
+    /// whole-document saves) — the canvas uses it to spawn-animate
+    /// exactly the elements an agent just placed.
+    HmiUpserted {
+        path: String,
+        touched: Vec<String>,
+    },
+    HmiDeleted {
+        path: String,
+    },
+    EdgeAttached {
+        name: String,
+        local_port: u16,
+    },
+    EdgeDetached {
+        name: String,
+    },
     IoMapChanged,
     TasksChanged,
     TasksMigrated,
-    ProjectOpened { name: String, path: String },
+    ProjectOpened {
+        name: String,
+        path: String,
+    },
     ProjectClosed,
-    ProjectCreated { name: String, path: String },
+    ProjectCreated {
+        name: String,
+        path: String,
+    },
 }
 
 /// Canonical topic strings. Centralised so the route handlers and

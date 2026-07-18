@@ -2688,7 +2688,7 @@ fn owned_store(state: &AppState, project: &ProjectName) -> Result<ProjectStore, 
     with_project(state, project, |store| Ok(store.clone()))
 }
 
-fn with_project<T>(
+pub(crate) fn with_project<T>(
     state: &AppState,
     project: &ProjectName,
     f: impl FnOnce(&ProjectStore) -> Result<T, ApiError>,

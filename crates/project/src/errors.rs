@@ -35,6 +35,9 @@ pub enum StoreError {
     #[error("POU '{0}' not found")]
     PouNotFound(String),
 
+    #[error("HMI screen '{0}' not found")]
+    HmiNotFound(String),
+
     #[error("device '{0}' not found")]
     DeviceNotFound(String),
 

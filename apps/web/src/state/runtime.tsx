@@ -24,6 +24,7 @@ import type { Protocol } from "@/types/generated/Protocol"
 import type { Tasks } from "@/types/generated/Tasks"
 import type { VarSnapshot } from "@/types/generated/VarSnapshot"
 import { agentActivityStore } from "@/state/agent-activity"
+import { hmiLiveStore } from "@/state/hmi-live"
 import { liveFeedStore } from "@/state/live-feed"
 import { buildProjectFbDefs, setProjectFbs, type FbPin } from "@/lib/ld-fbs"
 import { invalidationBus, Topic } from "@/state/invalidation"
@@ -65,7 +66,7 @@ import {
 } from "@/lib/api"
 import { LspClient } from "@/lib/lsp-client"
 
-export type View = "app" | "device" | "iomap" | "edge" | "tasks"
+export type View = "app" | "device" | "iomap" | "edge" | "tasks" | "hmi"
 
 /**
  * Handle a single `Mutation` event from `/api/events`.
@@ -107,6 +108,15 @@ function handleMutationEvent(
   // (1) Fan out cache invalidation. Any hook subscribed via
   // useInvalidate refetches its own slice.
   invalidationBus.emit(event.topic)
+
+  // (1b) HMI mutations additionally carry the touched node ids — feed
+  // the dedicated store so open canvases reload AND spawn-animate
+  // exactly the elements this batch placed.
+  if (event.detail.kind === "hmi_upserted") {
+    hmiLiveStore.upserted(event.detail.path, event.detail.touched)
+  } else if (event.detail.kind === "hmi_deleted") {
+    hmiLiveStore.deleted(event.detail.path)
+  }
 
   // (2) Auto-jump for newly-created POUs. Per-POU refetch on
   // updates is handled by the dedicated subscription effect in
@@ -161,6 +171,8 @@ type AppState = {
   projectEpoch: number
 
   currentDevice: Device | null
+  /** Selected HMI screen slug when view === "hmi". */
+  currentHmi: string | null
   currentEdge: Edge | null
   iomap: IoMap
   tasks: Tasks
@@ -191,6 +203,7 @@ type AppState = {
   // Selection actions
   selectPou: (path: string) => Promise<void>
   selectDevice: (name: string) => Promise<void>
+  selectHmi: (path: string) => Promise<void>
   selectEdge: (name: string) => Promise<void>
   openIoMap: () => Promise<void>
   openTasks: () => Promise<void>
@@ -245,6 +258,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
   const [diagnostics, setDiagnostics] = useState<CheckDiagnostic[]>([])
   const [projectEpoch, setProjectEpoch] = useState(0)
   const [currentDevice, setCurrentDevice] = useState<Device | null>(null)
+  const [currentHmi, setCurrentHmi] = useState<string | null>(null)
   const [currentEdge, setCurrentEdge] = useState<Edge | null>(null)
   const [attached, setAttached] = useState<AttachedEdge>(null)
   const [iomap, setIomap] = useState<IoMap>({ mappings: [] })
@@ -760,6 +774,12 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     }
   }, [])
 
+  const selectHmi = useCallback(async (path: string) => {
+    setError(null)
+    setCurrentHmi(path)
+    setView("hmi")
+  }, [])
+
   const selectEdge = useCallback(async (name: string) => {
     setError(null)
     try {
@@ -1109,6 +1129,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       diagnostics,
       projectEpoch,
       currentDevice,
+      currentHmi,
       currentEdge,
       attached,
       iomap,
@@ -1124,6 +1145,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       refreshProject,
       selectPou,
       selectDevice,
+      selectHmi,
       selectEdge,
       openIoMap,
       openTasks,
@@ -1159,6 +1181,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       diagnostics,
       projectEpoch,
       currentDevice,
+      currentHmi,
       currentEdge,
       attached,
       iomap,
@@ -1174,6 +1197,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
       refreshProject,
       selectPou,
       selectDevice,
+      selectHmi,
       selectEdge,
       openIoMap,
       openTasks,

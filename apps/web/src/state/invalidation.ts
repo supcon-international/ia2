@@ -62,6 +62,7 @@ export const Topic = {
   DEVICES: "devices",
   EDGES: "edges",
   IOMAP: "iomap",
+  HMI: "hmi",
   TASKS: "tasks",
   pou: (path: string) => `pou:${path}`,
   device: (name: string) => `device:${name}`,

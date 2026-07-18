@@ -3,7 +3,7 @@
 
 use crate::http::http_agent;
 use crate::{
-    Command, DeviceCmd, EdgeCmd, IomapCmd, LibraryCmd, NorthboundCmd, PouCmd, ProjectCmd,
+    Command, DeviceCmd, EdgeCmd, HmiCmd, IomapCmd, LibraryCmd, NorthboundCmd, PouCmd, ProjectCmd,
     RuntimeCmd, TasksCmd,
 };
 
@@ -77,6 +77,16 @@ pub(crate) fn announce_target(cmd: &Command) -> Option<(&str, &'static str)> {
 
         Command::Iomap(IomapCmd::Get { server, .. }) => Some((&server.server, "iomap get")),
         Command::Iomap(IomapCmd::Set { server, .. }) => Some((&server.server, "iomap set")),
+
+        Command::Hmi(HmiCmd::List { server }) => Some((&server.server, "hmi list")),
+        Command::Hmi(HmiCmd::Get { server, .. }) => Some((&server.server, "hmi get")),
+        Command::Hmi(HmiCmd::Create { server, .. }) => Some((&server.server, "hmi create")),
+        Command::Hmi(HmiCmd::Save { server, .. }) => Some((&server.server, "hmi save")),
+        Command::Hmi(HmiCmd::Op { server, .. }) => Some((&server.server, "hmi op")),
+        Command::Hmi(HmiCmd::Check { server, .. }) => Some((&server.server, "hmi check")),
+        Command::Hmi(HmiCmd::Generate { server, .. }) => Some((&server.server, "hmi generate")),
+        Command::Hmi(HmiCmd::Symbols { server }) => Some((&server.server, "hmi symbols")),
+        Command::Hmi(HmiCmd::Delete { server, .. }) => Some((&server.server, "hmi delete")),
         Command::Tasks(TasksCmd::Get { server, .. }) => Some((&server.server, "tasks get")),
         Command::Northbound(NorthboundCmd::Get { server, .. }) => {
             Some((&server.server, "northbound get"))

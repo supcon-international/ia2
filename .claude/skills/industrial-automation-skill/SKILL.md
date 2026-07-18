@@ -24,7 +24,7 @@ The CLI is **designed for you**, not for human shells. Most flags exist so you d
    '
    ```
    Without the wrapper, the IDE's takeover banner flickers between every command — exhausting for the human. With it, the banner stays steady with your `--label` text.
-3. **Match the user's intent to a workflow recipe** in `references/04-workflows.md` — recipes cover: new project from scratch, add a POU, configure devices + iomap + tasks, validate + run, debug session, deploy to edge. Pattern-match before improvising.
+3. **Match the user's intent to a workflow recipe** in `references/04-workflows.md` — recipes cover: new project from scratch, add a POU, configure devices + iomap + tasks, validate + run, debug session, deploy to edge. Operator screens (HMI) have their own reference — `references/08-hmi.md`: generate a baseline with `cs hmi generate`, then reshape it element-by-element with `cs hmi op` so the canvas renders each batch live. Pattern-match before improvising.
 4. **Before claiming "done", run `checklists/handoff.md`** — verifies the project compiles cleanly, runtime status is sane, and any forced variables are released.
 
 ## The one-paragraph version
