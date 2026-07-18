@@ -32,7 +32,7 @@ git clone --recursive https://github.com/supcon-international/ia2
 cd ia2 && ./scripts/install-skill.sh
 ```
 
-`scripts/install-skill.sh` builds `cs` + `ia2-server` into `~/.local/bin` (it also installs the skill, so it doubles as a no-`npx`, do-everything one-shot). Then:
+`scripts/install-skill.sh` builds `cs` + `ia2-server` (plus its `lsp-launcher` sidecar for editor language support) into `~/.local/bin` (it also installs the skill, so it doubles as a no-`npx`, do-everything one-shot). Then:
 
 1. **Start the server:** `ia2-server --bind 127.0.0.1:3001 &`
 2. **Restart your agent session** so it discovers the skill.

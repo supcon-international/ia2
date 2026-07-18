@@ -75,9 +75,15 @@ export class LspClient {
     this.ws = ws
     ws.onopen = () => this.initialize()
     ws.onmessage = (ev) => this.onMessage(ev.data)
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       this.initialized = false
       this.opened = false
+      // An abnormal close with a server-supplied reason means the LSP
+      // sidecar couldn't start (incomplete install). Surface it once —
+      // the editor itself keeps working; squiggles come from /api/check.
+      if (ev.code !== 1000 && ev.reason) {
+        console.warn(`LSP unavailable (editor still works): ${ev.reason}`)
+      }
     }
     ws.onerror = () => {
       this.initialized = false

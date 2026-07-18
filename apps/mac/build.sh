@@ -40,17 +40,23 @@ mkdir -p "$APP_CONTENTS/MacOS" "$APP_CONTENTS/Resources/web"
 
 # --- 1. Rust server -------------------------------------------------
 
-echo "==> Building Rust server ($MODE)"
+echo "==> Building Rust server + lsp-launcher ($MODE)"
 if [[ "$MODE" == "release" ]]; then
-    (cd "$REPO_ROOT" && cargo build -p server --release)
+    (cd "$REPO_ROOT" && cargo build -p server -p lsp-launcher --release)
     SERVER_BIN="$REPO_ROOT/target/release/server"
+    LSP_BIN="$REPO_ROOT/target/release/lsp-launcher"
 else
-    (cd "$REPO_ROOT" && cargo build -p server)
+    (cd "$REPO_ROOT" && cargo build -p server -p lsp-launcher)
     SERVER_BIN="$REPO_ROOT/target/debug/server"
+    LSP_BIN="$REPO_ROOT/target/debug/lsp-launcher"
 fi
 # The bundled binary lives at Contents/MacOS/ia2-server — the Swift
 # shell's BackendSupervisor.locateServerBinary() looks for this name.
 cp "$SERVER_BIN" "$APP_CONTENTS/MacOS/ia2-server"
+# ia2-server spawns lsp-launcher (per editor WebSocket) from the
+# directory it lives in, so the sidecar rides in MacOS/ next to it.
+# Without it every Monaco LSP connection dies at spawn.
+cp "$LSP_BIN" "$APP_CONTENTS/MacOS/lsp-launcher"
 
 # --- 1b. ts-rs bindings ---------------------------------------------
 # ts-rs exports TS types only as a side effect of `cargo test`, not

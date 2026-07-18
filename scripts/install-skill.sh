@@ -2,7 +2,8 @@
 #
 # install-skill.sh — set up IA2 for a coding agent (Claude Code, Codex, …).
 #
-# Builds the `cs` CLI + `ia2-server`, installs them on your PATH, and drops
+# Builds the `cs` CLI + `ia2-server` + its `lsp-launcher` sidecar, installs
+# them on your PATH, and drops
 # the `industrial-automation-skill` into ~/.claude/skills/ so your agent can
 # author / compile / run / debug / deploy IEC 61131-3 PLC programs through IA2.
 #
@@ -52,14 +53,19 @@ if [ -z "$(ls -A "$REPO_ROOT/vendor/ironplc" 2>/dev/null)" ]; then
 fi
 
 # ---- build --------------------------------------------------------------
-say "building cs + ia2-server (release) — the first build can take a few minutes"
-cargo build --release -p ia2-cli -p server
+say "building cs + ia2-server + lsp-launcher (release) — the first build can take a few minutes"
+cargo build --release -p ia2-cli -p server -p lsp-launcher
 
 # ---- install binaries ---------------------------------------------------
 say "installing binaries → $BIN_DIR"
 mkdir -p "$BIN_DIR"
 install -m 0755 "$REPO_ROOT/target/release/cs"     "$BIN_DIR/cs"
 install -m 0755 "$REPO_ROOT/target/release/server" "$BIN_DIR/ia2-server"
+# ia2-server spawns this per editor WebSocket to run the Monaco LSP
+# bridge; it looks for the binary NEXT TO ITSELF, so it must be
+# installed alongside — without it every editor LSP connection dies
+# at spawn.
+install -m 0755 "$REPO_ROOT/target/release/lsp-launcher" "$BIN_DIR/lsp-launcher"
 
 # ---- install skill ------------------------------------------------------
 say "installing skill → $SKILL_DST"
@@ -77,9 +83,10 @@ on_path=""; case ":${PATH}:" in *":$BIN_DIR:"*) on_path="yes";; esac
 cat <<EOF
 
 $(ok "Done.")
-  cs          → $BIN_DIR/cs
-  ia2-server  → $BIN_DIR/ia2-server
-  skill       → $SKILL_DST
+  cs           → $BIN_DIR/cs
+  ia2-server   → $BIN_DIR/ia2-server
+  lsp-launcher → $BIN_DIR/lsp-launcher
+  skill        → $SKILL_DST
 
 Next:
 EOF

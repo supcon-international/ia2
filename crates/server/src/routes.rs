@@ -2517,7 +2517,7 @@ fn lsp_launcher_path() -> PathBuf {
     path
 }
 
-async fn handle_lsp_ws(socket: WebSocket) {
+async fn handle_lsp_ws(mut socket: WebSocket) {
     let cmd = lsp_launcher_path();
     let mut child = match Command::new(&cmd)
         .stdin(Stdio::piped())
@@ -2529,6 +2529,22 @@ async fn handle_lsp_ws(socket: WebSocket) {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(path = %cmd.display(), %e, "failed to spawn lsp-launcher");
+            // Close with a reason instead of dropping the socket cold:
+            // the browser's devtools then show WHY the LSP died (a
+            // missing sidecar binary — i.e. an incomplete install)
+            // rather than a bare disconnect. The editor keeps working
+            // either way; diagnostics come from /api/check.
+            let _ = socket
+                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                    code: 1011, // internal error
+                    reason: format!(
+                        "lsp-launcher not available at {} — reinstall (the \
+                         binary ships alongside ia2-server)",
+                        cmd.display()
+                    )
+                    .into(),
+                })))
+                .await;
             return;
         }
     };
