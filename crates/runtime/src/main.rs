@@ -18,11 +18,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use axum::{
-    extract::{Query, State},
+    extract::{Path as AxumPath, Query, State},
     http::StatusCode,
     response::{
         sse::{Event, KeepAlive, Sse},
-        IntoResponse,
+        IntoResponse, Response,
     },
     routing::{get, post},
     Json, Router,
@@ -32,7 +32,7 @@ use ironplc_bridge::{
     DeviceHealth, DeviceReport, DeviceSpec, ProgramHandle, RuntimeMode, RuntimeWriteError,
     VarSnapshot,
 };
-use project::{ProjectStore, ProtocolConfig};
+use project::{ProjectStore, ProtocolConfig, StoreError};
 use serde::Serialize;
 use tokio::signal;
 use tokio::sync::broadcast;
@@ -142,7 +142,7 @@ impl Drop for CaptureWriter {
     }
 }
 
-/// Parsed CLI args. Manual parsing (no clap) — three flags, still simple.
+/// Parsed CLI args. Manual parsing (no clap) — four flags, still simple.
 struct Args {
     project_dir: PathBuf,
     bind: SocketAddr,
@@ -151,12 +151,18 @@ struct Args {
     /// `infra/install.sh` lays out a typical edge deployment
     /// (`/opt/ia2/state/retain.json` alongside `/opt/ia2/current/`).
     state_dir: PathBuf,
+    /// Built web assets (the IDE's `dist/`). When set, the runtime
+    /// serves the standalone HMI panel at `/hmi/{screen}` so operator
+    /// clients on the plant network can open screens straight off the
+    /// edge box — no IDE in the loop.
+    static_dir: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args> {
     let mut project_dir: Option<PathBuf> = None;
     let mut bind = DEFAULT_BIND.to_string();
     let mut state_dir: Option<PathBuf> = None;
+    let mut static_dir: Option<PathBuf> = None;
 
     let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
@@ -172,6 +178,11 @@ fn parse_args() -> Result<Args> {
             "--state-dir" => {
                 state_dir = Some(PathBuf::from(
                     iter.next().context("--state-dir requires a value")?,
+                ));
+            }
+            "--static-dir" => {
+                static_dir = Some(PathBuf::from(
+                    iter.next().context("--static-dir requires a value")?,
                 ));
             }
             // Legacy flag from the pre-tasks-refactor builds. Accept but
@@ -212,6 +223,7 @@ fn parse_args() -> Result<Args> {
         project_dir,
         bind,
         state_dir,
+        static_dir,
     })
 }
 
@@ -219,16 +231,19 @@ fn print_help() {
     eprintln!(
         "ia2-runtime — headless edge runtime\n\n\
          USAGE:\n  \
-         ia2-runtime --project-dir <path> [--bind <addr>] [--state-dir <path>]\n\n\
+         ia2-runtime --project-dir <path> [--bind <addr>] [--state-dir <path>] [--static-dir <path>]\n\n\
          FLAGS:\n  \
          --project-dir <path>   Path to the project directory (containing project.toml).\n  \
          --bind <addr>          Local socket for the monitor server (default {DEFAULT_BIND}).\n  \
          --state-dir <path>     Where to persist RETAIN variables (default: sibling 'state/' of\n                         \
-         the install root). Survives version swaps; safe to back up.\n\n\
+         the install root). Survives version swaps; safe to back up.\n  \
+         --static-dir <path>    Built web assets. When set, operator clients can open the\n                         \
+         project's HMI screens at http://<edge>:<port>/hmi/<screen>.\n\n\
          The runtime exposes:\n  \
          GET  /health           Liveness check.\n  \
          GET  /status           Project + runtime metadata + last-known scan count.\n  \
          GET  /events           Server-Sent Events stream of VarSnapshot updates.\n  \
+         GET  /api/hmi          HMI screens deployed with the project (read-only).\n  \
          POST /stop             Request graceful shutdown.\n\n\
          What runs is determined by the project's tasks.toml — every PROGRAM\n\
          instance declared there is bound to its task and scheduled.\n"
@@ -260,6 +275,9 @@ struct AppState {
     /// Handle to the running scan loop — used by /discover to read the
     /// per-device connect reports (connected/failed + EtherCAT topology).
     handle: ProgramHandle,
+    /// Read-only view of the deployed project — backs the /api/hmi
+    /// routes so operator panels can load screens off the edge box.
+    store: Arc<ProjectStore>,
 }
 
 #[tokio::main]
@@ -377,6 +395,7 @@ async fn main() -> Result<()> {
         });
     }
 
+    let store = Arc::new(store);
     let state = AppState {
         project_name,
         program_instances,
@@ -387,6 +406,7 @@ async fn main() -> Result<()> {
         shutdown: shutdown.clone(),
         logs: log_capture,
         handle: handle.clone(),
+        store: store.clone(),
     };
 
     // ---- Northbound (MQTT -> supOS/Tier0) ----
@@ -426,8 +446,49 @@ async fn main() -> Result<()> {
         .route("/force", post(rt_force))
         .route("/unforce", post(rt_unforce))
         .route("/stop", post(stop_handler))
+        .route("/api/hmi", get(hmi_list))
+        .route("/api/hmi/{path}", get(hmi_get))
         .layer(CorsLayer::permissive())
         .with_state(state);
+
+    // ---- Standalone HMI panel (optional) ----
+    // With `--static-dir` pointing at the built web assets, operator
+    // clients on the plant network open screens directly off this box:
+    // `/hmi` lists the deployed screens, `/hmi/<screen>` renders one,
+    // live against this runtime's own /events + /write. Assets resolve
+    // through ServeDir; the panel shell is a separate vite entry
+    // (`hmi.html`) so none of the IDE bundle loads on an edge client.
+    let app = if let Some(dir) = &args.static_dir {
+        if !dir.join("hmi.html").exists() {
+            // Routes still mount (they answer 404 with a hint) — this
+            // warn is for the journal, where "why is /hmi empty" gets
+            // debugged. A deploy without web assets lands here.
+            tracing::warn!(static_dir = %dir.display(), "no hmi.html under --static-dir; panel disabled until assets arrive");
+        }
+        let panel = dir.join("hmi.html");
+        let serve_panel = move || {
+            let panel = panel.clone();
+            async move {
+                match tokio::fs::read_to_string(&panel).await {
+                    Ok(html) => axum::response::Html(html).into_response(),
+                    Err(_) => (
+                        StatusCode::NOT_FOUND,
+                        "hmi.html missing from --static-dir (build the web app first)",
+                    )
+                        .into_response(),
+                }
+            }
+        };
+        app.route(
+            "/",
+            get(|| async { axum::response::Redirect::temporary("/hmi") }),
+        )
+        .route("/hmi", get(serve_panel.clone()))
+        .route("/hmi/{*rest}", get(serve_panel))
+        .fallback_service(tower_http::services::ServeDir::new(dir))
+    } else {
+        app
+    };
 
     let listener = tokio::net::TcpListener::bind(args.bind)
         .await
@@ -608,6 +669,50 @@ async fn status(State(state): State<AppState>) -> Json<Status> {
             .collect(),
         fault: state.handle.fault(),
     })
+}
+
+/// Same row shape as the IDE server's `HmiListEntry` (whose ts-rs export
+/// the panel shell consumes) — keep the fields in sync.
+#[derive(Serialize)]
+struct HmiRow {
+    path: String,
+    title: String,
+    level: u8,
+}
+
+/// Screens deployed with the project, for the panel's index page.
+/// Unreadable documents are skipped, not fatal — one corrupt screen
+/// shouldn't blank the whole panel.
+async fn hmi_list(State(state): State<AppState>) -> Response {
+    match state.store.list_hmis() {
+        Ok(paths) => {
+            let rows: Vec<HmiRow> = paths
+                .into_iter()
+                .filter_map(|p| {
+                    let doc = state.store.read_hmi(&p).ok()?;
+                    Some(HmiRow {
+                        path: p,
+                        title: doc.title,
+                        level: doc.level,
+                    })
+                })
+                .collect();
+            Json(rows).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn hmi_get(State(state): State<AppState>, AxumPath(path): AxumPath<String>) -> Response {
+    match state.store.read_hmi(&path) {
+        Ok(doc) => Json(doc).into_response(),
+        Err(StoreError::HmiNotFound(_)) => (
+            StatusCode::NOT_FOUND,
+            format!("no HMI screen '{path}' in the deployed project"),
+        )
+            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 async fn events(

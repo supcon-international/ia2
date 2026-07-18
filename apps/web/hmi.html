@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      Standalone operator panel — served by ia2-runtime's `--static-dir`
+      at /hmi on the edge box itself. Deliberately a separate vite entry:
+      an operator tablet loads screens + live values and nothing of the
+      IDE bundle (editors, router, agent chrome).
+    -->
+    <title>IA2 HMI</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="theme-color" content="#14181c" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/hmi-main.tsx"></script>
+  </body>
+</html>

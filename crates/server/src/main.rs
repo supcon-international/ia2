@@ -119,7 +119,12 @@ async fn main() -> anyhow::Result<()> {
     if let Some(dir) = &library_dir {
         tracing::info!(library_dir = %dir.display(), "FB-library registry enabled");
     }
-    let state = AppState::new(demo_slave.clone(), demo_addr.clone(), library_dir);
+    let state = AppState::new(
+        demo_slave.clone(),
+        demo_addr.clone(),
+        library_dir,
+        cli.static_dir.clone(),
+    );
     try_open_last_project(&state);
 
     if !demo_addr.is_empty() {

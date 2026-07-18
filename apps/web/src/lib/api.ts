@@ -1,3 +1,4 @@
+import { encodeForWrite } from "@/lib/write-encoding"
 import type { AttachInfo } from "@/types/generated/AttachInfo"
 import type { AttachmentStatus } from "@/types/generated/AttachmentStatus"
 import type { CheckDiagnostic } from "@/types/generated/CheckDiagnostic"
@@ -538,18 +539,9 @@ export async function unforceVariable(name: string): Promise<void> {
   )
 }
 
-function encodeForWrite(value: number, typeName: string): number {
-  const t = typeName.toUpperCase()
-  if (t === "REAL") {
-    // Pack f32 bits into i32. The bridge VM reads slots untyped so
-    // it sees the right f32 when this VarIndex points at a REAL.
-    const buf = new ArrayBuffer(4)
-    new Float32Array(buf)[0] = value
-    return new Int32Array(buf)[0]
-  }
-  // BOOL, integer family, BYTE/WORD/DWORD all pass through as integers.
-  return Math.trunc(value)
-}
+// encodeForWrite lives in `lib/write-encoding.ts` — shared with the
+// standalone HMI panel, which writes through the edge runtime instead
+// of this API layer.
 
 export async function fetchDemoSlaveSnapshot(): Promise<DemoSlaveSnapshot> {
   return jsonOrThrow(await apiFetch(`/api/_demo/slave`), "GET /api/_demo/slave")
@@ -850,4 +842,15 @@ export async function checkHmi(path: string): Promise<HmiIssue[]> {
 
 export async function fetchHmiSymbols(): Promise<HmiSymbolInfo[]> {
   return jsonOrThrow(await apiFetch(`/api/hmi-symbols`), "GET /api/hmi-symbols")
+}
+
+import type { ProjectVariables } from "@/types/generated/ProjectVariables"
+
+/** Every variable declared in any POU, with its file + direction — the
+ *  HMI editor's binding autocomplete source. */
+export async function fetchProjectVariables(): Promise<ProjectVariables> {
+  return jsonOrThrow(
+    await apiFetch(`/api/project/variables`),
+    "GET /api/project/variables",
+  )
 }

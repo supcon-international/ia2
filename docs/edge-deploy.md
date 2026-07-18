@@ -94,7 +94,9 @@ After deploy, an edge box looks like:
 ├── versions/
 │   ├── 2026-05-12T08-30-00Z/       latest
 │   │   ├── runtime                  binary
-│   │   └── project/                 project.toml + pous/ + devices/ + tasks.toml + iomap.toml
+│   │   ├── project/                 project.toml + pous/ + devices/ + tasks.toml + iomap.toml + hmi/
+│   │   └── web/                     built web assets — the runtime's --static-dir serves the
+│   │                                standalone HMI panel (/hmi) from here
 │   ├── 2026-05-12T07-15-00Z/       previous (kept for rollback)
 │   └── _initial/                   install.sh stub
 └── (state for retained variables would go here)

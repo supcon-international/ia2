@@ -1,16 +1,26 @@
 /**
  * HMI view: toolbar (title, ISA level, operate/arrange switch, check) +
- * the live canvas + a slim inspector for the selected element. The pane is
- * intentionally thinner than the graphical-language editors — v1's canvas
- * is where agents assemble screens and humans nudge them; the full palette
- * editor is the next phase (docs/hmi-design.md).
+ * the live canvas, plus the human editing surface — Arrange mode shows the
+ * palette strip and an editable inspector (geometry, props, bindings,
+ * actions), Operate mode a read-only one. Both agents (via `cs hmi op`)
+ * and humans edit through the same /ops endpoint, so either side's
+ * changes land live on the other's canvas.
  */
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import { Hand, MousePointerClick, ShieldAlert } from "lucide-react"
 
-import { HmiCanvas, type CanvasMode } from "@/components/hmi/HmiCanvas"
-import { checkHmi } from "@/lib/api"
+import { findNode, HmiCanvas, type CanvasMode } from "@/components/hmi/HmiCanvas"
+import { HmiInspector, HmiPalette } from "@/components/hmi/HmiEditorPanel"
+import { HmiHostProvider, type HmiHost } from "@/components/hmi/host"
+import {
+  checkHmi,
+  fetchHmi,
+  fetchProjectVariables,
+  fetchRuntimeStatus,
+  saveHmi,
+  writeVariable,
+} from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { useHmiMutation } from "@/state/hmi-live"
 import { useRuntime } from "@/state/runtime"
@@ -19,12 +29,36 @@ import type { HmiIssue } from "@/types/generated/HmiIssue"
 import type { HmiNode } from "@/types/generated/HmiNode"
 
 export function HmiPane() {
-  const { currentHmi } = useRuntime()
+  const { currentHmi, selectHmi } = useRuntime()
   const [mode, setMode] = useState<CanvasMode>("operate")
   const [selected, setSelected] = useState<string | null>(null)
   const [doc, setDoc] = useState<HmiDoc | null>(null)
   const [issues, setIssues] = useState<HmiIssue[]>([])
+  const [variables, setVariables] = useState<string[]>([])
   const mutation = useHmiMutation()
+
+  // The IDE-side host: documents and writes go through the project
+  // server; nav switches the workbench's active screen. The standalone
+  // edge panel provides its own implementation of this seam.
+  const host = useMemo<HmiHost>(
+    () => ({
+      fetchDoc: fetchHmi,
+      saveDoc: saveHmi,
+      write: writeVariable,
+      nav: (target) => void selectHmi(target),
+      runtimeState: async () => {
+        const s = await fetchRuntimeStatus()
+        return { running: s.running, alarm: s.last_error ?? null }
+      },
+    }),
+    [selectHmi],
+  )
+
+  useEffect(() => {
+    void fetchProjectVariables()
+      .then((r) => setVariables([...new Set(r.variables.map((v) => v.name))]))
+      .catch(() => {})
+  }, [currentHmi])
 
   const refreshIssues = useCallback(async () => {
     if (!currentHmi) return
@@ -91,19 +125,29 @@ export function HmiPane() {
         <ModeSwitch mode={mode} onChange={setMode} />
       </div>
 
+      {mode === "arrange" && <HmiPalette path={currentHmi} doc={doc} />}
       <div className="flex min-h-0 flex-1">
         <div className="min-w-0 flex-1">
-          <HmiCanvas
-            path={currentHmi}
-            mode={mode}
-            selected={selected}
-            onSelect={setSelected}
-            onDocLoaded={setDoc}
-          />
+          <HmiHostProvider value={host}>
+            <HmiCanvas
+              path={currentHmi}
+              mode={mode}
+              selected={selected}
+              onSelect={setSelected}
+              onDocLoaded={setDoc}
+            />
+          </HmiHostProvider>
         </div>
-        {selectedNode && (
+        {selectedNode && mode === "arrange" ? (
+          <HmiInspector
+            path={currentHmi}
+            node={selectedNode}
+            variables={variables}
+            onClose={() => setSelected(null)}
+          />
+        ) : selectedNode ? (
           <Inspector node={selectedNode} onClose={() => setSelected(null)} />
-        )}
+        ) : null}
       </div>
     </main>
   )
@@ -210,20 +254,10 @@ function Inspector({
         </>
       )}
       <div className="mt-4 border-t border-border pt-2 text-[10px] leading-relaxed text-muted-foreground">
-        Edit via <span className="font-mono">cs hmi op</span> — changes render
-        here live.
+        Switch to Arrange to edit — or via{" "}
+        <span className="font-mono">cs hmi op</span>; changes render here
+        live.
       </div>
     </aside>
   )
-}
-
-function findNode(root: HmiNode, id: string): HmiNode | null {
-  if (root.id === id) return root
-  if (root.type === "group") {
-    for (const c of root.children) {
-      const hit = findNode(c, id)
-      if (hit) return hit
-    }
-  }
-  return null
 }

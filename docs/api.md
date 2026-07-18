@@ -104,7 +104,7 @@ read-only device-template catalog used to pre-fill devices from a bus scan.
 | `GET` | `/api/edges/{name}/system` | Edge interfaces / serial ports / arch — for authoring device configs against real edge facts. Returns JSON. |
 | `GET` | `/api/edges/{name}/status` | Proxy the edge runtime's `/status` (project + scan count + debug mode/forces + last snapshot). Returns JSON. |
 | `POST` | `/api/edges/{name}/runtime/{op}` | Proxy an online-debug op to the *deployed* edge runtime over ssh. `op` ∈ {`pause`,`resume`,`step`,`write`,`force`,`unforce`}; body forwarded as the remote payload (e.g. `{cycles}` for step, `{name,value}` for write/force). |
-| `POST` | `/api/edges/{name}/deploy` | Tar project + runtime binary, scp to edge, atomic symlink swap, restart unit. Returns `DeployReport`. |
+| `POST` | `/api/edges/{name}/deploy` | Tar project + runtime binary + web assets (when this server has a `--static-dir`; they land at `current/web` for the edge's HMI panel), ssh to edge, atomic symlink swap, restart unit. Returns `DeployReport`. |
 | `POST` | `/api/edges/{name}/attach` | Open `ssh -N -L` tunnel to the edge runtime port. Returns `AttachInfo { local_port }`. |
 | `POST` | `/api/edges/{name}/detach` | Close the tunnel. |
 | `GET` | `/api/edges/{name}/attachment` | Current attachment state. Returns `AttachmentStatus { attached, local_port }`. |
@@ -245,6 +245,15 @@ the debug ops).
 | `POST` | `/force` | Pin a variable every cycle until released. Body: `{ name, value }`. |
 | `POST` | `/unforce` | Release a forced variable. Body: `{ name }`. |
 | `POST` | `/stop` | Request graceful shutdown. |
+| `GET` | `/api/hmi` | HMI screens deployed with the project: `[{ path, title, level }]` (same row shape as the IDE route). Read-only — screens are edited in the IDE and arrive via deploy. |
+| `GET` | `/api/hmi/{path}` | One screen's full `HmiDoc` JSON. 404 if the deployed project has no such screen. |
+
+With `--static-dir` pointing at the built web assets the runtime also serves the
+standalone operator panel: `GET /hmi` lists the deployed screens, `GET /hmi/{rest}`
+renders one (`/` redirects to `/hmi`). The panel is a separate vite entry
+(`hmi.html`) that talks only to this runtime's own surface — `/events` for live
+values, `/write` for confirmed actions, `/status` for the fault strip — so an
+operator client needs nothing but a browser and this port.
 
 Access from the dev machine: open an `ssh -N -L <local>:127.0.0.1:<runtime_port> <edge>`
 tunnel (see `/api/edges/{name}/attach`) and hit `http://127.0.0.1:<local>/...`.

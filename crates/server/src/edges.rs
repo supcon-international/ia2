@@ -365,10 +365,17 @@ pub enum DeployError {
 ///                   for the edge's architecture. Optional — when None,
 ///                   the deploy reuses whatever binary is already under
 ///                   `<install_dir>/current/runtime`.
+/// `web_dist`        built web assets (the IDE server's own
+///                   `--static-dir`). Optional — when present they land
+///                   at `<install_dir>/current/web` so the edge runtime
+///                   can serve the standalone HMI panel; when None the
+///                   remote script carries the previous version's `web/`
+///                   forward (same rule as the binary).
 pub async fn deploy_to_edge(
     edge: &Edge,
     project_dir: &std::path::Path,
     runtime_binary: Option<&std::path::Path>,
+    web_dist: Option<&std::path::Path>,
 ) -> Result<DeployReport, DeployError> {
     // ---- Pack project (+ optional binary) into a tar stream ----
     // We `tar -cf -` locally and pipe to ssh's stdin so we never need a
@@ -393,6 +400,21 @@ pub async fn deploy_to_edge(
             .arg(bin.parent().unwrap())
             .arg(bin.file_name().unwrap());
     }
+    let web_basename = match web_dist {
+        Some(dir) => {
+            let dir = dir
+                .canonicalize()
+                .map_err(|e| DeployError::Pack(e.to_string()))?;
+            let name = dir
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+                .ok_or_else(|| DeployError::Pack("web dist dir has no utf-8 name".into()))?;
+            tar.arg("-C").arg(dir.parent().unwrap()).arg(&name);
+            Some(name)
+        }
+        None => None,
+    };
     tar.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut tar_child = tar.spawn().map_err(|e| DeployError::Pack(e.to_string()))?;
     let mut tar_stdout = tar_child
@@ -413,6 +435,7 @@ pub async fn deploy_to_edge(
         &edge.install_dir,
         project_basename,
         binary_basename.as_deref(),
+        web_basename.as_deref(),
     );
 
     let mut ssh = ssh_cmd(edge)
@@ -502,6 +525,7 @@ fn remote_deploy_script(
     install_dir: &str,
     project_basename: &str,
     binary_basename: Option<&str>,
+    web_basename: Option<&str>,
 ) -> String {
     let bin_swap = match binary_basename {
         Some(name) => {
@@ -511,6 +535,16 @@ fn remote_deploy_script(
             )
         }
         None => String::new(),
+    };
+    // Normalise the bundled web assets (whatever their local dir was
+    // called, usually `dist`) to `$DEST/web` — the fixed path the systemd
+    // unit's `--static-dir` points at.
+    let web_swap = match web_basename {
+        Some(name) if name != "web" => {
+            let web = sh_squote(name);
+            format!("if [ -d \"$DEST/\"{web} ]; then\n  mv \"$DEST/\"{web} \"$DEST/web\"\nfi\n",)
+        }
+        _ => String::new(),
     };
     // Single-quote every value that lands in the remote script. `{:?}`
     // (Debug) is NOT shell quoting: it escapes `"`/`\` but leaves `$(…)`
@@ -531,9 +565,14 @@ tar -xf - -C "$DEST"
 if [ -d "$DEST/$PROJECT" ] && [ "$PROJECT" != "project" ]; then
   mv "$DEST/$PROJECT" "$DEST/project"
 fi
-{bin_swap}# Carry forward the runtime binary from `current` if this deploy didn't ship one.
+{bin_swap}{web_swap}# Carry forward the runtime binary from `current` if this deploy didn't ship one.
 if [ ! -f "$DEST/runtime" ] && [ -f "$INSTALL_DIR/current/runtime" ]; then
   cp "$INSTALL_DIR/current/runtime" "$DEST/runtime"
+fi
+# Same for the HMI panel assets — a dev-server deploy (no dist) keeps
+# whatever panel the edge already had.
+if [ ! -d "$DEST/web" ] && [ -d "$INSTALL_DIR/current/web" ]; then
+  cp -R "$INSTALL_DIR/current/web" "$DEST/web"
 fi
 if [ ! -x "$DEST/runtime" ]; then
   echo "no runtime binary in $DEST and no prior current to copy from" >&2
@@ -690,13 +729,35 @@ mod tests {
 
     #[test]
     fn deploy_script_keeps_metachars_single_quoted() {
-        let s = remote_deploy_script("/opt/$(reboot)", "proj$(touch /tmp/x)", Some("rt`whoami`"));
+        let s = remote_deploy_script(
+            "/opt/$(reboot)",
+            "proj$(touch /tmp/x)",
+            Some("rt`whoami`"),
+            Some("dist$(id)"),
+        );
         // Dangerous values appear only inside single-quoted words, so the
         // remote shell treats them as literals rather than evaluating them.
         assert!(s.contains("INSTALL_DIR='/opt/$(reboot)'"), "{s}");
         assert!(s.contains("PROJECT='proj$(touch /tmp/x)'"), "{s}");
         assert!(s.contains(r"'rt`whoami`'"), "{s}");
+        assert!(s.contains("'dist$(id)'"), "{s}");
         // The pre-fix bug: the value inside a double-quoted assignment.
         assert!(!s.contains(r#"INSTALL_DIR="/opt/$(reboot)""#), "{s}");
+    }
+
+    #[test]
+    fn deploy_script_normalises_web_assets_and_carries_forward() {
+        let s = remote_deploy_script("/opt/ia2", "proj", None, Some("dist"));
+        // Bundled `dist/` is renamed to the fixed `web/` the systemd
+        // unit's --static-dir points at.
+        assert!(s.contains(r#"mv "$DEST/"'dist' "$DEST/web""#), "{s}");
+        // A deploy without web assets keeps the previous version's panel.
+        assert!(
+            s.contains(r#"cp -R "$INSTALL_DIR/current/web" "$DEST/web""#),
+            "{s}"
+        );
+        // Already-named `web` needs no rename step.
+        let s2 = remote_deploy_script("/opt/ia2", "proj", None, Some("web"));
+        assert!(!s2.contains(r#""$DEST/"'web' "$DEST/web""#), "{s2}");
     }
 }

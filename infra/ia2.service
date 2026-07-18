@@ -11,9 +11,16 @@ Wants=network-online.target
 # `install_dir` MUST match this (deploy warns if they drift). systemd
 # expands ${INSTALL_DIR} from Environment= below.
 Environment=INSTALL_DIR=/opt/ia2
+# `--static-dir` serves the standalone HMI panel at /hmi off the deployed
+# web assets (deploy places them at current/web; harmless if absent).
+# The default bind is loopback, matching the ssh-tunnel trust perimeter —
+# operators on the plant network need either a tunnel or an explicit
+# decision to widen `--bind` (which also exposes /write and /stop; put a
+# reverse proxy or firewall in front if you do).
 ExecStart=${INSTALL_DIR}/current/runtime \
   --project-dir ${INSTALL_DIR}/current/project \
-  --bind 127.0.0.1:13001
+  --bind 127.0.0.1:13001 \
+  --static-dir ${INSTALL_DIR}/current/web
 
 # Restart on crash but back off if we're crash-looping (don't hammer the
 # bus / journald).

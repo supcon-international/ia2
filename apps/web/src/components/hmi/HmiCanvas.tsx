@@ -14,24 +14,17 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 
-import { fetchHmi, saveHmi, writeVariable } from "@/lib/api"
-import {
-  bindingVariable,
-  formatBinding,
-  lookupVar,
-  resolveBinding,
-} from "@/lib/hmi-binding"
+import { formatBinding, lookupVar, resolveBinding } from "@/lib/hmi-binding"
 import { pushHistory } from "@/lib/var-history"
 import { cn } from "@/lib/utils"
 import { useHmiMutation } from "@/state/hmi-live"
 import { useLastSnapshot } from "@/state/live-feed"
-import { useRuntime } from "@/state/runtime"
 import { TrendChart } from "@/components/charts/TrendChart"
 import type { HmiAction } from "@/types/generated/HmiAction"
-import type { HmiBinding } from "@/types/generated/HmiBinding"
 import type { HmiDoc } from "@/types/generated/HmiDoc"
 import type { HmiNode } from "@/types/generated/HmiNode"
 
+import { useHmiHost, type HmiHost } from "./host"
 import { HmiSymbol, type SymbolLive } from "./symbols"
 
 export type CanvasMode = "operate" | "arrange"
@@ -56,7 +49,7 @@ export function HmiCanvas({
   onSelect: (id: string | null) => void
   onDocLoaded?: (doc: HmiDoc) => void
 }) {
-  const { selectHmi } = useRuntime()
+  const host = useHmiHost()
   const [doc, setDoc] = useState<HmiDoc | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const snapshot = useLastSnapshot()
@@ -65,7 +58,7 @@ export function HmiCanvas({
   // ---- document load + live reload --------------------------------
   const load = useCallback(async () => {
     try {
-      const d = await fetchHmi(path)
+      const d = await host.fetchDoc(path)
       setDoc(d)
       setLoadError(null)
       onDocLoaded?.(d)
@@ -73,7 +66,7 @@ export function HmiCanvas({
       setLoadError(String(e))
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path])
+  }, [path, host])
 
   useEffect(() => {
     void load()
@@ -199,7 +192,7 @@ export function HmiCanvas({
     const d = dragRef.current
     dragRef.current = null
     setDragPos(null)
-    if (!d || !doc || !d.moved) return
+    if (!d || !doc || !d.moved || !host.saveDoc) return
     const next = structuredClone(doc)
     const target = findNode(next.root, d.id)
     if (target) {
@@ -207,7 +200,7 @@ export function HmiCanvas({
       target.y = d.curY
       setDoc(next)
       try {
-        await saveHmi(path, next)
+        await host.saveDoc(path, next)
       } catch {
         void load() // server rejected — resync to truth
       }
@@ -223,22 +216,22 @@ export function HmiCanvas({
       setActionError(null)
       try {
         if (action.kind === "nav") {
-          void selectHmi(action.target)
+          host.nav(action.target)
           return
         }
         const variable = action.variable
         const typeName =
           (snapshot && lookupVar(snapshot, variable)?.type_name) || ""
         if (action.kind === "write") {
-          await writeVariable(variable, action.value, typeName)
+          await host.write(variable, action.value, typeName)
         } else if (action.kind === "toggle") {
           const cur = snapshot ? lookupVar(snapshot, variable) : null
           const on = cur ? /^(true|1)$/i.test(cur.raw.trim()) : false
-          await writeVariable(variable, on ? 0 : 1, typeName || "BOOL")
+          await host.write(variable, on ? 0 : 1, typeName || "BOOL")
         } else if (action.kind === "pulse") {
-          await writeVariable(variable, 1, typeName || "BOOL")
+          await host.write(variable, 1, typeName || "BOOL")
           setTimeout(() => {
-            void writeVariable(variable, 0, typeName || "BOOL").catch(() => {})
+            void host.write(variable, 0, typeName || "BOOL").catch(() => {})
           }, action.ms)
         } else if (action.kind === "set_value") {
           // value arrives through the confirm flow
@@ -247,7 +240,7 @@ export function HmiCanvas({
         setActionError(String(e))
       }
     },
-    [selectHmi, snapshot],
+    [host, snapshot],
   )
 
   const requestAction = useCallback(
@@ -280,7 +273,7 @@ export function HmiCanvas({
           (snapshot && lookupVar(snapshot, action.variable)?.type_name) || ""
         setActionError(null)
         try {
-          await writeVariable(action.variable, clamped, typeName)
+          await host.write(action.variable, clamped, typeName)
         } catch (e) {
           setActionError(String(e))
         }
@@ -288,7 +281,7 @@ export function HmiCanvas({
       }
       await execute(action)
     },
-    [execute, snapshot],
+    [execute, host, snapshot],
   )
 
   // ---- render ------------------------------------------------------
@@ -395,6 +388,7 @@ function CanvasNode({
   onAction: (nodeId: string, action: HmiAction, value?: number) => void
 }) {
   const snapshot = useLastSnapshot()
+  const host = useHmiHost()
   const pos =
     dragPos && dragPos.id === node.id
       ? { x: dragPos.x, y: dragPos.y }
@@ -402,7 +396,7 @@ function CanvasNode({
   const spawning = spawn.has(node.id)
   const tapAction = node.action["tap"]
 
-  const body = renderKind(node, snapshot, historyRef, onAction)
+  const body = renderKind(node, snapshot, historyRef, onAction, host)
 
   return (
     <div
@@ -456,6 +450,7 @@ function renderKind(
   snapshot: ReturnType<typeof useLastSnapshot>,
   historyRef: React.MutableRefObject<Map<string, number[]>>,
   onAction: (nodeId: string, action: HmiAction, value?: number) => void,
+  host: HmiHost,
 ) {
   switch (node.type) {
     case "group":
@@ -521,7 +516,7 @@ function renderKind(
       )
     }
     case "alarmbar":
-      return <AlarmBar />
+      return <AlarmBar host={host} />
     case "button":
       return (
         <button
@@ -616,17 +611,18 @@ function InputNode({
 }
 
 /** Fault + run-state strip. Calm when nothing is wrong (ISA-101: color
- *  only when it means something). */
-function AlarmBar() {
-  const { isRunning } = useRuntime()
-  const [lastError, setLastError] = useState<string | null>(null)
+ *  only when it means something). Polls the host — the IDE answers from
+ *  its runtime status, the edge panel from the runtime's /status. */
+function AlarmBar({ host }: { host: HmiHost }) {
+  const [state, setState] = useState<{ running: boolean; alarm: string | null }>(
+    { running: false, alarm: null },
+  )
   useEffect(() => {
     let cancelled = false
     const tick = async () => {
       try {
-        const { fetchRuntimeStatus } = await import("@/lib/api")
-        const s = await fetchRuntimeStatus()
-        if (!cancelled) setLastError(s.last_error ?? null)
+        const s = await host.runtimeState()
+        if (!cancelled) setState(s)
       } catch {
         /* offline — keep last */
       }
@@ -637,12 +633,12 @@ function AlarmBar() {
       cancelled = true
       clearInterval(id)
     }
-  }, [])
-  if (lastError) {
+  }, [host])
+  if (state.alarm) {
     return (
       <div className="flex h-full w-full items-center gap-2 rounded border border-destructive/50 bg-destructive/10 px-3 font-mono text-[12px] text-destructive">
         <span className="size-2 shrink-0 rounded-full bg-destructive" />
-        <span className="truncate">{lastError}</span>
+        <span className="truncate">{state.alarm}</span>
       </div>
     )
   }
@@ -651,10 +647,10 @@ function AlarmBar() {
       <span
         className={cn(
           "size-2 shrink-0 rounded-full",
-          isRunning ? "bg-highlight" : "bg-muted-foreground/40",
+          state.running ? "bg-highlight" : "bg-muted-foreground/40",
         )}
       />
-      {isRunning ? "Running — no active faults" : "Stopped"}
+      {state.running ? "Running — no active faults" : "Stopped"}
     </div>
   )
 }
@@ -711,7 +707,7 @@ function ConfirmCard({
 
 // ---- small pure helpers -------------------------------------------
 
-function findNode(root: HmiNode, id: string): HmiNode | null {
+export function findNode(root: HmiNode, id: string): HmiNode | null {
   if (root.id === id) return root
   if (root.type === "group") {
     for (const c of root.children) {
@@ -732,10 +728,3 @@ function trendVariables(doc: HmiDoc): string[] {
   return out
 }
 
-export function allBindings(node: HmiNode): [string, HmiBinding][] {
-  return Object.entries(node.bind).filter(
-    (e): e is [string, HmiBinding] => e[1] !== undefined,
-  )
-}
-
-export { bindingVariable }

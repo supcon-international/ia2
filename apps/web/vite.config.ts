@@ -42,8 +42,19 @@ export default defineConfig({
     // `--static-dir` at this directory; client routes (e.g. `/`, any
     // future `/settings`) all resolve back to the same `index.html`
     // via axum's SPA fallback.
+    //
+    // Second entry: `hmi.html`, the standalone operator panel that
+    // `ia2-runtime --static-dir` serves at `/hmi/<screen>` on an edge
+    // box. Separate entry so an operator tablet never downloads the
+    // IDE bundle.
     outDir: 'dist',
     emptyOutDir: true,
     sourcemap: false,
+    rollupOptions: {
+      input: {
+        main: new URL('./index.html', import.meta.url).pathname,
+        hmi: new URL('./hmi.html', import.meta.url).pathname,
+      },
+    },
   },
 })

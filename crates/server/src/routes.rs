@@ -1310,10 +1310,15 @@ pub async fn deploy_edge_route(
         Ok((edge, store.root().to_path_buf()))
     })?;
     let runtime_binary = find_runtime_binary();
-    deploy_to_edge(&edge, &project_dir, runtime_binary.as_deref())
-        .await
-        .map(Json)
-        .map_err(|e| ApiError::Internal(e.to_string()))
+    deploy_to_edge(
+        &edge,
+        &project_dir,
+        runtime_binary.as_deref(),
+        state.web_dist.as_deref(),
+    )
+    .await
+    .map(Json)
+    .map_err(|e| ApiError::Internal(e.to_string()))
 }
 
 pub async fn attach_edge_route(

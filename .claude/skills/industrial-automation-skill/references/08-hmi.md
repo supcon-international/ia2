@@ -88,3 +88,18 @@ resist decorating. One alarm bar per screen at the top; group by process
 area, reading left-to-right in flow order; use `level` honestly (1 plant
 overview → 4 diagnostic detail) and `nav` nodes to descend, rather than
 cramming levels together.
+
+## The screens travel with the project — the edge serves them
+
+`cs edge deploy` ships the whole project directory, `hmi/` included —
+plus the built web assets when the IDE server has them — so whatever
+screens exist at deploy time are exactly what the edge box has. The
+standard systemd unit starts the runtime with `--static-dir`, which
+serves a standalone operator panel on the runtime's port: `/hmi` lists
+the deployed screens and `/hmi/<screen>` renders one live against that
+runtime's own `/events` and `/write` — same canvas, same confirm flows
+as the IDE, no IDE required. The default bind is loopback (the ssh-tunnel
+trust perimeter), so reach it through `cs edge attach`'s tunnel, or widen
+`--bind` in the unit as a deliberate ops decision when operator tablets
+need direct access. The panel is read-only as a document (no arrange, no
+ops); to change a screen, edit it in the project and redeploy.

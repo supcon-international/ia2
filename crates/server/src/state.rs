@@ -221,6 +221,11 @@ pub struct AppState {
     /// `IA2_LIBRARY_DIR`, defaulting to `./library` when that exists).
     /// `None` = no registry on this install; /api/library lists empty.
     pub library_dir: Option<std::path::PathBuf>,
+    /// The `--static-dir` this server serves the IDE from, if any.
+    /// Deploy bundles it to the edge so `ia2-runtime --static-dir`
+    /// can serve the standalone HMI panel there; `None` (dev servers
+    /// behind vite) deploys without the panel assets.
+    pub web_dist: Option<std::path::PathBuf>,
 }
 
 /// Pairs the active `ProgramHandle` with the name of the project it
@@ -251,6 +256,7 @@ impl AppState {
         demo_slave: DemoSlave,
         demo_modbus_addr: String,
         library_dir: Option<std::path::PathBuf>,
+        web_dist: Option<std::path::PathBuf>,
     ) -> Self {
         let (event_tx, _) = broadcast::channel(256);
         Self {
@@ -266,6 +272,7 @@ impl AppState {
             running_info: Arc::new(Mutex::new(None)),
             agent: Arc::new(Mutex::new(AgentActivityState::default())),
             library_dir,
+            web_dist,
         }
     }
 
