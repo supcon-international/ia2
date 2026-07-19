@@ -6,21 +6,22 @@ Wants=network-online.target
 [Service]
 # Atomic deploys point `current` at the latest versioned dir; the runtime
 # binary + project dir always live under there.
-# Single source of truth for the install location: change INSTALL_DIR and
-# both the binary and project paths follow. The edge's configured
-# `install_dir` MUST match this (deploy warns if they drift). systemd
-# expands ${INSTALL_DIR} from Environment= below.
-Environment=INSTALL_DIR=/opt/ia2
+# NB: the install root appears in several lines below (ExecStart and
+# ReadWritePaths). systemd does NOT expand variables in the ExecStart
+# executable path — a `${VAR}/runtime` there is a fatal unit error — so
+# the path is spelled out. Installing somewhere other than /opt/ia2
+# means editing every occurrence (and the edge's configured
+# `install_dir`, which deploy checks for drift).
 # `--static-dir` serves the standalone HMI panel at /hmi off the deployed
 # web assets (deploy places them at current/web; harmless if absent).
 # The default bind is loopback, matching the ssh-tunnel trust perimeter —
 # operators on the plant network need either a tunnel or an explicit
 # decision to widen `--bind` (which also exposes /write and /stop; put a
 # reverse proxy or firewall in front if you do).
-ExecStart=${INSTALL_DIR}/current/runtime \
-  --project-dir ${INSTALL_DIR}/current/project \
+ExecStart=/opt/ia2/current/runtime \
+  --project-dir /opt/ia2/current/project \
   --bind 127.0.0.1:13001 \
-  --static-dir ${INSTALL_DIR}/current/web
+  --static-dir /opt/ia2/current/web
 
 # Restart on crash but back off if we're crash-looping (don't hammer the
 # bus / journald).

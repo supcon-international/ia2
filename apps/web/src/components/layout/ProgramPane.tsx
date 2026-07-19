@@ -43,8 +43,10 @@ export function ProgramPane() {
           Program
         </div>
         <div className="grid flex-1 place-items-center p-6 text-center text-sm text-muted-foreground">
-          Select a POU from the project tree, or create one with the&nbsp;
-          <span className="font-mono">+</span> button next to "Applications".
+          <p>
+            Select a POU from the project tree, or create one with the{" "}
+            <span className="font-mono">+</span> button next to "POUs".
+          </p>
         </div>
       </main>
     )

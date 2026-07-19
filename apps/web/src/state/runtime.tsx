@@ -683,6 +683,31 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
     })
   }, [currentPou?.path])
 
+  // Per-device / per-edge live-reload, mirroring the per-POU pattern
+  // above: while an editor pane is open on it, an agent-side `cs device
+  // set` / `cs edge set` refreshes the pane through the `device:<name>`
+  // / `edge:<name>` mutation topics the server already emits. Without
+  // this the pane kept showing the select-time snapshot.
+  useEffect(() => {
+    const name = currentDevice?.name
+    if (!name) return
+    return invalidationBus.subscribe(Topic.device(name), () => {
+      void fetchDevice(name)
+        .then((fresh) => setCurrentDevice((cur) => (cur?.name === name ? fresh : cur)))
+        .catch(() => {})
+    })
+  }, [currentDevice?.name])
+
+  useEffect(() => {
+    const name = currentEdge?.name
+    if (!name) return
+    return invalidationBus.subscribe(Topic.edge(name), () => {
+      void fetchEdge(name)
+        .then((fresh) => setCurrentEdge((cur) => (cur?.name === name ? fresh : cur)))
+        .catch(() => {})
+    })
+  }, [currentEdge?.name])
+
   // ---------------- Project actions ----------------
 
   const createProject = useCallback(async (name: string): Promise<boolean> => {

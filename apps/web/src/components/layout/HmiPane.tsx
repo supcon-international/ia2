@@ -26,7 +26,6 @@ import { useHmiMutation } from "@/state/hmi-live"
 import { useRuntime } from "@/state/runtime"
 import type { HmiDoc } from "@/types/generated/HmiDoc"
 import type { HmiIssue } from "@/types/generated/HmiIssue"
-import type { HmiNode } from "@/types/generated/HmiNode"
 
 export function HmiPane() {
   const { currentHmi, selectHmi } = useRuntime()
@@ -122,7 +121,15 @@ export function HmiPane() {
             </span>
           )}
         </span>
-        <ModeSwitch mode={mode} onChange={setMode} />
+        <ModeSwitch
+          mode={mode}
+          onChange={(m) => {
+            setMode(m)
+            // Selection is Arrange-only; entering Operate drops it so
+            // no inspector lingers over the operator surface.
+            if (m === "operate") setSelected(null)
+          }}
+        />
       </div>
 
       {mode === "arrange" && <HmiPalette path={currentHmi} doc={doc} />}
@@ -138,16 +145,14 @@ export function HmiPane() {
             />
           </HmiHostProvider>
         </div>
-        {selectedNode && mode === "arrange" ? (
+        {selectedNode && mode === "arrange" && (
           <HmiInspector
             path={currentHmi}
             node={selectedNode}
             variables={variables}
             onClose={() => setSelected(null)}
           />
-        ) : selectedNode ? (
-          <Inspector node={selectedNode} onClose={() => setSelected(null)} />
-        ) : null}
+        )}
       </div>
     </main>
   )
@@ -188,76 +193,3 @@ function ModeSwitch({
   )
 }
 
-/** Read-only element facts: type, geometry, bindings, actions. Editing
- *  happens through the CLI/agent in P0; the palette editor is P1. */
-function Inspector({
-  node,
-  onClose,
-}: {
-  node: HmiNode
-  onClose: () => void
-}) {
-  const binds = Object.entries(node.bind)
-  const actions = Object.entries(node.action)
-  return (
-    <aside className="w-[220px] shrink-0 overflow-auto border-l border-border bg-secondary/40 p-3 text-[11px]">
-      <div className="flex items-center justify-between">
-        <span className="font-mono text-[12px] text-foreground">{node.id}</span>
-        <button
-          type="button"
-          onClick={onClose}
-          className="text-muted-foreground hover:text-foreground"
-        >
-          ×
-        </button>
-      </div>
-      <div className="mt-1 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
-        {node.type}
-        {node.type === "symbol" && ` · ${node.symbol}`}
-      </div>
-      <div className="mt-2 font-mono text-[10px] text-muted-foreground">
-        x {node.x} · y {node.y}
-        {node.w > 0 && ` · ${node.w}×${node.h}`}
-      </div>
-      {binds.length > 0 && (
-        <>
-          <div className="mt-3 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-            Bindings
-          </div>
-          {binds.map(([k, b]) => (
-            <div key={k} className="mt-1 font-mono text-[10px]">
-              <span className="text-muted-foreground">{k}</span>{" "}
-              <span className="text-foreground">
-                {typeof b === "string" ? b : b?.variable}
-              </span>
-              {typeof b === "object" && b?.expr && (
-                <span className="text-muted-foreground"> · {b.expr}</span>
-              )}
-            </div>
-          ))}
-        </>
-      )}
-      {actions.length > 0 && (
-        <>
-          <div className="mt-3 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-            Actions
-          </div>
-          {actions.map(([k, a]) => (
-            <div key={k} className="mt-1 font-mono text-[10px]">
-              <span className="text-muted-foreground">{k}</span>{" "}
-              <span className="text-foreground">
-                {a?.kind}
-                {a && "variable" in a ? ` ${a.variable}` : ""}
-              </span>
-            </div>
-          ))}
-        </>
-      )}
-      <div className="mt-4 border-t border-border pt-2 text-[10px] leading-relaxed text-muted-foreground">
-        Switch to Arrange to edit — or via{" "}
-        <span className="font-mono">cs hmi op</span>; changes render here
-        live.
-      </div>
-    </aside>
-  )
-}

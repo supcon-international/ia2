@@ -155,8 +155,12 @@ export function HmiCanvas({
   const [dragPos, setDragPos] = useState<{ id: string; x: number; y: number } | null>(null)
 
   const onNodePointerDown = (n: HmiNode, e: React.PointerEvent) => {
-    onSelect(n.id)
+    // Selection is an Arrange-mode concept. In Operate a tap is an
+    // ACTION — selecting here used to pop the inspector, reflow the
+    // canvas mid-click, and swallow the click's tap under the moved
+    // layout (real mice lost actions to it, not just automation).
     if (mode !== "arrange") return
+    onSelect(n.id)
     e.preventDefault()
     try {
       ;(e.target as Element).setPointerCapture?.(e.pointerId)

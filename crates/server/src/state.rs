@@ -300,7 +300,12 @@ impl AppState {
                 }
             }
             s.last_heartbeat = Some(now);
-            s.command = command.clone();
+            // A command-less heartbeat is a pure keep-alive (session
+            // watchdog food); it must not blank the "what is the agent
+            // doing" label the last real command set.
+            if command.is_some() {
+                s.command = command.clone();
+            }
             s.session_hint = session_id.clone();
             s.active = true;
             !was_active
