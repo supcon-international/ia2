@@ -62,6 +62,8 @@ rebased out.
 | # | Patch | Motivation | Upstream PR |
 |---|---|---|---|
 | 1 | `vm: write_variable_raw(VarIndex, u64)` (d06a646c) | `read_variable_raw` has a u64 read but no symmetric write; RETAIN restore and 64-bit I/O mapping need a non-truncating write | pending |
+| 2 | `codegen: keep user FUNCTION ids clear of user FB function ids` (f8f135b1) | FB pre-scan and user-FUNCTION loop both assigned function ids from 2; the container function directory is positional, so a program using both a user FUNCTION and a user FB executed FB bytecode on `CALL` (InvalidVariableIndex trap or silent corruption) | pending |
+| 3 | `codegen: pointed diagnostic for nested FB instances in FB bodies` (72d6ac42) | An FB field that is itself an FB instance (e.g. TON inside a user FB) used to fail at the call site as a generic P9999 todo pointing at compiler source; now rejected at the field declaration with the instance, type, enclosing FB, and the hoist-into-PROGRAM workaround named | pending |
 
 Upgrade flow: `git fetch upstream && git rebase upstream/main ia2-patches`;
 a conflicting patch is re-evaluated for whether it is still needed.
@@ -106,3 +108,11 @@ tasks" with no change to the layers above.
 2. Issue/PR: have codegen populate `container.task_table` (the VM's
    `scheduler.rs` skeleton is already there).
 3. Issue: have the debug_section name variables per PROGRAM instance.
+4. PR: function-id collision fix (patch #2) — a straight bug upstream
+   will want regardless of IA2.
+5. Issue: nested FB instances inside FUNCTION_BLOCK bodies (patch #3
+   only improves the error). A real implementation needs per-instance
+   recursive data-region layout plus an init story for seeding nested
+   instance offsets into the outer instance's block (the data region
+   currently starts zeroed; there is no init image or
+   store-to-data-region-constant opcode to carry them).

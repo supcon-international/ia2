@@ -54,6 +54,18 @@ Each entry: the symptom you'll see, the cause, the fix.
 **Cause:** the program faulted. A VM trap (divide by zero, bad array index, …) in any scheduled instance stops the whole plant and zeroes outputs (failsafe), by design.
 **Fix:** read the reason instead of re-running blind: `/api/runtime/status` reports `running: false` with `last_error` carrying the trap message (e.g. `VM trap in main_inst: DivideByZero`), and the SSE stream emitted `error` then `stopped` at the moment it died. On an edge, the runtime's own `/status` carries the same message in `fault`. Fix the arithmetic (guard divisors, clamp indices) and run again — the next `cs run` clears `last_error`.
 
+### Ran `cs run --program X`, but the snapshot shows a different POU's variables (e.g. the template's `counter`/`blink`)
+**Cause:** you're on a pre-2026-07 binary. The `--program`-without-`--file` path used to concatenate every POU file and ironplc compiles the *first* PROGRAM in that blob — so whichever file sorted first (usually the seeded `main.st`) ran instead of the one you asked for, while `running_info` echoed the requested name. Your program's variables then look "always 0" from an HMI or any by-name read, because they were never in the snapshot at all.
+**Fix:** current binaries compile the named PROGRAM into its own hoisted unit, so the request and the snapshot agree. On an old edge you can't upgrade yet, pass the file too (`cs run --program X --file pous/x.st`) or schedule X in `tasks.toml` and use plain `cs run` — both paths always ran the right program. Diagnostic signature: `running_info` names your program but the snapshot's variable list belongs to another POU.
+
+### FB VAR_OUTPUT reads as zero / run faults with `InvalidVariableIndex` the moment a user FUNCTION is added
+**Cause:** you're on a pre-2026-07 binary. User FUNCTIONs and user FUNCTION_BLOCKs were numbered into overlapping function-id ranges, so a PROGRAM calling both executed FB bytecode where the FUNCTION should run — typically an immediate `VM trap: InvalidVariableIndex`, occasionally silent state corruption.
+**Fix:** fixed in the vendored compiler (ADR-0001 patch #2); rebuild/redeploy. Until then the workaround is to avoid mixing user FUNCTIONs and user FBs in one compiled unit — inline the function body or express it as another FB.
+
+### `cs check` rejects an FB that declares `VAR t : TON;` (or any FB-typed field)
+**Cause:** nested FB instances inside a FUNCTION_BLOCK aren't supported by the vendored codegen — there is no per-instance storage for the inner block. The error names the field, its type, and the enclosing FB.
+**Fix:** hoist the instance into the calling PROGRAM and feed its results to the FB through `VAR_INPUT`. See `05-iec-61131.md` § quirks.
+
 ## Overlay / session
 
 ### The takeover banner strobes (label changes every couple seconds)
@@ -101,3 +113,4 @@ An `init_sdo` entry targets a CoE object the drive doesn't have. A failed startu
 - **RETAIN restores as i32** — wide types truncate.
 - **No per-entry iomap/tasks/device-channel edits.** Whole-document get → edit → set.
 - **WSTRING** is upstream-WIP; don't author WSTRING programs expecting them to run.
+- **No FB instances inside a FUNCTION_BLOCK** (e.g. a TON declared in an FB's `VAR` block) — compile-time error; hoist the instance into the calling PROGRAM. See `05-iec-61131.md` § quirks.

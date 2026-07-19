@@ -243,11 +243,13 @@ pub struct RunningProgram {
 #[ts(export)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RunningInfo {
-    /// `compile_isolated_source` path: one PROGRAM from one .st file.
+    /// `compile_isolated_in_project_full` path: one PROGRAM from one
+    /// .st file.
     Isolated { program: String, file_path: String },
-    /// `compile_project_with_tasks` (or `compile_project`): full
-    /// tasks.toml schedule. Programs are the PROGRAM names, not the
-    /// instance names — that's what makes sense to a human at a glance.
+    /// `compile_project_units` path: the tasks.toml schedule, or a
+    /// synthetic single-PROGRAM schedule for `program`-only runs.
+    /// Programs are the PROGRAM names, not the instance names — that's
+    /// what makes sense to a human at a glance.
     Scheduled { programs: Vec<String> },
 }
 

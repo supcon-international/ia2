@@ -168,87 +168,17 @@ fn extract_retain_vars(library: &Library) -> Vec<String> {
 }
 
 /// Compile a whole project against the schedule stored in `tasks.toml`.
-/// Thin wrapper over `compile_project_with_tasks` that reads the schedule
-/// from disk — the natural entry point for "Run the project" / Deploy.
-pub fn compile_project(store: &project::ProjectStore) -> Result<Container, BridgeError> {
+/// Thin wrapper over `compile_project_units` that reads the schedule
+/// from disk — the natural entry point for "does this project compile"
+/// checks. Every scheduled instance gets its own hoisted unit, so codegen
+/// covers each of them (a concatenated compile would silently codegen
+/// only the first PROGRAM in file order).
+pub fn compile_project(store: &project::ProjectStore) -> Result<Vec<ProgramUnit>, BridgeError> {
     let tasks = store
         .read_tasks()
         .map_err(|e| BridgeError::Parse(format!("reading tasks.toml: {e}")))?
         .unwrap_or_default();
-    compile_project_with_tasks(store, &tasks)
-}
-
-/// Same as `compile_project` but takes an explicit `Tasks` instead of
-/// reading `tasks.toml`. Lets the server layer compose ad-hoc schedules
-/// (e.g. "Run just THIS POU once, ignoring the persisted schedule") for
-/// the ProgramPane Run button without touching tasks.toml on disk.
-///
-/// POU files should NOT contain their own CONFIGURATION blocks — the
-/// auto-migration step strips them on first open of legacy projects.
-/// If any survive (e.g. user pasted one in by hand), they're stripped
-/// here so the synthesized one wins without conflict.
-pub fn compile_project_with_tasks(
-    store: &project::ProjectStore,
-    tasks: &project::Tasks,
-) -> Result<Container, BridgeError> {
-    compile_project_with_tasks_full(store, tasks).map(|(c, _)| c)
-}
-
-/// Like `compile_project_with_tasks`, but also returns the
-/// `ProgramMetadata` (retain vars etc.) extracted from the parsed AST.
-/// Used by the run path; existing callers that only care about
-/// diagnostics keep using `compile_project_with_tasks`.
-pub fn compile_project_with_tasks_full(
-    store: &project::ProjectStore,
-    tasks: &project::Tasks,
-) -> Result<(Container, ProgramMetadata), BridgeError> {
-    let combined = build_combined_project_source(store, tasks)?;
-    tracing::debug!(
-        len = combined.len(),
-        "compile_project: combined source built"
-    );
-    compile_with_metadata(&combined)
-}
-
-/// Concatenate every POU's lowered ST + a synthesized CONFIGURATION
-/// into a single compilation unit. Factored out of
-/// `compile_project_with_tasks_full` so the two-stage compile +
-/// metadata-extract pipeline (parse → codegen, then parse again for
-/// retain) reuses the exact same input.
-fn build_combined_project_source(
-    store: &project::ProjectStore,
-    tasks: &project::Tasks,
-) -> Result<String, BridgeError> {
-    let pou_paths = store
-        .list_pou_paths()
-        .map_err(|e| BridgeError::Parse(format!("listing pous: {e}")))?;
-
-    if tasks.programs.is_empty() {
-        return Err(BridgeError::Parse(
-            "no PROGRAM instances to run — bind a PROGRAM to a task in the \
-             Tasks pane, or click Run from a POU file's editor (which schedules \
-             that PROGRAM ad-hoc for one run)"
-                .into(),
-        ));
-    }
-
-    let mut combined = String::new();
-    for path in &pou_paths {
-        let language = store
-            .pou_file_language(path)
-            .map_err(|e| BridgeError::Parse(format!("language for '{path}': {e}")))?;
-        let source = store
-            .read_pou_source(path)
-            .map_err(|e| BridgeError::Parse(format!("reading pou '{path}': {e}")))?;
-        let st = source_to_st(&source, language)?;
-        let cleaned = strip_any_configuration(&st);
-        combined.push_str(&cleaned);
-        if !combined.ends_with('\n') {
-            combined.push('\n');
-        }
-    }
-    combined.push_str(&synthesize_configuration(tasks));
-    Ok(combined)
+    compile_project_units(store, &tasks)
 }
 
 /// Compile one container per `tasks.toml` PROGRAM instance — the

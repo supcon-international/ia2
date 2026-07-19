@@ -1910,13 +1910,16 @@ pub async fn run(
     // name now so the RunningProgram entry can label what's running.
     let project_name = resolve_project_name(&state, &project)?;
 
-    // Two modes (matched in the handler so the bridge stays simple):
-    //  - `program: None`           → compile_project_units (reads tasks.toml;
-    //                                 one container per PROGRAM instance)
-    //  - `program: Some("foo")`    → compile_isolated_source_full /
-    //                                 compile_project_with_tasks (synthetic
-    //                                 single-instance schedule; tasks.toml
-    //                                 untouched on disk)
+    // Three modes (matched in the handler so the bridge stays simple):
+    //  - `program: None`             → compile_project_units (reads
+    //                                   tasks.toml; one container per
+    //                                   PROGRAM instance)
+    //  - `program` + `file_path`     → compile_isolated_in_project_full
+    //                                   (that file's PROGRAM + siblings as
+    //                                   type context)
+    //  - `program` only              → compile_project_units with a
+    //                                   synthetic single-instance schedule;
+    //                                   tasks.toml untouched on disk
     // Clone the store OUT of the registry lock, then compile unlocked on a
     // blocking thread. A full parse→analyze→codegen over every POU takes
     // long enough that holding the global projects mutex for it would
@@ -1979,15 +1982,17 @@ pub async fn run(
                     vec![adhoc_unit(&tasks, container, metadata.retain_vars)]
                 }
                 (Some(name), None) => {
-                    // Ad-hoc but no file scope — fall back to whole-project
-                    // concatenation with a single-PROGRAM schedule. Other
-                    // files' variables WILL bleed into the debug section
-                    // (ironplc limitation); document this if a client hits
-                    // it.
+                    // Ad-hoc but no file scope — same per-unit assembly as
+                    // the scheduled path, driven by a synthetic
+                    // single-PROGRAM schedule: the requested PROGRAM is
+                    // hoisted to the front of its unit and foreign PROGRAM
+                    // declarations are excluded. (This arm used to
+                    // concatenate every POU file, and ironplc compiles the
+                    // FIRST PROGRAM in source order — so whichever file
+                    // sorted first ran, silently, instead of the requested
+                    // one.)
                     let tasks = single_program_tasks(name);
-                    let (container, metadata) =
-                        ironplc_bridge::compile_project_with_tasks_full(store, &tasks)?;
-                    vec![adhoc_unit(&tasks, container, metadata.retain_vars)]
+                    ironplc_bridge::compile_project_units(store, &tasks)?
                 }
             };
             let devices = store.list_devices()?;
