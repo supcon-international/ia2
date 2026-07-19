@@ -27,9 +27,18 @@ type Props = {
   /** Library blocks open read-only — the server rejects writes under
    *  `pous/lib/**`, so the editor shouldn't accept them either. */
   readOnly?: boolean
+  /** Bumps when an agent-driven update replaced the content (see
+   *  `pouSpawnStore`). Plays the staggered per-line reveal. */
+  spawnTick?: number
 }
 
-export function STEditor({ value, onChange, diagnostics, readOnly = false }: Props) {
+export function STEditor({
+  value,
+  onChange,
+  diagnostics,
+  readOnly = false,
+  spawnTick = 0,
+}: Props) {
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null)
   const monacoRef = useRef<Monaco | null>(null)
   const dark = useDarkMode()
@@ -158,6 +167,40 @@ export function STEditor({ value, onChange, diagnostics, readOnly = false }: Pro
 
     languageRegistered = true
   }, [])
+
+  // Agent-generated reveal: give every visible Monaco line a small
+  // slide-in with a per-line stagger, so code reads as being WRITTEN
+  // rather than blinked into place. Runs only on `spawnTick` bumps
+  // (SSE-driven agent updates) — human typing never triggers it.
+  // Monaco rebuilds `.view-line` DOM asynchronously after the value
+  // prop lands, hence the double-rAF + small delay before we stamp
+  // delays; lines are staggered by their on-screen position (virtual
+  // scrolling does not keep DOM order = visual order).
+  useEffect(() => {
+    if (spawnTick === 0) return
+    const t = setTimeout(() => {
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => {
+          const dom = editorRef.current?.getDomNode()
+          if (!dom) return
+          const lines = [...dom.querySelectorAll<HTMLElement>(".view-line")].sort(
+            (a, b) => a.offsetTop - b.offsetTop,
+          )
+          lines.forEach((el, i) => {
+            el.style.animationDelay = `${Math.min(i * 22, 700)}ms`
+          })
+          dom.classList.add("pou-lines-spawn")
+          setTimeout(() => {
+            dom.classList.remove("pou-lines-spawn")
+            lines.forEach((el) => {
+              el.style.animationDelay = ""
+            })
+          }, 1600)
+        }),
+      )
+    }, 60)
+    return () => clearTimeout(t)
+  }, [spawnTick])
 
   // Refetch symbols whenever the source settles. Same 350ms debounce
   // as the diagnostics path; if symbols fetch fails we just keep the

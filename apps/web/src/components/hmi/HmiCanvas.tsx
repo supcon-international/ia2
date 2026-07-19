@@ -29,6 +29,9 @@ import { HmiSymbol, type SymbolLive } from "./symbols"
 
 export type CanvasMode = "operate" | "arrange"
 
+/** Per-element delay inside one spawn batch (the "wave"). */
+const SPAWN_STAGGER_MS = 80
+
 type PendingConfirm = {
   nodeId: string
   action: HmiAction
@@ -75,7 +78,7 @@ export function HmiCanvas({
   // Spawn animation bookkeeping: ids touched by the latest mutation get
   // the class until their timer expires. A ref map keeps timers out of
   // render; the `anim` state just triggers the re-render.
-  const spawnRef = useRef<Map<string, number>>(new Map())
+  const spawnRef = useRef<Map<string, { until: number; order: number }>>(new Map())
   const [, bumpAnim] = useState(0)
   useEffect(() => {
     if (!mutation || mutation.path !== path) return
@@ -86,16 +89,23 @@ export function HmiCanvas({
     }
     void load()
     if (mutation.touched.length > 0) {
-      const until = Date.now() + 900
-      for (const id of mutation.touched) spawnRef.current.set(id, until)
+      // Per-batch stagger: each touched element's frame/pop/glow chain
+      // starts SPAWN_STAGGER_MS after the previous one, so a batch
+      // reads as a wave of drawing. The expiry covers the last
+      // element's full chain.
+      const life = 1400 + mutation.touched.length * SPAWN_STAGGER_MS
+      const until = Date.now() + life
+      mutation.touched.forEach((id, order) => {
+        spawnRef.current.set(id, { until, order })
+      })
       bumpAnim((n) => n + 1)
       const t = setTimeout(() => {
         const now = Date.now()
-        for (const [id, exp] of spawnRef.current) {
-          if (exp <= now) spawnRef.current.delete(id)
+        for (const [id, s] of spawnRef.current) {
+          if (s.until <= now) spawnRef.current.delete(id)
         }
         bumpAnim((n) => n + 1)
-      }, 950)
+      }, life + 50)
       return () => clearTimeout(t)
     }
   }, [mutation, path, load])
@@ -343,6 +353,25 @@ export function HmiCanvas({
             onAction={requestAction}
           />
         ))}
+        {/* Spawn overlays — the dashed sketch frame + glow live outside
+            the element so they're visible while it is still fading in. */}
+        {[...spawnRef.current.entries()].map(([id, sp]) => {
+          const n = findNode(doc.root, id)
+          if (!n) return null
+          return (
+            <div
+              key={`spawn-${id}`}
+              className="hmi-spawn-overlay"
+              style={{
+                left: n.x,
+                top: n.y,
+                width: n.w > 0 ? n.w : 120,
+                height: n.h > 0 ? n.h : 32,
+                ...({ "--spawn-delay": `${sp.order * SPAWN_STAGGER_MS}ms` } as React.CSSProperties),
+              }}
+            />
+          )
+        })}
       </div>
 
       {pending && (
@@ -383,7 +412,7 @@ function CanvasNode({
   node: HmiNode
   doc: HmiDoc
   snapshotTick: unknown
-  spawn: Map<string, number>
+  spawn: Map<string, { until: number; order: number }>
   selected: string | null
   mode: CanvasMode
   dragPos: { id: string; x: number; y: number } | null
@@ -397,7 +426,7 @@ function CanvasNode({
     dragPos && dragPos.id === node.id
       ? { x: dragPos.x, y: dragPos.y }
       : { x: node.x, y: node.y }
-  const spawning = spawn.has(node.id)
+  const spawning = spawn.get(node.id)
   const tapAction = node.action["tap"]
 
   const body = renderKind(node, snapshot, historyRef, onAction, host)
@@ -407,7 +436,7 @@ function CanvasNode({
       data-hmi-id={node.id}
       className={cn(
         "absolute",
-        spawning && "hmi-spawn",
+        spawning !== undefined && "hmi-spawn",
         mode === "arrange" && "cursor-grab active:cursor-grabbing",
         mode === "operate" && tapAction && "cursor-pointer",
         selected === node.id &&
@@ -418,6 +447,9 @@ function CanvasNode({
         top: pos.y,
         width: node.w > 0 ? node.w : undefined,
         height: node.h > 0 ? node.h : undefined,
+        ...(spawning !== undefined
+          ? ({ "--spawn-delay": `${spawning.order * SPAWN_STAGGER_MS}ms` } as React.CSSProperties)
+          : {}),
       }}
       onPointerDown={(e) => {
         e.stopPropagation()

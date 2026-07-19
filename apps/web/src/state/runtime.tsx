@@ -6,6 +6,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type ReactNode,
 } from "react"
 import type { AppEvent } from "@/types/generated/AppEvent"
@@ -84,6 +85,30 @@ export type View = "app" | "device" | "iomap" | "edge" | "tasks" | "hmi"
  * editor is currently empty OR clean. Never disturb a user with
  * unsaved work — they need to navigate manually in that case.
  */
+/** Bumps every time an AGENT-driven change lands in the open editor
+ * (SSE per-POU refresh, or the auto-jump to a freshly created POU).
+ * The editors listen and play their "generated" reveal. Human typing
+ * never routes through here. */
+class PouSpawnStore {
+  private tick = 0
+  private listeners = new Set<() => void>()
+  getTick = (): number => this.tick
+  subscribe = (l: () => void): (() => void) => {
+    this.listeners.add(l)
+    return () => {
+      this.listeners.delete(l)
+    }
+  }
+  bump(): void {
+    this.tick += 1
+    this.listeners.forEach((l) => l())
+  }
+}
+export const pouSpawnStore = new PouSpawnStore()
+export function usePouSpawnTick(): number {
+  return useSyncExternalStore(pouSpawnStore.subscribe, pouSpawnStore.getTick)
+}
+
 function handleMutationEvent(
   event: MutationEvent,
   currentPouRef: React.MutableRefObject<Pou | null>,
@@ -125,7 +150,7 @@ function handleMutationEvent(
     const cur = currentPouRef.current
     const dirty = !!cur && sourceRef.current !== cur.source
     if (!cur || !dirty) {
-      void selectPouRef.current?.(event.detail.path)
+      void selectPouRef.current?.(event.detail.path)?.then(() => pouSpawnStore.bump())
     }
   }
 }
@@ -678,6 +703,7 @@ export function RuntimeProvider({ children }: { children: ReactNode }) {
           if (currentPouRef.current?.path !== path) return  // user moved away
           setCurrentPou(fresh)
           setSource(fresh.source)
+          pouSpawnStore.bump()
         })
         .catch(() => {})
     })

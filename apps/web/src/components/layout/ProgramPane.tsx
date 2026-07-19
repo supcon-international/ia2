@@ -1,12 +1,12 @@
 import { PanelRight, Play, Plus, RotateCcw, Save, Square } from "lucide-react"
-import { useState } from "react"
+import { useEffect, useState } from "react"
 
 import { FBDEditor } from "@/components/editor/FBDEditor"
 import { LDEditor } from "@/components/editor/LDEditor"
 import { SFCEditor } from "@/components/editor/SFCEditor"
 import { STEditor } from "@/components/editor/STEditor"
 import { cn } from "@/lib/utils"
-import { useRuntime } from "@/state/runtime"
+import { usePouSpawnTick, useRuntime } from "@/state/runtime"
 import { DatasheetView } from "./DatasheetView"
 import { VariablesPanel } from "./VariablesPanel"
 
@@ -33,6 +33,18 @@ export function ProgramPane() {
   // Imported library blocks (pous/lib/**) open read-only: the server
   // rejects writes there anyway (they're managed via /api/library), so
   // don't let edits accumulate that can only fail on Save.
+  // Agent-generated content reveal: when an SSE-driven update lands in
+  // the open editor, sweep an acid scan line down the editor area (all
+  // four languages) — the ST editor additionally staggers its lines.
+  const spawnTick = usePouSpawnTick()
+  const [sweeping, setSweeping] = useState(false)
+  useEffect(() => {
+    if (spawnTick === 0) return
+    setSweeping(true)
+    const t = setTimeout(() => setSweeping(false), 900)
+    return () => clearTimeout(t)
+  }, [spawnTick])
+
   const isLibrary = currentPou?.path.startsWith("lib/") ?? false
   const libraryName = isLibrary ? currentPou!.path.split("/")[1] : null
 
@@ -195,7 +207,7 @@ export function ProgramPane() {
         </div>
       </div>
       <div className="flex min-h-0 flex-1">
-        <div className="min-h-0 min-w-0 flex-1">
+        <div className={cn("relative min-h-0 min-w-0 flex-1", sweeping && "pou-sweep")}>
           {/* Library blocks open as a datasheet (interface + docs, with
               the ST source folded away) — a block is a contract to use,
               not code to read. Everything else dispatches to its
@@ -229,6 +241,7 @@ export function ProgramPane() {
               onChange={setSource}
               diagnostics={diagnostics}
               readOnly={isLibrary}
+              spawnTick={spawnTick}
             />
           )}
         </div>
