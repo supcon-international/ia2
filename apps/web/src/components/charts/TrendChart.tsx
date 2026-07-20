@@ -3,11 +3,19 @@ type Series = {
   values: number[]
   color: string
   binary: boolean
+  /** Sample times (seconds), parallel to `values`. Combined with
+   *  `windowS` they place points by age instead of by index, so the
+   *  x-scale stays time-true across snapshot-rate changes and gaps. */
+  times?: number[]
 }
 
 type Props = {
   series: Series[]
   height?: number
+  /** X-axis span in seconds; the newest sample across all series pins
+   *  the right edge. Only applies to series that carry `times` —
+   *  Monitor's untimed sparklines keep uniform index spacing. */
+  windowS?: number
 }
 
 /**
@@ -15,7 +23,7 @@ type Props = {
  * independently between 0..1 so totally different magnitudes coexist
  * cleanly without a real Y axis. The legend on top maps colour → name.
  */
-export function TrendChart({ series, height = 110 }: Props) {
+export function TrendChart({ series, height = 110, windowS }: Props) {
   if (series.length === 0) {
     return (
       <div
@@ -31,6 +39,18 @@ export function TrendChart({ series, height = 110 }: Props) {
   const padTop = 4
   const padBottom = 4
   const usableH = height - padTop - padBottom
+
+  // Time-true x when the caller supplied a window and timestamps: right
+  // edge = newest sample anywhere, left edge = window seconds earlier.
+  const span = windowS != null && windowS > 0 ? windowS : null
+  let tEnd = -Infinity
+  if (span != null) {
+    for (const s of series) {
+      if (s.times && s.times.length > 0) {
+        tEnd = Math.max(tEnd, s.times[s.times.length - 1])
+      }
+    }
+  }
 
   const renderSeries = (s: Series) => {
     if (s.values.length < 2) return null
@@ -51,13 +71,18 @@ export function TrendChart({ series, height = 110 }: Props) {
     const range = max - min
     const n = s.values.length
     const stepX = width / Math.max(1, n - 1)
+    const times = span != null && Number.isFinite(tEnd) ? s.times : undefined
+    const toX = (i: number) =>
+      times && span != null
+        ? ((times[i] - (tEnd - span)) / span) * width
+        : i * stepX
     const toY = (v: number) =>
       padTop + usableH - ((v - min) / range) * usableH
 
     const points: string[] = []
     if (s.binary) {
       for (let i = 0; i < n; i++) {
-        const x = i * stepX
+        const x = toX(i)
         const y = toY(s.values[i])
         if (i === 0) {
           points.push(`${x},${y}`)
@@ -69,7 +94,7 @@ export function TrendChart({ series, height = 110 }: Props) {
       }
     } else {
       for (let i = 0; i < n; i++) {
-        points.push(`${(i * stepX).toFixed(1)},${toY(s.values[i]).toFixed(1)}`)
+        points.push(`${toX(i).toFixed(1)},${toY(s.values[i]).toFixed(1)}`)
       }
     }
     return (
