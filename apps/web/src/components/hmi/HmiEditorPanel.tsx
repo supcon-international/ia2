@@ -10,6 +10,7 @@ import { useEffect, useMemo, useState } from "react"
 import { Plus, Trash2 } from "lucide-react"
 
 import { fetchHmiSymbols, hmiOps } from "@/lib/api"
+import { canHostAction } from "@/lib/hmi-actions"
 import type { HmiAction } from "@/types/generated/HmiAction"
 import type { HmiBinding } from "@/types/generated/HmiBinding"
 import type { HmiDoc } from "@/types/generated/HmiDoc"
@@ -235,9 +236,14 @@ export function HmiInspector({
         <BindingsEditor node={node} variables={variables} patch={patch} />
       </Section>
 
-      <Section label="Actions">
-        <ActionsEditor node={node} variables={variables} patch={patch} />
-      </Section>
+      {/* validate_hmi rejects actions on non-control node types; keep the
+          editor from authoring them. A legacy action still shows so it
+          can be removed. */}
+      {(canHostAction(node.type) || Object.keys(node.action).length > 0) && (
+        <Section label="Actions">
+          <ActionsEditor node={node} variables={variables} patch={patch} />
+        </Section>
+      )}
 
       {error && <div className="text-[10px] text-destructive">{error}</div>}
 

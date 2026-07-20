@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use project::{
-    apply_hmi_ops, hmi_variables, validate_hmi, HmiAction, HmiBinding, HmiDoc, HmiIssue, HmiNode,
-    HmiNodeKind, HmiOp, HmiSeries, ProjectStore,
+    apply_hmi_ops, hmi_nav_targets, hmi_variables, hmi_write_variables, validate_hmi, HmiAction,
+    HmiBinding, HmiDoc, HmiIssue, HmiNode, HmiNodeKind, HmiOp, HmiSeries, ProjectStore, StoreError,
 };
 
 use crate::error::ApiError;
@@ -94,6 +94,18 @@ pub async fn get_hmi(
     with_project(&state, &project, |store| Ok(store.read_hmi(&path)?)).map(Json)
 }
 
+/// The one persistence gate: error-severity findings block a write.
+/// Every path that stores a document (PUT, /ops, generate) must agree,
+/// or one path persists screens another then refuses to save.
+fn structural_errors(issues: &[HmiIssue]) -> Option<String> {
+    let errors: Vec<&str> = issues
+        .iter()
+        .filter(|i| i.severity == "error")
+        .map(|i| i.message.as_str())
+        .collect();
+    (!errors.is_empty()).then(|| format!("screen has structural errors: {}", errors.join("; ")))
+}
+
 pub async fn put_hmi(
     State(state): State<AppState>,
     project: ProjectName,
@@ -101,16 +113,8 @@ pub async fn put_hmi(
     Json(doc): Json<HmiDoc>,
 ) -> Result<Json<Vec<HmiIssue>>, ApiError> {
     let issues = validate_hmi(&doc);
-    if issues.iter().any(|i| i.severity == "error") {
-        return Err(ApiError::BadRequest(format!(
-            "screen has structural errors: {}",
-            issues
-                .iter()
-                .filter(|i| i.severity == "error")
-                .map(|i| i.message.as_str())
-                .collect::<Vec<_>>()
-                .join("; ")
-        )));
+    if let Some(msg) = structural_errors(&issues) {
+        return Err(ApiError::BadRequest(msg));
     }
     let project_name = with_project(&state, &project, |store| {
         store.write_hmi(&path, &doc)?;
@@ -158,9 +162,8 @@ pub struct HmiOpsResponse {
     /// SSE so every open canvas animates exactly these elements.
     pub touched: Vec<String>,
     /// Structural findings on the document AFTER the batch. Warnings
-    /// don't block; errors can't happen here (the ops layer rejects
-    /// structurally-invalid results), but the field keeps the shape
-    /// uniform with /check.
+    /// don't block; a batch whose result carries error-severity issues
+    /// is rejected (422) without persisting — same gate as PUT.
     pub issues: Vec<HmiIssue>,
 }
 
@@ -176,8 +179,12 @@ pub async fn hmi_ops(
     let (touched, issues, project_name) = with_project(&state, &project, |store| {
         let mut doc = store.read_hmi(&path)?;
         let touched = apply_hmi_ops(&mut doc, &req.ops).map_err(ApiError::BadRequest)?;
+        let issues = validate_hmi(&doc);
+        if let Some(msg) = structural_errors(&issues) {
+            return Err(ApiError::Unprocessable(msg));
+        }
         store.write_hmi(&path, &doc)?;
-        Ok((touched, validate_hmi(&doc), store.name().to_string()))
+        Ok((touched, issues, store.name().to_string()))
     })?;
     state.emit_mutation(
         &project_name,
@@ -201,35 +208,76 @@ pub async fn check_hmi(
 ) -> Result<Json<Vec<HmiIssue>>, ApiError> {
     with_project(&state, &project, |store| {
         let doc = store.read_hmi(&path)?;
-        let mut issues = validate_hmi(&doc);
-        let known = project_variable_names(store)?;
-        for (node_id, var) in hmi_variables(&doc) {
-            // Multi-PROGRAM `instance.variable` names resolve at runtime;
-            // check the bare tail so both spellings pass.
-            let tail = var.rsplit('.').next().unwrap_or(&var);
-            if !known.contains(tail) {
-                issues.push(HmiIssue {
-                    severity: "warning".into(),
-                    node_id: Some(node_id),
-                    message: format!("variable '{var}' not found in any POU"),
-                });
-            }
-        }
-        Ok(issues)
+        check_hmi_doc(store, &doc)
     })
     .map(Json)
 }
 
-fn project_variable_names(
+fn hmi_warn(node_id: String, message: String) -> HmiIssue {
+    HmiIssue {
+        severity: "warning".into(),
+        node_id: Some(node_id),
+        message,
+    }
+}
+
+/// Structure + project context: variable existence, writes to
+/// input-direction (read-only) variables, dangling nav targets. Shared
+/// by /check and /api/project/validate so both surface the same findings
+/// (the docs/hmi-design.md diagnostics contract).
+pub(crate) fn check_hmi_doc(store: &ProjectStore, doc: &HmiDoc) -> Result<Vec<HmiIssue>, ApiError> {
+    let mut issues = validate_hmi(doc);
+    let known = project_variable_directions(store)?;
+    // Multi-PROGRAM `instance.variable` names resolve at runtime; check
+    // the bare tail so both spellings pass.
+    let tail_of = |var: &str| var.rsplit('.').next().unwrap_or(var).to_string();
+    for (node_id, var) in hmi_variables(doc) {
+        if !known.contains_key(&tail_of(&var)) {
+            issues.push(hmi_warn(
+                node_id,
+                format!("variable '{var}' not found in any POU"),
+            ));
+        }
+    }
+    for (node_id, var) in hmi_write_variables(doc) {
+        // A bare tail can match declarations in several POUs; flag only
+        // when every one is an input — those are fed by the scan, so an
+        // HMI write is overwritten (read-only by contract). Warning, not
+        // error: same weight as the existence check above.
+        if let Some(dirs) = known.get(&tail_of(&var)) {
+            if dirs.iter().all(|d| d == "input") {
+                issues.push(hmi_warn(
+                    node_id,
+                    format!("action writes '{var}' but it is declared as an input (read-only)"),
+                ));
+            }
+        }
+    }
+    let screens: std::collections::HashSet<String> = store.list_hmis()?.into_iter().collect();
+    for (node_id, target) in hmi_nav_targets(doc) {
+        // Empty targets are validate_hmi's finding already.
+        if !target.trim().is_empty() && !screens.contains(&target) {
+            issues.push(hmi_warn(
+                node_id,
+                format!("nav target '{target}' is not a screen in this project"),
+            ));
+        }
+    }
+    Ok(issues)
+}
+
+/// Bare variable name → every declaration direction it appears with
+/// across the project's POUs (a name can repeat between programs).
+fn project_variable_directions(
     store: &ProjectStore,
-) -> Result<std::collections::HashSet<String>, ApiError> {
+) -> Result<std::collections::HashMap<String, Vec<String>>, ApiError> {
     // Language-aware on purpose: graphical POUs carry their variables in
     // the JSON document, not in ST the bridge can parse — same extraction
     // the generator uses, so check and generate can never disagree.
-    let mut out = std::collections::HashSet::new();
+    let mut out: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
     for path in store.list_pou_paths()? {
         for v in pou_gen_vars(store, &path) {
-            out.insert(v.name);
+            out.entry(v.name).or_default().push(v.direction);
         }
     }
     Ok(out)
@@ -371,16 +419,36 @@ pub async fn generate_hmi(
 ) -> Result<Json<HmiDoc>, ApiError> {
     let req = body.map(|Json(b)| b).unwrap_or_default();
     let (doc, project_name) = with_project(&state, &project, |store| {
-        if !req.force && store.read_hmi(&path).is_ok() {
-            return Err(ApiError::Conflict(format!(
-                "hmi '{path}' already exists — pass {{\"force\":true}} to regenerate"
-            )));
+        if !req.force {
+            match store.read_hmi(&path) {
+                Ok(_) => {
+                    return Err(ApiError::Conflict(format!(
+                        "hmi '{path}' already exists — pass {{\"force\":true}} to regenerate"
+                    )))
+                }
+                // Absent is the green light. Present-but-unparseable is
+                // still a curated screen (often one typo from valid) —
+                // overwriting it must stay an explicit force.
+                Err(StoreError::HmiNotFound(_)) => {}
+                Err(StoreError::HmiCorrupt(..)) => {
+                    return Err(ApiError::Conflict(format!(
+                        "hmi '{path}' exists but is not readable as JSON — fix it or pass \
+                         {{\"force\":true}} to regenerate"
+                    )))
+                }
+                Err(e) => return Err(e.into()),
+            }
         }
         let title = req
             .title
             .clone()
             .unwrap_or_else(|| format!("{} — Overview", store.name()));
         let doc = build_generated(store, &title)?;
+        // Same gate as PUT — the generator must never persist a document
+        // the editor would then refuse to save.
+        if let Some(msg) = structural_errors(&validate_hmi(&doc)) {
+            return Err(ApiError::Internal(format!("generated {msg}")));
+        }
         store.write_hmi(&path, &doc)?;
         Ok((doc, store.name().to_string()))
     })?;
@@ -518,8 +586,27 @@ fn build_generated(store: &ProjectStore, title: &str) -> Result<HmiDoc, ApiError
         action: BTreeMap::new(),
     };
 
+    // POU paths flatten '/' to '_' for ids, so distinct paths can collide
+    // (pous/a/b vs pous/a_b — and their variables too). A numeric suffix
+    // keeps every id unique, and stays deterministic because
+    // list_pou_paths is sorted.
+    let mut used_ids = std::collections::HashSet::new();
+    let mut unique_id = move |base: String| -> String {
+        if used_ids.insert(base.clone()) {
+            return base;
+        }
+        let mut n = 2;
+        loop {
+            let candidate = format!("{base}_{n}");
+            if used_ids.insert(candidate.clone()) {
+                return candidate;
+            }
+            n += 1;
+        }
+    };
+
     children.push(mk(
-        "alarms".into(),
+        unique_id("alarms".into()),
         HmiNodeKind::Alarmbar {},
         PAD,
         16,
@@ -548,7 +635,7 @@ fn build_generated(store: &ProjectStore, title: &str) -> Result<HmiDoc, ApiError
         let slug = pou_path.replace('/', "_");
 
         children.push(mk(
-            format!("sec_{slug}"),
+            unique_id(format!("sec_{slug}")),
             HmiNodeKind::Text {
                 text: pou_path.clone(),
                 style: project::HmiTextStyle::Section,
@@ -564,7 +651,7 @@ fn build_generated(store: &ProjectStore, title: &str) -> Result<HmiDoc, ApiError
             if v.direction == "fb_instance" {
                 continue;
             }
-            let id = format!("{}_{}", slug, v.name.to_ascii_lowercase());
+            let id = unique_id(format!("{}_{}", slug, v.name.to_ascii_lowercase()));
             let upper = v.type_name.to_ascii_uppercase();
             let mut node = if upper.starts_with("BOOL") {
                 let mut n = mk(
@@ -644,7 +731,7 @@ fn build_generated(store: &ProjectStore, title: &str) -> Result<HmiDoc, ApiError
             })
             .collect();
         children.push(mk(
-            "trend_main".into(),
+            unique_id("trend_main".into()),
             HmiNodeKind::Trend {
                 series,
                 window_s: 300,
@@ -664,4 +751,139 @@ fn build_generated(store: &ProjectStore, title: &str) -> Result<HmiDoc, ApiError
         *root_children = children;
     }
     Ok(doc)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store_in(dir: &std::path::Path) -> ProjectStore {
+        ProjectStore::create(dir.join("p"), "p").unwrap()
+    }
+
+    fn all_ids(doc: &HmiDoc) -> Vec<String> {
+        fn walk(n: &HmiNode, out: &mut Vec<String>) {
+            out.push(n.id.clone());
+            if let HmiNodeKind::Group { children, .. } = &n.kind {
+                for c in children {
+                    walk(c, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&doc.root, &mut out);
+        out
+    }
+
+    #[test]
+    fn structural_errors_blocks_only_error_severity() {
+        let warn = HmiIssue {
+            severity: "warning".into(),
+            node_id: None,
+            message: "screen has no title".into(),
+        };
+        let err = HmiIssue {
+            severity: "error".into(),
+            node_id: Some("x".into()),
+            message: "duplicate id 'x'".into(),
+        };
+        assert_eq!(structural_errors(std::slice::from_ref(&warn)), None);
+        assert_eq!(
+            structural_errors(&[warn, err]).as_deref(),
+            Some("screen has structural errors: duplicate id 'x'")
+        );
+    }
+
+    #[test]
+    fn generate_survives_slug_collisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        // pous/a/b and pous/a_b both flatten to slug `a_b`; the shared
+        // variable name makes the per-variable ids collide too.
+        std::fs::create_dir_all(dir.path().join("p/pous/a")).unwrap();
+        std::fs::write(
+            dir.path().join("p/pous/a/b.st"),
+            "PROGRAM ab_nested\nVAR\n  x : BOOL;\nEND_VAR\nx := x;\nEND_PROGRAM\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("p/pous/a_b.st"),
+            "PROGRAM ab_flat\nVAR\n  x : BOOL;\nEND_VAR\nx := x;\nEND_PROGRAM\n",
+        )
+        .unwrap();
+
+        let doc = build_generated(&store, "t").unwrap();
+        let ids = all_ids(&doc);
+        let unique: std::collections::HashSet<&String> = ids.iter().collect();
+        assert_eq!(ids.len(), unique.len(), "duplicate node ids in {ids:?}");
+        // The generated doc must pass the same gate PUT enforces.
+        assert_eq!(structural_errors(&validate_hmi(&doc)), None);
+    }
+
+    #[test]
+    fn check_flags_input_writes_and_dangling_navs() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_in(dir.path());
+        std::fs::write(
+            dir.path().join("p/pous/plant.st"),
+            "PROGRAM plant\nVAR_INPUT\n  sensor_in : REAL;\nEND_VAR\nVAR\n  valve_cmd : BOOL;\nEND_VAR\nvalve_cmd := valve_cmd;\nEND_PROGRAM\n",
+        )
+        .unwrap();
+        store.create_hmi("detail", "Detail").unwrap();
+
+        let mut doc = project::hmi::empty_hmi("t");
+        let mk_button = |id: &str, var: &str| {
+            let mut n = HmiNode {
+                id: id.into(),
+                kind: HmiNodeKind::Button { label: id.into() },
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+                bind: BTreeMap::new(),
+                action: BTreeMap::new(),
+            };
+            n.action.insert(
+                "tap".into(),
+                HmiAction::Write {
+                    variable: var.into(),
+                    value: 1.0,
+                    confirm: true,
+                },
+            );
+            n
+        };
+        let nav = |id: &str, target: &str| HmiNode {
+            id: id.into(),
+            kind: HmiNodeKind::Nav {
+                label: id.into(),
+                target: target.into(),
+            },
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+            bind: BTreeMap::new(),
+            action: BTreeMap::new(),
+        };
+        if let HmiNodeKind::Group { children, .. } = &mut doc.root.kind {
+            children.push(mk_button("w_input", "sensor_in"));
+            children.push(mk_button("w_local", "valve_cmd"));
+            children.push(nav("n_ok", "detail"));
+            children.push(nav("n_dangling", "no_such_screen"));
+        }
+
+        let issues = check_hmi_doc(&store, &doc).unwrap();
+        let hits = |frag: &str| -> Vec<&str> {
+            issues
+                .iter()
+                .filter(|i| i.message.contains(frag))
+                .map(|i| i.node_id.as_deref().unwrap_or(""))
+                .collect()
+        };
+        // Only the input-direction write and the dangling target warn.
+        assert_eq!(hits("declared as an input"), vec!["w_input"]);
+        assert_eq!(hits("is not a screen"), vec!["n_dangling"]);
+        assert!(issues.iter().all(|i| i.severity == "warning"), "{issues:?}");
+    }
 }

@@ -376,15 +376,20 @@ fn apply_one(doc: &mut HmiDoc, op: &HmiOp, touched: &mut Vec<String>) -> Result<
             node,
             index,
         } => {
-            if node.id.is_empty() {
-                return Err("node id must not be empty".into());
-            }
-            if find_node(&doc.root, &node.id).is_some() {
-                return Err(format!("id '{}' already exists", node.id));
-            }
-            for dup in collect_ids(node) {
-                if dup != node.id && find_node(&doc.root, &dup).is_some() {
-                    return Err(format!("descendant id '{dup}' already exists"));
+            // Identity checks cover the whole added subtree, not just the
+            // top node — a group carrying duplicate or empty child ids
+            // must never persist (PUT would reject the resulting doc).
+            let mut fresh = std::collections::HashSet::new();
+            for id in collect_ids(node) {
+                if id.trim().is_empty() {
+                    return Err("node id must not be empty".into());
+                }
+                if !fresh.insert(id.clone()) {
+                    return Err(format!("duplicate id '{id}' within the added subtree"));
+                }
+                if find_node(&doc.root, &id).is_some() {
+                    let what = if id == node.id { "id" } else { "descendant id" };
+                    return Err(format!("{what} '{id}' already exists"));
                 }
             }
             let parent_id = parent.as_deref().unwrap_or(&doc.root.id).to_string();
@@ -542,6 +547,39 @@ pub fn hmi_variables(doc: &HmiDoc) -> Vec<(String, String)> {
     out
 }
 
+/// Variables a document WRITES (write/toggle/pulse/set_value action
+/// targets) — the server checks these against declaration directions.
+/// Nav actions are excluded: they navigate, they never touch the plant.
+pub fn hmi_write_variables(doc: &HmiDoc) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    walk(&doc.root, &mut |n| {
+        for a in n.action.values() {
+            if let Some(v) = a.variable() {
+                out.push((n.id.clone(), v.to_string()));
+            }
+        }
+    });
+    out
+}
+
+/// Navigation targets — from `nav` nodes and nav-kind actions. Empty
+/// targets are validate_hmi's finding; the server checks the rest
+/// against the project's screen list.
+pub fn hmi_nav_targets(doc: &HmiDoc) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    walk(&doc.root, &mut |n| {
+        if let HmiNodeKind::Nav { target, .. } = &n.kind {
+            out.push((n.id.clone(), target.clone()));
+        }
+        for a in n.action.values() {
+            if let HmiAction::Nav { target } = a {
+                out.push((n.id.clone(), target.clone()));
+            }
+        }
+    });
+    out
+}
+
 fn walk(node: &HmiNode, f: &mut impl FnMut(&HmiNode)) {
     f(node);
     if let HmiNodeKind::Group { children, .. } = &node.kind {
@@ -573,6 +611,35 @@ fn warn(node: Option<&str>, msg: impl Into<String>) -> HmiIssue {
         severity: "warning".into(),
         node_id: node.map(str::to_string),
         message: msg.into(),
+    }
+}
+
+/// Node types whose renderer affordance is a control surface — the only
+/// types the canvas wires gestures on. Everything else must stay inert so
+/// a write can't hide behind an innocent-looking label (the actions-are-
+/// the-reviewable-write-surface fence in docs/hmi-design.md).
+fn hosts_actions(kind: &HmiNodeKind) -> bool {
+    matches!(
+        kind,
+        HmiNodeKind::Button { .. }
+            | HmiNodeKind::Input { .. }
+            | HmiNodeKind::Symbol { .. }
+            | HmiNodeKind::Nav { .. }
+    )
+}
+
+fn kind_name(kind: &HmiNodeKind) -> &'static str {
+    match kind {
+        HmiNodeKind::Group { .. } => "group",
+        HmiNodeKind::Text { .. } => "text",
+        HmiNodeKind::Value { .. } => "value",
+        HmiNodeKind::Symbol { .. } => "symbol",
+        HmiNodeKind::Trend { .. } => "trend",
+        HmiNodeKind::Alarmbar {} => "alarmbar",
+        HmiNodeKind::Button { .. } => "button",
+        HmiNodeKind::Input { .. } => "input",
+        HmiNodeKind::Nav { .. } => "nav",
+        HmiNodeKind::Shape { .. } => "shape",
     }
 }
 
@@ -611,11 +678,15 @@ pub fn validate_hmi(doc: &HmiDoc) -> Vec<HmiIssue> {
                     ),
                 ));
             }
+            // Warnings, not errors: the palette places empty trends and
+            // navs on purpose and the canvas renders a visible
+            // placeholder — incomplete must stay saveable, or every
+            // whole-document save after a palette drop would bounce.
             HmiNodeKind::Trend { series, .. } if series.is_empty() => {
-                issues.push(err(Some(&n.id), "trend has no series"));
+                issues.push(warn(Some(&n.id), "trend has no series"));
             }
             HmiNodeKind::Nav { target, .. } if target.trim().is_empty() => {
-                issues.push(err(Some(&n.id), "nav target is empty"));
+                issues.push(warn(Some(&n.id), "nav target is empty"));
             }
             HmiNodeKind::Input { .. } if !n.action.contains_key("commit") => {
                 issues.push(warn(
@@ -624,6 +695,15 @@ pub fn validate_hmi(doc: &HmiDoc) -> Vec<HmiIssue> {
                 ));
             }
             _ => {}
+        }
+        if !n.action.is_empty() && !hosts_actions(&n.kind) {
+            issues.push(err(
+                Some(&n.id),
+                format!(
+                    "{} node cannot host actions (allowed on: button, input, symbol, nav)",
+                    kind_name(&n.kind)
+                ),
+            ));
         }
         for (gesture, a) in &n.action {
             if let HmiAction::SetValue {
@@ -752,6 +832,58 @@ mod tests {
             }],
         );
         assert!(orphan.unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    fn add_validates_ids_across_the_whole_subtree() {
+        let group = |children: Vec<HmiNode>| HmiNodeKind::Group {
+            layout: HmiLayout::Absolute,
+            gap: 0,
+            children,
+        };
+        let add = |n: HmiNode| HmiOp::AddNode {
+            parent: None,
+            node: n,
+            index: None,
+        };
+
+        // Two children sharing an id — the batch must fail, not persist a
+        // document PUT would reject.
+        let mut doc = empty_hmi("t");
+        let dup = apply_hmi_ops(
+            &mut doc,
+            &[add(node(
+                "g",
+                group(vec![
+                    node("dup", HmiNodeKind::Alarmbar {}),
+                    node("dup", HmiNodeKind::Alarmbar {}),
+                ]),
+            ))],
+        );
+        assert!(dup.unwrap_err().contains("within the added subtree"));
+
+        // Empty ids anywhere in the subtree, not just the top node.
+        let empty = apply_hmi_ops(
+            &mut doc,
+            &[add(node(
+                "g",
+                group(vec![node("", HmiNodeKind::Alarmbar {})]),
+            ))],
+        );
+        assert!(empty.unwrap_err().contains("must not be empty"));
+
+        // A descendant colliding with a node already in the tree.
+        apply_hmi_ops(&mut doc, &[add(node("a", HmiNodeKind::Alarmbar {}))]).unwrap();
+        let clash = apply_hmi_ops(
+            &mut doc,
+            &[add(node(
+                "g",
+                group(vec![node("a", HmiNodeKind::Alarmbar {})]),
+            ))],
+        );
+        assert!(clash
+            .unwrap_err()
+            .contains("descendant id 'a' already exists"));
     }
 
     #[test]
@@ -892,10 +1024,174 @@ mod tests {
         )
         .unwrap();
         let issues = validate_hmi(&doc);
-        let has = |frag: &str| issues.iter().any(|i| i.message.contains(frag));
-        assert!(has("unknown symbol"));
-        assert!(has("no series"));
-        assert!(has("no `commit` action"));
+        let sev = |frag: &str| {
+            issues
+                .iter()
+                .find(|i| i.message.contains(frag))
+                .unwrap_or_else(|| panic!("no issue containing '{frag}'"))
+                .severity
+                .clone()
+        };
+        assert_eq!(sev("unknown symbol"), "warning");
+        assert_eq!(sev("no `commit` action"), "warning");
+        // Incomplete-but-renderable states are warnings: the palette
+        // places empty trends/navs on purpose, so they must stay
+        // saveable through PUT and /ops.
+        assert_eq!(sev("no series"), "warning");
+    }
+
+    #[test]
+    fn validate_warns_on_empty_nav_target() {
+        let mut doc = empty_hmi("t");
+        apply_hmi_ops(
+            &mut doc,
+            &[HmiOp::AddNode {
+                parent: None,
+                node: node(
+                    "n1",
+                    HmiNodeKind::Nav {
+                        label: "Detail".into(),
+                        target: "".into(),
+                    },
+                ),
+                index: None,
+            }],
+        )
+        .unwrap();
+        let issues = validate_hmi(&doc);
+        let nav = issues
+            .iter()
+            .find(|i| i.message.contains("nav target is empty"))
+            .unwrap();
+        assert_eq!(nav.severity, "warning");
+    }
+
+    #[test]
+    fn validate_rejects_actions_on_non_host_nodes() {
+        let write = HmiAction::Write {
+            variable: "valve_cmd".into(),
+            value: 1.0,
+            confirm: false,
+        };
+
+        // The regression: a confirm:false write hidden behind a plain
+        // text label. Must be an error-severity finding.
+        let mut doc = empty_hmi("t");
+        let mut label = node(
+            "l1",
+            HmiNodeKind::Text {
+                text: "Just a label".into(),
+                style: HmiTextStyle::Body,
+            },
+        );
+        label.action.insert("tap".into(), write.clone());
+        apply_hmi_ops(
+            &mut doc,
+            &[HmiOp::AddNode {
+                parent: None,
+                node: label,
+                index: None,
+            }],
+        )
+        .unwrap();
+        let issues = validate_hmi(&doc);
+        let hit = issues
+            .iter()
+            .find(|i| i.message.contains("cannot host actions"))
+            .unwrap();
+        assert_eq!(hit.severity, "error");
+        assert_eq!(hit.node_id.as_deref(), Some("l1"));
+
+        // Control-surface types keep hosting actions.
+        let mut doc = empty_hmi("t");
+        let mut btn = node("b1", HmiNodeKind::Button { label: "Go".into() });
+        btn.action.insert("tap".into(), write);
+        let mut sym = node(
+            "s1",
+            HmiNodeKind::Symbol {
+                symbol: "valve".into(),
+                props: BTreeMap::new(),
+            },
+        );
+        sym.action.insert(
+            "tap".into(),
+            HmiAction::Toggle {
+                variable: "valve_cmd".into(),
+                confirm: true,
+            },
+        );
+        apply_hmi_ops(
+            &mut doc,
+            &[
+                HmiOp::AddNode {
+                    parent: None,
+                    node: btn,
+                    index: None,
+                },
+                HmiOp::AddNode {
+                    parent: None,
+                    node: sym,
+                    index: None,
+                },
+            ],
+        )
+        .unwrap();
+        assert!(!validate_hmi(&doc)
+            .iter()
+            .any(|i| i.message.contains("cannot host actions")));
+    }
+
+    #[test]
+    fn write_and_nav_surfaces_are_collected() {
+        let mut doc = empty_hmi("t");
+        let mut btn = node("b", HmiNodeKind::Button { label: "Go".into() });
+        btn.action.insert(
+            "tap".into(),
+            HmiAction::Write {
+                variable: "valve_cmd".into(),
+                value: 1.0,
+                confirm: true,
+            },
+        );
+        let mut jump = node(
+            "j",
+            HmiNodeKind::Nav {
+                label: "Detail".into(),
+                target: "detail".into(),
+            },
+        );
+        jump.action.insert(
+            "tap".into(),
+            HmiAction::Nav {
+                target: "other".into(),
+            },
+        );
+        apply_hmi_ops(
+            &mut doc,
+            &[
+                HmiOp::AddNode {
+                    parent: None,
+                    node: btn,
+                    index: None,
+                },
+                HmiOp::AddNode {
+                    parent: None,
+                    node: jump,
+                    index: None,
+                },
+            ],
+        )
+        .unwrap();
+
+        // Writes exclude nav actions; nav targets come from both the nav
+        // node's own target and nav-kind actions.
+        let writes: Vec<_> = hmi_write_variables(&doc)
+            .into_iter()
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(writes, vec!["valve_cmd"]);
+        let navs: Vec<_> = hmi_nav_targets(&doc).into_iter().map(|(_, t)| t).collect();
+        assert_eq!(navs, vec!["detail", "other"]);
     }
 
     #[test]

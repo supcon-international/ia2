@@ -198,8 +198,8 @@ impl ProjectStore {
     }
 
     /// Parse the screen at `path`. `HmiNotFound` when the file is absent;
-    /// a corrupt file surfaces as the JSON error (the editor shows it —
-    /// same philosophy as POU files that fail to parse).
+    /// `HmiCorrupt` when it exists but fails JSON parse (the editor shows
+    /// it — same philosophy as POU files that fail to parse).
     pub fn read_hmi(&self, path: &str) -> Result<crate::hmi::HmiDoc, StoreError> {
         validate_path(path)?;
         let file = self.hmi_file(path);
@@ -207,9 +207,7 @@ impl ProjectStore {
             return Err(StoreError::HmiNotFound(path.into()));
         }
         let raw = fs::read_to_string(&file)?;
-        serde_json::from_str(&raw).map_err(|e| {
-            StoreError::InvalidName(format!("hmi '{path}' is not a valid document: {e}"))
-        })
+        serde_json::from_str(&raw).map_err(|e| StoreError::HmiCorrupt(path.into(), e.to_string()))
     }
 
     /// Create a fresh empty screen. `AlreadyExists` if the slug is taken.
@@ -1454,5 +1452,29 @@ fn default_config_for(protocol: Protocol) -> ProtocolConfig {
             start_on_connect: true,
             channels: vec![],
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_hmi_distinguishes_absent_from_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ProjectStore::create(dir.path().join("p"), "p").unwrap();
+        assert!(matches!(
+            store.read_hmi("ghost"),
+            Err(StoreError::HmiNotFound(_))
+        ));
+        store.create_hmi("s", "S").unwrap();
+        assert!(store.read_hmi("s").is_ok());
+        // A present-but-unparseable screen must never read as absent —
+        // the generate guard's 409 fence depends on the distinction.
+        fs::write(dir.path().join("p/hmi/s.hmi.json"), "{ not json").unwrap();
+        assert!(matches!(
+            store.read_hmi("s"),
+            Err(StoreError::HmiCorrupt(..))
+        ));
     }
 }

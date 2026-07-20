@@ -1790,6 +1790,32 @@ pub async fn validate_project(
             }
             out.push(d);
         }
+        // HMI screens fold into the same diagnostics story (the
+        // docs/hmi-design.md contract): structural issues, unknown
+        // variables, read-only write targets, dangling nav targets. A
+        // screen that no longer parses is itself a finding — screens are
+        // plain files a human can break by hand.
+        for slug in store.list_hmis()? {
+            match store.read_hmi(&slug) {
+                Ok(doc) => {
+                    for issue in crate::hmi_routes::check_hmi_doc(store, &doc)? {
+                        let code = if issue.severity == "error" {
+                            "hmi-validate"
+                        } else {
+                            "hmi-validate-warning"
+                        };
+                        let message = match issue.node_id.as_deref() {
+                            Some(n) => format!("hmi '{slug}' [{n}]: {}", issue.message),
+                            None => format!("hmi '{slug}': {}", issue.message),
+                        };
+                        let mut d = diag(code, message);
+                        d.severity = issue.severity;
+                        out.push(d);
+                    }
+                }
+                Err(e) => out.push(diag("hmi-validate", e.to_string())),
+            }
+        }
         Ok(out)
     })
     .await
