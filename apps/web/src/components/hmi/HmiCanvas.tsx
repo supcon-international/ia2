@@ -14,6 +14,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 
+import { canHostAction } from "@/lib/hmi-actions"
 import { formatBinding, lookupVar, resolveBinding } from "@/lib/hmi-binding"
 import { pushHistory } from "@/lib/var-history"
 import { cn } from "@/lib/utils"
@@ -427,7 +428,9 @@ function CanvasNode({
       ? { x: dragPos.x, y: dragPos.y }
       : { x: node.x, y: node.y }
   const spawning = spawn.get(node.id)
-  const tapAction = node.action["tap"]
+  // Only control-surface node types fire gestures (mirrors validate_hmi's
+  // action-host rule) — a tap on a text label must never reach the plant.
+  const tapAction = canHostAction(node.type) ? node.action["tap"] : undefined
 
   const body = renderKind(node, snapshot, historyRef, onAction, host)
 

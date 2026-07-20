@@ -38,6 +38,11 @@ pub enum StoreError {
     #[error("HMI screen '{0}' not found")]
     HmiNotFound(String),
 
+    /// Present on disk but not parseable — distinct from `HmiNotFound` so
+    /// callers can refuse to treat a broken screen as an absent one.
+    #[error("HMI screen '{0}' is not a valid document: {1}")]
+    HmiCorrupt(String, String),
+
     #[error("device '{0}' not found")]
     DeviceNotFound(String),
 
