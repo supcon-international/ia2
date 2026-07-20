@@ -15,11 +15,18 @@
 import { createContext, useContext } from "react"
 
 import type { HmiDoc } from "@/types/generated/HmiDoc"
+import type { RuntimeMode } from "@/types/generated/RuntimeMode"
 
 export type HmiRuntimeState = {
   running: boolean
   /** Active fault / last error to show in the alarm bar; null when calm. */
   alarm: string | null
+  /** Scan-loop mode when the host's status carries it — paused/step
+   *  must not present as a healthy green run. */
+  mode?: RuntimeMode["kind"]
+  /** Devices whose transport is down (their input variables are frozen
+   *  at last-known values). Empty/absent = fieldbus healthy. */
+  unhealthyDevices?: string[]
 }
 
 export type HmiHost = {

@@ -16,18 +16,23 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import { Moon, Sun } from "lucide-react"
 
 import { HmiCanvas } from "@/components/hmi/HmiCanvas"
-import { HmiHostProvider, type HmiHost } from "@/components/hmi/host"
+import {
+  HmiHostProvider,
+  type HmiHost,
+  type HmiRuntimeState,
+} from "@/components/hmi/host"
+import {
+  COMMS_LOST_POLLS,
+  derivePanelHealth,
+  edgeRuntimeState,
+  type EdgeStatus,
+  type PanelTone,
+} from "@/components/hmi/panel-health"
 import { useThemeToggle } from "@/lib/dark-mode"
+import { cn } from "@/lib/utils"
 import { encodeForWrite } from "@/lib/write-encoding"
 import { liveFeedStore, useConnected } from "@/state/live-feed"
 import type { HmiListEntry } from "@/types/generated/HmiListEntry"
-
-/** The slice of the runtime's /status the panel reads. The full shape is
- *  documented in docs/api.md (edge runtime table). */
-type EdgeStatus = {
-  project?: string | null
-  fault?: string | null
-}
 
 async function jget<T>(url: string): Promise<T> {
   const res = await fetch(url)
@@ -79,9 +84,32 @@ export function HmiStandalone() {
         setListError(null)
       })
       .catch((e) => setListError(String(e)))
-    void jget<EdgeStatus>("/status")
-      .then((s) => setProject(s.project ?? ""))
-      .catch(() => {})
+  }, [])
+
+  // Shell-level /status poll: the header must distinguish running /
+  // paused / fault / comms-lost on its own — the alarmbar is per-screen
+  // and a screen may not include one.
+  const [edgeState, setEdgeState] = useState<HmiRuntimeState | null>(null)
+  const [failedPolls, setFailedPolls] = useState(0)
+  useEffect(() => {
+    let cancelled = false
+    const tick = async () => {
+      try {
+        const s = await jget<EdgeStatus>("/status")
+        if (cancelled) return
+        setProject(s.project ?? "")
+        setEdgeState(edgeRuntimeState(s))
+        setFailedPolls(0)
+      } catch {
+        if (!cancelled) setFailedPolls((n) => n + 1)
+      }
+    }
+    void tick()
+    const id = setInterval(tick, 2000)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
   }, [])
 
   // The runtime's /events is a bare VarSnapshot stream (no AppEvent
@@ -119,16 +147,23 @@ export function HmiStandalone() {
         }
       },
       nav: (target) => navigate(target),
-      runtimeState: async () => {
-        const s = await jget<EdgeStatus>("/status")
-        return { running: s.fault == null, alarm: s.fault ?? null }
-      },
+      // mode + device_health ride along so the alarmbar can tell
+      // paused / device-down apart from a healthy green run.
+      runtimeState: async () =>
+        edgeRuntimeState(await jget<EdgeStatus>("/status")),
     }),
     [navigate],
   )
 
   const title =
     (slug && screens?.find((s) => s.path === slug)?.title) || slug || ""
+
+  const health = derivePanelHealth(edgeState, failedPolls)
+  // No chip until a poll succeeded or comms are confirmed lost — a
+  // one-frame STOPPED flash on load would be noise, not information.
+  const showBadge =
+    health.kind !== "running" &&
+    (edgeState !== null || failedPolls >= COMMS_LOST_POLLS)
 
   return (
     <div className="flex h-dvh flex-col bg-background text-foreground">
@@ -157,6 +192,16 @@ export function HmiStandalone() {
           )}
         </div>
         <div className="flex items-center gap-2">
+          {showBadge && (
+            <span
+              className={cn(
+                "rounded px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider",
+                HEADER_TONES[health.tone],
+              )}
+            >
+              {health.badge}
+            </span>
+          )}
           <span
             title={connected ? "Live values connected" : "No live connection"}
             className={
@@ -191,6 +236,14 @@ export function HmiStandalone() {
       )}
     </div>
   )
+}
+
+/** Header chip styling per health tone; `ok` never renders a chip. */
+const HEADER_TONES: Record<PanelTone, string> = {
+  ok: "",
+  idle: "bg-muted/60 text-muted-foreground",
+  warn: "bg-warn/15 text-warn",
+  alert: "bg-destructive/15 text-destructive",
 }
 
 function ScreenIndex({

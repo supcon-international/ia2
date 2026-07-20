@@ -27,13 +27,14 @@ import {
 } from "@/lib/var-history"
 import { cn } from "@/lib/utils"
 import { useHmiMutation } from "@/state/hmi-live"
-import { useLastSnapshot } from "@/state/live-feed"
+import { useConnected, useLastSnapshot } from "@/state/live-feed"
 import { TrendChart } from "@/components/charts/TrendChart"
 import type { HmiAction } from "@/types/generated/HmiAction"
 import type { HmiDoc } from "@/types/generated/HmiDoc"
 import type { HmiNode } from "@/types/generated/HmiNode"
 
-import { useHmiHost, type HmiHost } from "./host"
+import { useHmiHost, type HmiHost, type HmiRuntimeState } from "./host"
+import { derivePanelHealth, type PanelTone } from "./panel-health"
 import { HmiSymbol, type SymbolLive } from "./symbols"
 
 export type CanvasMode = "operate" | "arrange"
@@ -65,6 +66,7 @@ export function HmiCanvas({
   const [doc, setDoc] = useState<HmiDoc | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const snapshot = useLastSnapshot()
+  const connected = useConnected()
   const mutation = useHmiMutation()
 
   // ---- document load + live reload --------------------------------
@@ -329,6 +331,11 @@ export function HmiCanvas({
   const rootChildren =
     doc.root.type === "group" ? doc.root.children : []
 
+  // SSE gone while a snapshot is still on screen = every readout is
+  // frozen at its last value. Dim the surface (the alarmbar carries the
+  // words) so stale numbers can't pass for live ones.
+  const stale = !connected && snapshot != null
+
   return (
     <div
       ref={wrapRef}
@@ -340,7 +347,10 @@ export function HmiCanvas({
       }}
     >
       <div
-        className="relative origin-top-left border-b border-r border-border/60 bg-background"
+        className={cn(
+          "relative origin-top-left border-b border-r border-border/60 bg-background",
+          stale && "opacity-60",
+        )}
         style={{
           width: doc.grid.w,
           height: doc.grid.h,
@@ -677,19 +687,42 @@ function InputNode({
 
 /** Fault + run-state strip. Calm when nothing is wrong (ISA-101: color
  *  only when it means something). Polls the host — the IDE answers from
- *  its runtime status, the edge panel from the runtime's /status. */
+ *  its runtime status, the edge panel from the runtime's /status. A
+ *  failing poll counts toward an explicit COMMS LOST state instead of
+ *  keeping the last green state over frozen values. */
+const ALARM_TONES: Record<PanelTone, { bar: string; dot: string }> = {
+  ok: {
+    bar: "border-border bg-card/50 text-[11px] text-muted-foreground",
+    dot: "bg-highlight",
+  },
+  idle: {
+    bar: "border-border bg-card/50 text-[11px] text-muted-foreground",
+    dot: "bg-muted-foreground/40",
+  },
+  warn: {
+    bar: "border-warn/50 bg-warn/10 text-[12px] text-warn",
+    dot: "bg-warn",
+  },
+  alert: {
+    bar: "border-destructive/50 bg-destructive/10 text-[12px] text-destructive",
+    dot: "bg-destructive",
+  },
+}
+
 function AlarmBar({ host }: { host: HmiHost }) {
-  const [state, setState] = useState<{ running: boolean; alarm: string | null }>(
-    { running: false, alarm: null },
-  )
+  const [state, setState] = useState<HmiRuntimeState | null>(null)
+  const [failedPolls, setFailedPolls] = useState(0)
   useEffect(() => {
     let cancelled = false
     const tick = async () => {
       try {
         const s = await host.runtimeState()
-        if (!cancelled) setState(s)
+        if (!cancelled) {
+          setState(s)
+          setFailedPolls(0)
+        }
       } catch {
-        /* offline — keep last */
+        if (!cancelled) setFailedPolls((n) => n + 1)
       }
     }
     void tick()
@@ -699,23 +732,17 @@ function AlarmBar({ host }: { host: HmiHost }) {
       clearInterval(id)
     }
   }, [host])
-  if (state.alarm) {
-    return (
-      <div className="flex h-full w-full items-center gap-2 rounded border border-destructive/50 bg-destructive/10 px-3 font-mono text-[12px] text-destructive">
-        <span className="size-2 shrink-0 rounded-full bg-destructive" />
-        <span className="truncate">{state.alarm}</span>
-      </div>
-    )
-  }
+  const health = derivePanelHealth(state, failedPolls)
+  const tone = ALARM_TONES[health.tone]
   return (
-    <div className="flex h-full w-full items-center gap-2 rounded border border-border bg-card/50 px-3 font-mono text-[11px] text-muted-foreground">
-      <span
-        className={cn(
-          "size-2 shrink-0 rounded-full",
-          state.running ? "bg-highlight" : "bg-muted-foreground/40",
-        )}
-      />
-      {state.running ? "Running — no active faults" : "Stopped"}
+    <div
+      className={cn(
+        "flex h-full w-full items-center gap-2 rounded border px-3 font-mono",
+        tone.bar,
+      )}
+    >
+      <span className={cn("size-2 shrink-0 rounded-full", tone.dot)} />
+      <span className="truncate">{health.text}</span>
     </div>
   )
 }
