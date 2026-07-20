@@ -14,6 +14,13 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 
+import {
+  clampNotice,
+  confirmSummary,
+  parseCommitText,
+  resolveActionWrite,
+  type ResolvedWrite,
+} from "@/lib/hmi-action"
 import { formatBinding, lookupVar, resolveBinding } from "@/lib/hmi-binding"
 import { pushHistory } from "@/lib/var-history"
 import { cn } from "@/lib/utils"
@@ -35,8 +42,8 @@ const SPAWN_STAGGER_MS = 80
 type PendingConfirm = {
   nodeId: string
   action: HmiAction
-  /** For set_value: the number the user entered. */
-  value?: number
+  /** Resolved at request time — Confirm sends exactly this. */
+  write: ResolvedWrite
 }
 
 export function HmiCanvas({
@@ -225,77 +232,52 @@ export function HmiCanvas({
   const [pending, setPending] = useState<PendingConfirm | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
 
-  const execute = useCallback(
-    async (action: HmiAction) => {
-      setActionError(null)
+  // The write itself. `write` was resolved at request time, so the
+  // confirm path sends exactly what the dialog showed.
+  const performWrite = useCallback(
+    async (action: HmiAction, write: ResolvedWrite) => {
       try {
-        if (action.kind === "nav") {
-          host.nav(action.target)
-          return
-        }
-        const variable = action.variable
-        const typeName =
-          (snapshot && lookupVar(snapshot, variable)?.type_name) || ""
-        if (action.kind === "write") {
-          await host.write(variable, action.value, typeName)
-        } else if (action.kind === "toggle") {
-          const cur = snapshot ? lookupVar(snapshot, variable) : null
-          const on = cur ? /^(true|1)$/i.test(cur.raw.trim()) : false
-          await host.write(variable, on ? 0 : 1, typeName || "BOOL")
-        } else if (action.kind === "pulse") {
-          await host.write(variable, 1, typeName || "BOOL")
+        await host.write(write.variable, write.value, write.typeName)
+        if (action.kind === "pulse") {
           setTimeout(() => {
-            void host.write(variable, 0, typeName || "BOOL").catch(() => {})
+            void host.write(write.variable, 0, write.typeName).catch(() => {})
           }, action.ms)
-        } else if (action.kind === "set_value") {
-          // value arrives through the confirm flow
         }
       } catch (e) {
         setActionError(String(e))
       }
     },
-    [host, snapshot],
+    [host],
   )
 
   const requestAction = useCallback(
     (nodeId: string, action: HmiAction, value?: number) => {
       if (mode !== "operate") return
+      setActionError(null)
       if (action.kind === "nav") {
-        void execute(action)
-        return
-      }
-      const needsConfirm =
-        "confirm" in action ? action.confirm : true
-      if (needsConfirm) {
-        setPending({ nodeId, action, value })
-      } else {
-        void executeWithValue(action, value)
-      }
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [mode, execute],
-  )
-
-  const executeWithValue = useCallback(
-    async (action: HmiAction, value?: number) => {
-      if (action.kind === "set_value") {
-        if (value == null || Number.isNaN(value)) return
-        const lo = action.min ?? -Infinity
-        const hi = action.max ?? Infinity
-        const clamped = Math.min(hi, Math.max(lo, value))
-        const typeName =
-          (snapshot && lookupVar(snapshot, action.variable)?.type_name) || ""
-        setActionError(null)
         try {
-          await host.write(action.variable, clamped, typeName)
+          host.nav(action.target)
         } catch (e) {
           setActionError(String(e))
         }
         return
       }
-      await execute(action)
+      const res = resolveActionWrite(snapshot, action, value)
+      if (!res.ok) {
+        setActionError(res.reason)
+        return
+      }
+      const needsConfirm =
+        "confirm" in action ? action.confirm : true
+      if (needsConfirm) {
+        setPending({ nodeId, action, write: res.write })
+      } else {
+        // A clamped no-confirm entry still writes — but never silently.
+        setActionError(clampNotice(res.write))
+        void performWrite(action, res.write)
+      }
     },
-    [execute, host, snapshot],
+    [mode, host, snapshot, performWrite],
   )
 
   // ---- render ------------------------------------------------------
@@ -381,7 +363,7 @@ export function HmiCanvas({
           onConfirm={() => {
             const p = pending
             setPending(null)
-            void executeWithValue(p.action, p.value)
+            void performWrite(p.action, p.write)
           }}
         />
       )}
@@ -629,8 +611,9 @@ function InputNode({
         onPointerDown={(e) => e.stopPropagation()}
         onKeyDown={(e) => {
           if (e.key === "Enter" && commit) {
-            const v = Number(text)
-            if (!Number.isNaN(v)) onAction(node.id, commit, v)
+            // Number("") is 0, not NaN — an empty field must not commit.
+            const v = parseCommitText(text)
+            if (v !== null) onAction(node.id, commit, v)
             setText("")
           }
         }}
@@ -700,17 +683,7 @@ function ConfirmCard({
   onCancel: () => void
   onConfirm: () => void
 }) {
-  const a = pending.action
-  const summary =
-    a.kind === "write"
-      ? `Write ${a.value} → ${a.variable}`
-      : a.kind === "toggle"
-        ? `Toggle ${a.variable}`
-        : a.kind === "pulse"
-          ? `Pulse ${a.variable} (${a.ms} ms)`
-          : a.kind === "set_value"
-            ? `Set ${a.variable} = ${pending.value}`
-            : ""
+  const summary = confirmSummary(pending.action, pending.write)
   return (
     <div className="absolute inset-0 z-20 grid place-items-center bg-black/20">
       <div className="w-[300px] rounded-lg border border-border bg-popover p-4 shadow-2xl">
