@@ -122,6 +122,54 @@ export function pushHistory(buf: number[], next: number): number[] {
   return buf
 }
 
+/** Hard cap on a timed buffer regardless of its window — `window_s` is
+ *  user-editable screen JSON, so a wild value (86400 s at 10 Hz would
+ *  be ~864k points) must not grow memory unbounded. 4096 points cover
+ *  the generator's default 300 s window up to ~13 Hz snapshot rate;
+ *  past the cap the oldest samples fall out and the chart shows what
+ *  fits. */
+export const MAX_TIMED_HISTORY = 4096
+
+/** One trend sample: wall-clock seconds + charted value. Timestamped
+ *  because retention is by age (`window_s`), not by count — a count
+ *  cap makes the visible window silently vary with snapshot rate. */
+export type TimedSample = { t: number; v: number }
+
+/** Push one timestamped sample in place, trimming samples older than
+ *  `windowS` seconds behind the newest one, then enforcing the hard
+ *  count cap. Age is relative to the newest sample, so a hidden-tab
+ *  gap trims exactly what the window no longer covers. */
+export function pushTimedHistory(
+  buf: TimedSample[],
+  t: number,
+  v: number,
+  windowS: number,
+): TimedSample[] {
+  buf.push({ t, v })
+  const cutoff = t - Math.max(1, windowS)
+  let drop = 0
+  while (drop < buf.length - 1 && buf[drop].t < cutoff) drop++
+  const over = buf.length - MAX_TIMED_HISTORY
+  if (over > drop) drop = over
+  if (drop > 0) buf.splice(0, drop)
+  return buf
+}
+
+/** The suffix of `buf` within `windowS` seconds of its newest sample —
+ *  a trend node's per-render view when it shares the buffer with a
+ *  wider-windowed node (retention keeps the max window across nodes
+ *  referencing the variable). */
+export function windowSlice(
+  buf: TimedSample[],
+  windowS: number,
+): TimedSample[] {
+  if (buf.length === 0) return buf
+  const cutoff = buf[buf.length - 1].t - Math.max(1, windowS)
+  let start = 0
+  while (start < buf.length - 1 && buf[start].t < cutoff) start++
+  return start === 0 ? buf : buf.slice(start)
+}
+
 /** A small fixed palette for pinned series; cycles if more than 8. */
 export const SERIES_COLORS = [
   "#0ea5e9", // sky

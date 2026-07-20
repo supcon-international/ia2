@@ -28,7 +28,11 @@ import {
   resolveBinding,
   resolveDisplay,
 } from "@/lib/hmi-binding"
-import { pushHistory } from "@/lib/var-history"
+import {
+  pushTimedHistory,
+  windowSlice,
+  type TimedSample,
+} from "@/lib/var-history"
 import { cn } from "@/lib/utils"
 import { useHmiMutation } from "@/state/hmi-live"
 import { useLastSnapshot } from "@/state/live-feed"
@@ -142,11 +146,14 @@ export function HmiCanvas({
     return () => ro.disconnect()
   }, [doc])
 
-  // ---- trend history (one ring buffer per referenced variable) ----
-  const historyRef = useRef<Map<string, number[]>>(new Map())
+  // ---- trend history (one timed ring buffer per referenced variable,
+  // retained for the widest window_s among the nodes referencing it;
+  // each node slices its own window at render) ----
+  const historyRef = useRef<Map<string, TimedSample[]>>(new Map())
   useEffect(() => {
     if (!snapshot || !doc) return
-    for (const name of trendVariables(doc)) {
+    const t = Date.now() / 1000
+    for (const [name, windowS] of trendWindows(doc)) {
       const found = lookupVar(snapshot, name)
       if (!found) continue
       const n = Number.isNaN(Number(found.raw))
@@ -157,7 +164,7 @@ export function HmiCanvas({
         buf = []
         historyRef.current.set(name, buf)
       }
-      pushHistory(buf, n)
+      pushTimedHistory(buf, t, n, windowS)
     }
   }, [snapshot, doc])
 
@@ -404,7 +411,7 @@ function CanvasNode({
   selected: string | null
   mode: CanvasMode
   dragPos: { id: string; x: number; y: number } | null
-  historyRef: React.MutableRefObject<Map<string, number[]>>
+  historyRef: React.MutableRefObject<Map<string, TimedSample[]>>
   onPointerDown: (n: HmiNode, e: React.PointerEvent) => void
   onAction: (nodeId: string, action: HmiAction, value?: number) => void
 }) {
@@ -474,7 +481,7 @@ function CanvasNode({
 function renderKind(
   node: HmiNode,
   snapshot: ReturnType<typeof useLastSnapshot>,
-  historyRef: React.MutableRefObject<Map<string, number[]>>,
+  historyRef: React.MutableRefObject<Map<string, TimedSample[]>>,
   onAction: (nodeId: string, action: HmiAction, value?: number) => void,
   host: HmiHost,
 ) {
@@ -533,15 +540,26 @@ function renderKind(
       )
     }
     case "trend": {
-      const series = node.series.map((s, i) => ({
-        name: s.label ?? s.variable,
-        values: historyRef.current.get(s.variable) ?? [],
-        color: TREND_COLORS[i % TREND_COLORS.length],
-        binary: false,
-      }))
+      const series = node.series.map((s, i) => {
+        const buf = windowSlice(
+          historyRef.current.get(s.variable) ?? [],
+          node.window_s,
+        )
+        return {
+          name: s.label ?? s.variable,
+          values: buf.map((p) => p.v),
+          times: buf.map((p) => p.t),
+          color: TREND_COLORS[i % TREND_COLORS.length],
+          binary: false,
+        }
+      })
       return (
         <div className="h-full w-full rounded border border-border bg-card/60 p-2">
-          <TrendChart series={series} height={Math.max(60, (node.h || 160) - 34)} />
+          <TrendChart
+            series={series}
+            height={Math.max(60, (node.h || 160) - 34)}
+            windowS={node.window_s}
+          />
         </div>
       )
     }
@@ -741,10 +759,16 @@ export function findNode(root: HmiNode, id: string): HmiNode | null {
   return null
 }
 
-function trendVariables(doc: HmiDoc): string[] {
-  const out: string[] = []
+/** Per-variable retention window: the max `window_s` among the trend
+ *  nodes referencing it (one shared buffer serves them all). */
+function trendWindows(doc: HmiDoc): Map<string, number> {
+  const out = new Map<string, number>()
   const walk = (n: HmiNode) => {
-    if (n.type === "trend") for (const s of n.series) out.push(s.variable)
+    if (n.type === "trend") {
+      for (const s of n.series) {
+        out.set(s.variable, Math.max(out.get(s.variable) ?? 0, n.window_s))
+      }
+    }
     if (n.type === "group") n.children.forEach(walk)
   }
   walk(doc.root)
