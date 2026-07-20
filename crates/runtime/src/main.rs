@@ -12,7 +12,7 @@
 use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -154,7 +154,9 @@ struct Args {
     /// Built web assets (the IDE's `dist/`). When set, the runtime
     /// serves the standalone HMI panel at `/hmi/{screen}` so operator
     /// clients on the plant network can open screens straight off the
-    /// edge box — no IDE in the loop.
+    /// edge box — no IDE in the loop. When absent, the project's
+    /// sibling `web/` is auto-served if it holds the built panel — see
+    /// `sibling_web_dir`.
     static_dir: Option<PathBuf>,
 }
 
@@ -238,7 +240,9 @@ fn print_help() {
          --state-dir <path>     Where to persist RETAIN variables (default: sibling 'state/' of\n                         \
          the install root). Survives version swaps; safe to back up.\n  \
          --static-dir <path>    Built web assets. When set, operator clients can open the\n                         \
-         project's HMI screens at http://<edge>:<port>/hmi/<screen>.\n\n\
+         project's HMI screens at http://<edge>:<port>/hmi/<screen>.\n                         \
+         Default: web/ next to the project dir, when it holds the\n                         \
+         built panel (the deploy layout).\n\n\
          The runtime exposes:\n  \
          GET  /health           Liveness check.\n  \
          GET  /status           Project + runtime metadata + last-known scan count.\n  \
@@ -248,6 +252,18 @@ fn print_help() {
          What runs is determined by the project's tasks.toml — every PROGRAM\n\
          instance declared there is bound to its task and scheduled.\n"
     );
+}
+
+/// Deploy lays an edge box out as `current/project` + `current/web`
+/// (see `docs/edge-deploy.md`), but systemd units installed before
+/// `--static-dir` existed launch without the flag — so when it is
+/// absent, the panel falls back to the project's sibling `web/`. Gated
+/// on `hmi.html` — the vite panel entry every deployed bundle contains
+/// — so a coincidental `web/` directory next to a dev project is never
+/// exposed through ServeDir. An explicit `--static-dir` bypasses this.
+fn sibling_web_dir(project_dir: &Path) -> Option<PathBuf> {
+    let dir = project_dir.parent()?.join("web");
+    dir.join("hmi.html").is_file().then_some(dir)
 }
 
 /// Shared state for the HTTP handlers.
@@ -458,7 +474,17 @@ async fn main() -> Result<()> {
     // live against this runtime's own /events + /write. Assets resolve
     // through ServeDir; the panel shell is a separate vite entry
     // (`hmi.html`) so none of the IDE bundle loads on an edge client.
-    let app = if let Some(dir) = &args.static_dir {
+    // No flag: fall back to the deploy layout's sibling web/ so edges
+    // whose unit predates `--static-dir` still serve the panel.
+    let static_dir = args.static_dir.clone().or_else(|| {
+        let dir = sibling_web_dir(&args.project_dir)?;
+        tracing::info!(
+            static_dir = %dir.display(),
+            "no --static-dir; serving the HMI panel from web/ next to the project"
+        );
+        Some(dir)
+    });
+    let app = if let Some(dir) = &static_dir {
         if !dir.join("hmi.html").exists() {
             // Routes still mount (they answer 404 with a hint) — this
             // warn is for the journal, where "why is /hmi empty" gets
@@ -946,4 +972,41 @@ async fn rt_unforce(
 async fn stop_handler(State(state): State<AppState>) -> impl IntoResponse {
     state.shutdown.notify_waiters();
     Json(serde_json::json!({"ok": true}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sibling_web_dir;
+
+    #[test]
+    fn deploy_layout_sibling_web_is_picked_up() {
+        // The exact layout remote_deploy_script creates: current/project
+        // next to current/web with the built panel inside.
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let web = root.path().join("web");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&web).unwrap();
+        std::fs::write(web.join("hmi.html"), "<!doctype html>").unwrap();
+        assert_eq!(sibling_web_dir(&project), Some(web));
+    }
+
+    #[test]
+    fn sibling_web_without_panel_marker_is_not_served() {
+        // A directory merely named `web` next to a dev project must not
+        // be exposed through ServeDir.
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(root.path().join("web")).unwrap();
+        assert_eq!(sibling_web_dir(&project), None);
+    }
+
+    #[test]
+    fn no_sibling_web_means_no_panel() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        assert_eq!(sibling_web_dir(&project), None);
+    }
 }
