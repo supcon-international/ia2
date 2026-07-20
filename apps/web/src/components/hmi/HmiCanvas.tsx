@@ -14,7 +14,12 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 
-import { formatBinding, lookupVar, resolveBinding } from "@/lib/hmi-binding"
+import {
+  formatBinding,
+  lookupVar,
+  resolveBinding,
+  resolveDisplay,
+} from "@/lib/hmi-binding"
 import { pushHistory } from "@/lib/var-history"
 import { cn } from "@/lib/utils"
 import { useHmiMutation } from "@/state/hmi-live"
@@ -504,7 +509,7 @@ function renderKind(
     }
     case "value": {
       const b = node.bind["value"]
-      const v = b !== undefined ? resolveBinding(snapshot, b) : null
+      const v = b !== undefined ? resolveDisplay(snapshot, b) : null
       return (
         <div className="flex h-full w-full items-baseline justify-between gap-2 overflow-hidden">
           {node.label && (
@@ -513,7 +518,11 @@ function renderKind(
             </span>
           )}
           <span className="font-mono text-[13px] text-foreground">
-            {v == null || b === undefined ? "—" : formatBinding(b, v)}
+            {v == null || b === undefined
+              ? "—"
+              : typeof v === "number"
+                ? formatBinding(b, v)
+                : v}
             {node.unit && (
               <span className="ml-0.5 text-[10px] text-muted-foreground">
                 {node.unit}
@@ -614,7 +623,9 @@ function InputNode({
   const [text, setText] = useState("")
   const commit = node.action["commit"]
   const b = node.bind["value"]
-  const current = b !== undefined ? resolveBinding(snapshot, b) : null
+  // Display resolution (not resolveBinding): the placeholder echoes the
+  // current value, which may legitimately be text (STRING var).
+  const current = b !== undefined ? resolveDisplay(snapshot, b) : null
   return (
     <div className="flex h-full w-full items-center gap-1.5 overflow-hidden">
       {node.label && (
