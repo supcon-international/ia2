@@ -45,7 +45,10 @@ export function toNumber(raw: string): number {
   return Number.isFinite(n) ? n : NaN
 }
 
-/** Resolve a full binding to its numeric value (post-expr). */
+/** Resolve a full binding to its numeric value (post-expr). Non-finite
+ *  results — a non-numeric variable, a divide-by-zero expr — collapse
+ *  to null so consumers (symbols, readouts) fall back to their
+ *  unresolved state instead of propagating NaN/Infinity. */
 export function resolveBinding(
   snapshot: VarSnapshot | null,
   b: HmiBinding,
@@ -58,12 +61,35 @@ export function resolveBinding(
     if (out === null) return null
     value = out
   }
-  return value
+  return Number.isFinite(value) ? value : null
+}
+
+/** Resolve a binding for the value/input readout — the contract is a
+ *  numeric/boolean/STRING display, so unlike the numeric-only
+ *  `resolveBinding` this surfaces non-numeric variables as text:
+ *  STRING values show their content (quotes stripped), hex bit-field
+ *  literals (`16#1637`) pass through verbatim, BOOLs read TRUE/FALSE.
+ *  Exprs stay numeric; non-finite results stay null (em-dash). */
+export function resolveDisplay(
+  snapshot: VarSnapshot | null,
+  b: HmiBinding,
+): number | string | null {
+  if (typeof b !== "string" && b.expr) return resolveBinding(snapshot, b)
+  const found = lookupVar(snapshot, bindingVariable(b))
+  if (!found) return null
+  const raw = found.raw.trim()
+  if (found.type_name.toUpperCase() === "BOOL") return raw.toUpperCase()
+  const n = toNumber(raw)
+  if (Number.isFinite(n)) return n
+  const quoted = /^'(.*)'$/.exec(raw)
+  return quoted ? quoted[1] : raw
 }
 
 /** Format per the binding's printf-ish `format` (%.2f, %d, %s), falling
  *  back to a compact default. */
 export function formatBinding(b: HmiBinding, value: number): string {
+  // Never print "NaN"/"Infinity" on an operator screen.
+  if (!Number.isFinite(value)) return "—"
   const fmt = typeof b === "string" ? null : (b.format ?? null)
   if (fmt) {
     const m = /^%(?:\.(\d+))?([dfs])$/.exec(fmt)

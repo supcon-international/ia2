@@ -102,6 +102,25 @@ After deploy, an edge box looks like:
 └── (state for retained variables would go here)
 ```
 
+## Upgrading pre-HMI edges
+
+Edges bootstrapped before the HMI release run a unit whose `ExecStart`
+has no `--static-dir`. The runtime auto-detects `current/web` next to
+the project when the flag is absent, so such a box starts serving the
+panel as soon as a deploy has landed both the web assets and a runtime
+binary that knows the fallback — no unit edit required. To adopt the
+current unit anyway:
+
+```sh
+scp infra/ia2.service edge:/tmp/
+ssh edge "sudo install -m 0644 /tmp/ia2.service /etc/systemd/system/ia2.service && \
+          sudo systemctl daemon-reload && sudo systemctl restart ia2"
+```
+
+Do **not** re-run `install.sh` on a live edge: it repoints `current` at
+the `_initial` stub, knocking the deployed project off the box until
+the next deploy.
+
 ## Rollback
 
 There's no Rollback button (yet). Manually:

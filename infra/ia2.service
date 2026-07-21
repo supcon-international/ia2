@@ -14,6 +14,9 @@ Wants=network-online.target
 # `install_dir`, which deploy checks for drift).
 # `--static-dir` serves the standalone HMI panel at /hmi off the deployed
 # web assets (deploy places them at current/web; harmless if absent).
+# The runtime also auto-detects current/web when the flag is missing, so
+# units predating it still serve the panel; the flag is kept here as the
+# explicit override point.
 # The default bind is loopback, matching the ssh-tunnel trust perimeter —
 # operators on the plant network need either a tunnel or an explicit
 # decision to widen `--bind` (which also exposes /write and /stop; put a

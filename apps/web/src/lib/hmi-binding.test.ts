@@ -5,6 +5,7 @@ import {
   formatBinding,
   lookupVar,
   resolveBinding,
+  resolveDisplay,
   toNumber,
 } from "./hmi-binding"
 import type { VarSnapshot } from "@/types/generated/VarSnapshot"
@@ -16,6 +17,8 @@ const snap: VarSnapshot = {
     { name: "level_pct", type_name: "REAL", value: "42.5" },
     { name: "pump_run", type_name: "BOOL", value: "TRUE" },
     { name: "feeder.speed_rpm", type_name: "INT", value: "1500" },
+    { name: "msg", type_name: "STRING", value: "'hello'" },
+    { name: "status_w", type_name: "WORD", value: "16#1637" },
   ],
 } as unknown as VarSnapshot
 
@@ -78,5 +81,36 @@ describe("resolveBinding + formatBinding", () => {
     expect(
       formatBinding({ variable: "v", expr: null, format: "%d" }, 3.7),
     ).toBe("4")
+  })
+  it("collapses non-finite results to null / em-dash, never NaN text", () => {
+    // Divide-by-zero expr, expr over a STRING, plain STRING/WORD vars.
+    expect(resolveBinding(snap, { variable: "level_pct", expr: "x / 0", format: null })).toBeNull()
+    expect(resolveBinding(snap, { variable: "msg", expr: "x + 1", format: null })).toBeNull()
+    expect(resolveBinding(snap, "msg")).toBeNull()
+    expect(formatBinding("v", Infinity)).toBe("—")
+    expect(formatBinding({ variable: "v", expr: null, format: "%.1f" }, NaN)).toBe("—")
+  })
+})
+
+describe("resolveDisplay", () => {
+  it("keeps numerics numeric", () => {
+    expect(resolveDisplay(snap, "level_pct")).toBe(42.5)
+    expect(
+      resolveDisplay(snap, { variable: "level_pct", expr: "x / 100", format: null }),
+    ).toBe(0.425)
+  })
+  it("surfaces STRING text and hex literals instead of NaN", () => {
+    expect(resolveDisplay(snap, "msg")).toBe("hello")
+    expect(resolveDisplay(snap, "status_w")).toBe("16#1637")
+  })
+  it("reads BOOLs as TRUE/FALSE", () => {
+    expect(resolveDisplay(snap, "pump_run")).toBe("TRUE")
+  })
+  it("stays null for unresolvable or non-finite values", () => {
+    expect(resolveDisplay(snap, "ghost")).toBeNull()
+    expect(resolveDisplay(null, "level_pct")).toBeNull()
+    expect(
+      resolveDisplay(snap, { variable: "level_pct", expr: "x / 0", format: null }),
+    ).toBeNull()
   })
 })

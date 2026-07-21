@@ -47,7 +47,13 @@ export function HmiPane() {
       nav: (target) => void selectHmi(target),
       runtimeState: async () => {
         const s = await fetchRuntimeStatus()
-        return { running: s.running, alarm: s.last_error ?? null }
+        // mode rides along so a paused scan loop doesn't show as a
+        // green "Running" in the canvas alarmbar.
+        return {
+          running: s.running,
+          alarm: s.last_error ?? null,
+          mode: s.mode?.kind,
+        }
       },
     }),
     [selectHmi],

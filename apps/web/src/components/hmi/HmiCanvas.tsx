@@ -14,17 +14,35 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 
-import { formatBinding, lookupVar, resolveBinding } from "@/lib/hmi-binding"
-import { pushHistory } from "@/lib/var-history"
+import {
+  clampNotice,
+  confirmSummary,
+  parseCommitText,
+  resolveActionWrite,
+  type ResolvedWrite,
+} from "@/lib/hmi-action"
+import { canHostAction } from "@/lib/hmi-actions"
+import {
+  formatBinding,
+  lookupVar,
+  resolveBinding,
+  resolveDisplay,
+} from "@/lib/hmi-binding"
+import {
+  pushTimedHistory,
+  windowSlice,
+  type TimedSample,
+} from "@/lib/var-history"
 import { cn } from "@/lib/utils"
 import { useHmiMutation } from "@/state/hmi-live"
-import { useLastSnapshot } from "@/state/live-feed"
+import { useConnected, useLastSnapshot } from "@/state/live-feed"
 import { TrendChart } from "@/components/charts/TrendChart"
 import type { HmiAction } from "@/types/generated/HmiAction"
 import type { HmiDoc } from "@/types/generated/HmiDoc"
 import type { HmiNode } from "@/types/generated/HmiNode"
 
-import { useHmiHost, type HmiHost } from "./host"
+import { useHmiHost, type HmiHost, type HmiRuntimeState } from "./host"
+import { derivePanelHealth, type PanelTone } from "./panel-health"
 import { HmiSymbol, type SymbolLive } from "./symbols"
 
 export type CanvasMode = "operate" | "arrange"
@@ -35,8 +53,8 @@ const SPAWN_STAGGER_MS = 80
 type PendingConfirm = {
   nodeId: string
   action: HmiAction
-  /** For set_value: the number the user entered. */
-  value?: number
+  /** Resolved at request time — Confirm sends exactly this. */
+  write: ResolvedWrite
 }
 
 export function HmiCanvas({
@@ -56,6 +74,7 @@ export function HmiCanvas({
   const [doc, setDoc] = useState<HmiDoc | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const snapshot = useLastSnapshot()
+  const connected = useConnected()
   const mutation = useHmiMutation()
 
   // ---- document load + live reload --------------------------------
@@ -129,11 +148,14 @@ export function HmiCanvas({
     return () => ro.disconnect()
   }, [doc])
 
-  // ---- trend history (one ring buffer per referenced variable) ----
-  const historyRef = useRef<Map<string, number[]>>(new Map())
+  // ---- trend history (one timed ring buffer per referenced variable,
+  // retained for the widest window_s among the nodes referencing it;
+  // each node slices its own window at render) ----
+  const historyRef = useRef<Map<string, TimedSample[]>>(new Map())
   useEffect(() => {
     if (!snapshot || !doc) return
-    for (const name of trendVariables(doc)) {
+    const t = Date.now() / 1000
+    for (const [name, windowS] of trendWindows(doc)) {
       const found = lookupVar(snapshot, name)
       if (!found) continue
       const n = Number.isNaN(Number(found.raw))
@@ -144,7 +166,7 @@ export function HmiCanvas({
         buf = []
         historyRef.current.set(name, buf)
       }
-      pushHistory(buf, n)
+      pushTimedHistory(buf, t, n, windowS)
     }
   }, [snapshot, doc])
 
@@ -225,77 +247,52 @@ export function HmiCanvas({
   const [pending, setPending] = useState<PendingConfirm | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
 
-  const execute = useCallback(
-    async (action: HmiAction) => {
-      setActionError(null)
+  // The write itself. `write` was resolved at request time, so the
+  // confirm path sends exactly what the dialog showed.
+  const performWrite = useCallback(
+    async (action: HmiAction, write: ResolvedWrite) => {
       try {
-        if (action.kind === "nav") {
-          host.nav(action.target)
-          return
-        }
-        const variable = action.variable
-        const typeName =
-          (snapshot && lookupVar(snapshot, variable)?.type_name) || ""
-        if (action.kind === "write") {
-          await host.write(variable, action.value, typeName)
-        } else if (action.kind === "toggle") {
-          const cur = snapshot ? lookupVar(snapshot, variable) : null
-          const on = cur ? /^(true|1)$/i.test(cur.raw.trim()) : false
-          await host.write(variable, on ? 0 : 1, typeName || "BOOL")
-        } else if (action.kind === "pulse") {
-          await host.write(variable, 1, typeName || "BOOL")
+        await host.write(write.variable, write.value, write.typeName)
+        if (action.kind === "pulse") {
           setTimeout(() => {
-            void host.write(variable, 0, typeName || "BOOL").catch(() => {})
+            void host.write(write.variable, 0, write.typeName).catch(() => {})
           }, action.ms)
-        } else if (action.kind === "set_value") {
-          // value arrives through the confirm flow
         }
       } catch (e) {
         setActionError(String(e))
       }
     },
-    [host, snapshot],
+    [host],
   )
 
   const requestAction = useCallback(
     (nodeId: string, action: HmiAction, value?: number) => {
       if (mode !== "operate") return
+      setActionError(null)
       if (action.kind === "nav") {
-        void execute(action)
-        return
-      }
-      const needsConfirm =
-        "confirm" in action ? action.confirm : true
-      if (needsConfirm) {
-        setPending({ nodeId, action, value })
-      } else {
-        void executeWithValue(action, value)
-      }
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [mode, execute],
-  )
-
-  const executeWithValue = useCallback(
-    async (action: HmiAction, value?: number) => {
-      if (action.kind === "set_value") {
-        if (value == null || Number.isNaN(value)) return
-        const lo = action.min ?? -Infinity
-        const hi = action.max ?? Infinity
-        const clamped = Math.min(hi, Math.max(lo, value))
-        const typeName =
-          (snapshot && lookupVar(snapshot, action.variable)?.type_name) || ""
-        setActionError(null)
         try {
-          await host.write(action.variable, clamped, typeName)
+          host.nav(action.target)
         } catch (e) {
           setActionError(String(e))
         }
         return
       }
-      await execute(action)
+      const res = resolveActionWrite(snapshot, action, value)
+      if (!res.ok) {
+        setActionError(res.reason)
+        return
+      }
+      const needsConfirm =
+        "confirm" in action ? action.confirm : true
+      if (needsConfirm) {
+        setPending({ nodeId, action, write: res.write })
+      } else {
+        // A clamped no-confirm entry still writes — but never silently.
+        setActionError(clampNotice(res.write))
+        void performWrite(action, res.write)
+      }
     },
-    [execute, host, snapshot],
+    [mode, host, snapshot, performWrite],
   )
 
   // ---- render ------------------------------------------------------
@@ -317,6 +314,11 @@ export function HmiCanvas({
   const rootChildren =
     doc.root.type === "group" ? doc.root.children : []
 
+  // SSE gone while a snapshot is still on screen = every readout is
+  // frozen at its last value. Dim the surface (the alarmbar carries the
+  // words) so stale numbers can't pass for live ones.
+  const stale = !connected && snapshot != null
+
   return (
     <div
       ref={wrapRef}
@@ -328,7 +330,10 @@ export function HmiCanvas({
       }}
     >
       <div
-        className="relative origin-top-left border-b border-r border-border/60 bg-background"
+        className={cn(
+          "relative origin-top-left border-b border-r border-border/60 bg-background",
+          stale && "opacity-60",
+        )}
         style={{
           width: doc.grid.w,
           height: doc.grid.h,
@@ -381,7 +386,7 @@ export function HmiCanvas({
           onConfirm={() => {
             const p = pending
             setPending(null)
-            void executeWithValue(p.action, p.value)
+            void performWrite(p.action, p.write)
           }}
         />
       )}
@@ -416,7 +421,7 @@ function CanvasNode({
   selected: string | null
   mode: CanvasMode
   dragPos: { id: string; x: number; y: number } | null
-  historyRef: React.MutableRefObject<Map<string, number[]>>
+  historyRef: React.MutableRefObject<Map<string, TimedSample[]>>
   onPointerDown: (n: HmiNode, e: React.PointerEvent) => void
   onAction: (nodeId: string, action: HmiAction, value?: number) => void
 }) {
@@ -427,7 +432,9 @@ function CanvasNode({
       ? { x: dragPos.x, y: dragPos.y }
       : { x: node.x, y: node.y }
   const spawning = spawn.get(node.id)
-  const tapAction = node.action["tap"]
+  // Only control-surface node types fire gestures (mirrors validate_hmi's
+  // action-host rule) — a tap on a text label must never reach the plant.
+  const tapAction = canHostAction(node.type) ? node.action["tap"] : undefined
 
   const body = renderKind(node, snapshot, historyRef, onAction, host)
 
@@ -484,7 +491,7 @@ function CanvasNode({
 function renderKind(
   node: HmiNode,
   snapshot: ReturnType<typeof useLastSnapshot>,
-  historyRef: React.MutableRefObject<Map<string, number[]>>,
+  historyRef: React.MutableRefObject<Map<string, TimedSample[]>>,
   onAction: (nodeId: string, action: HmiAction, value?: number) => void,
   host: HmiHost,
 ) {
@@ -504,7 +511,7 @@ function renderKind(
     }
     case "value": {
       const b = node.bind["value"]
-      const v = b !== undefined ? resolveBinding(snapshot, b) : null
+      const v = b !== undefined ? resolveDisplay(snapshot, b) : null
       return (
         <div className="flex h-full w-full items-baseline justify-between gap-2 overflow-hidden">
           {node.label && (
@@ -513,7 +520,11 @@ function renderKind(
             </span>
           )}
           <span className="font-mono text-[13px] text-foreground">
-            {v == null || b === undefined ? "—" : formatBinding(b, v)}
+            {v == null || b === undefined
+              ? "—"
+              : typeof v === "number"
+                ? formatBinding(b, v)
+                : v}
             {node.unit && (
               <span className="ml-0.5 text-[10px] text-muted-foreground">
                 {node.unit}
@@ -539,15 +550,26 @@ function renderKind(
       )
     }
     case "trend": {
-      const series = node.series.map((s, i) => ({
-        name: s.label ?? s.variable,
-        values: historyRef.current.get(s.variable) ?? [],
-        color: TREND_COLORS[i % TREND_COLORS.length],
-        binary: false,
-      }))
+      const series = node.series.map((s, i) => {
+        const buf = windowSlice(
+          historyRef.current.get(s.variable) ?? [],
+          node.window_s,
+        )
+        return {
+          name: s.label ?? s.variable,
+          values: buf.map((p) => p.v),
+          times: buf.map((p) => p.t),
+          color: TREND_COLORS[i % TREND_COLORS.length],
+          binary: false,
+        }
+      })
       return (
         <div className="h-full w-full rounded border border-border bg-card/60 p-2">
-          <TrendChart series={series} height={Math.max(60, (node.h || 160) - 34)} />
+          <TrendChart
+            series={series}
+            height={Math.max(60, (node.h || 160) - 34)}
+            windowS={node.window_s}
+          />
         </div>
       )
     }
@@ -614,7 +636,9 @@ function InputNode({
   const [text, setText] = useState("")
   const commit = node.action["commit"]
   const b = node.bind["value"]
-  const current = b !== undefined ? resolveBinding(snapshot, b) : null
+  // Display resolution (not resolveBinding): the placeholder echoes the
+  // current value, which may legitimately be text (STRING var).
+  const current = b !== undefined ? resolveDisplay(snapshot, b) : null
   return (
     <div className="flex h-full w-full items-center gap-1.5 overflow-hidden">
       {node.label && (
@@ -629,8 +653,9 @@ function InputNode({
         onPointerDown={(e) => e.stopPropagation()}
         onKeyDown={(e) => {
           if (e.key === "Enter" && commit) {
-            const v = Number(text)
-            if (!Number.isNaN(v)) onAction(node.id, commit, v)
+            // Number("") is 0, not NaN — an empty field must not commit.
+            const v = parseCommitText(text)
+            if (v !== null) onAction(node.id, commit, v)
             setText("")
           }
         }}
@@ -648,19 +673,42 @@ function InputNode({
 
 /** Fault + run-state strip. Calm when nothing is wrong (ISA-101: color
  *  only when it means something). Polls the host — the IDE answers from
- *  its runtime status, the edge panel from the runtime's /status. */
+ *  its runtime status, the edge panel from the runtime's /status. A
+ *  failing poll counts toward an explicit COMMS LOST state instead of
+ *  keeping the last green state over frozen values. */
+const ALARM_TONES: Record<PanelTone, { bar: string; dot: string }> = {
+  ok: {
+    bar: "border-border bg-card/50 text-[11px] text-muted-foreground",
+    dot: "bg-highlight",
+  },
+  idle: {
+    bar: "border-border bg-card/50 text-[11px] text-muted-foreground",
+    dot: "bg-muted-foreground/40",
+  },
+  warn: {
+    bar: "border-warn/50 bg-warn/10 text-[12px] text-warn",
+    dot: "bg-warn",
+  },
+  alert: {
+    bar: "border-destructive/50 bg-destructive/10 text-[12px] text-destructive",
+    dot: "bg-destructive",
+  },
+}
+
 function AlarmBar({ host }: { host: HmiHost }) {
-  const [state, setState] = useState<{ running: boolean; alarm: string | null }>(
-    { running: false, alarm: null },
-  )
+  const [state, setState] = useState<HmiRuntimeState | null>(null)
+  const [failedPolls, setFailedPolls] = useState(0)
   useEffect(() => {
     let cancelled = false
     const tick = async () => {
       try {
         const s = await host.runtimeState()
-        if (!cancelled) setState(s)
+        if (!cancelled) {
+          setState(s)
+          setFailedPolls(0)
+        }
       } catch {
-        /* offline — keep last */
+        if (!cancelled) setFailedPolls((n) => n + 1)
       }
     }
     void tick()
@@ -670,23 +718,17 @@ function AlarmBar({ host }: { host: HmiHost }) {
       clearInterval(id)
     }
   }, [host])
-  if (state.alarm) {
-    return (
-      <div className="flex h-full w-full items-center gap-2 rounded border border-destructive/50 bg-destructive/10 px-3 font-mono text-[12px] text-destructive">
-        <span className="size-2 shrink-0 rounded-full bg-destructive" />
-        <span className="truncate">{state.alarm}</span>
-      </div>
-    )
-  }
+  const health = derivePanelHealth(state, failedPolls)
+  const tone = ALARM_TONES[health.tone]
   return (
-    <div className="flex h-full w-full items-center gap-2 rounded border border-border bg-card/50 px-3 font-mono text-[11px] text-muted-foreground">
-      <span
-        className={cn(
-          "size-2 shrink-0 rounded-full",
-          state.running ? "bg-highlight" : "bg-muted-foreground/40",
-        )}
-      />
-      {state.running ? "Running — no active faults" : "Stopped"}
+    <div
+      className={cn(
+        "flex h-full w-full items-center gap-2 rounded border px-3 font-mono",
+        tone.bar,
+      )}
+    >
+      <span className={cn("size-2 shrink-0 rounded-full", tone.dot)} />
+      <span className="truncate">{health.text}</span>
     </div>
   )
 }
@@ -700,17 +742,7 @@ function ConfirmCard({
   onCancel: () => void
   onConfirm: () => void
 }) {
-  const a = pending.action
-  const summary =
-    a.kind === "write"
-      ? `Write ${a.value} → ${a.variable}`
-      : a.kind === "toggle"
-        ? `Toggle ${a.variable}`
-        : a.kind === "pulse"
-          ? `Pulse ${a.variable} (${a.ms} ms)`
-          : a.kind === "set_value"
-            ? `Set ${a.variable} = ${pending.value}`
-            : ""
+  const summary = confirmSummary(pending.action, pending.write)
   return (
     <div className="absolute inset-0 z-20 grid place-items-center bg-black/20">
       <div className="w-[300px] rounded-lg border border-border bg-popover p-4 shadow-2xl">
@@ -754,10 +786,16 @@ export function findNode(root: HmiNode, id: string): HmiNode | null {
   return null
 }
 
-function trendVariables(doc: HmiDoc): string[] {
-  const out: string[] = []
+/** Per-variable retention window: the max `window_s` among the trend
+ *  nodes referencing it (one shared buffer serves them all). */
+function trendWindows(doc: HmiDoc): Map<string, number> {
+  const out = new Map<string, number>()
   const walk = (n: HmiNode) => {
-    if (n.type === "trend") for (const s of n.series) out.push(s.variable)
+    if (n.type === "trend") {
+      for (const s of n.series) {
+        out.set(s.variable, Math.max(out.get(s.variable) ?? 0, n.window_s))
+      }
+    }
     if (n.type === "group") n.children.forEach(walk)
   }
   walk(doc.root)

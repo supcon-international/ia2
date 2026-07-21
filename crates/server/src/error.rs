@@ -11,6 +11,10 @@ pub enum ApiError {
     NotFound(String),
     Conflict(String),
     BadRequest(String),
+    /// 422 — the request was well-formed but the resulting state fails
+    /// validation (e.g. an HMI ops batch whose result has structural
+    /// errors).
+    Unprocessable(String),
     Internal(String),
 }
 
@@ -22,6 +26,7 @@ impl From<StoreError> for ApiError {
             StoreError::InvalidName(n) => Self::BadRequest(format!("invalid name: {n}")),
             StoreError::PouNotFound(n) => Self::NotFound(format!("POU '{n}' not found")),
             StoreError::HmiNotFound(n) => Self::NotFound(format!("HMI screen '{n}' not found")),
+            e @ StoreError::HmiCorrupt(..) => Self::BadRequest(e.to_string()),
             StoreError::DeviceNotFound(n) => Self::NotFound(format!("device '{n}' not found")),
             StoreError::EdgeNotFound(n) => Self::NotFound(format!("edge '{n}' not found")),
             StoreError::FolderNotFound(n) => Self::NotFound(format!("folder '{n}' not found")),
@@ -65,6 +70,7 @@ impl IntoResponse for ApiError {
             Self::NotFound(s) => (StatusCode::NOT_FOUND, s),
             Self::Conflict(s) => (StatusCode::CONFLICT, s),
             Self::BadRequest(s) => (StatusCode::BAD_REQUEST, s),
+            Self::Unprocessable(s) => (StatusCode::UNPROCESSABLE_ENTITY, s),
             Self::Internal(s) => (StatusCode::INTERNAL_SERVER_ERROR, s),
         };
         (status, body).into_response()
