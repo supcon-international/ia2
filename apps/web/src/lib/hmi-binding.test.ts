@@ -6,6 +6,7 @@ import {
   lookupVar,
   resolveBinding,
   resolveDisplay,
+  resolveOn,
   toNumber,
 } from "./hmi-binding"
 import type { VarSnapshot } from "@/types/generated/VarSnapshot"
@@ -89,6 +90,20 @@ describe("resolveBinding + formatBinding", () => {
     expect(resolveBinding(snap, "msg")).toBeNull()
     expect(formatBinding("v", Infinity)).toBe("—")
     expect(formatBinding({ variable: "v", expr: null, format: "%.1f" }, NaN)).toBe("—")
+  })
+})
+
+describe("resolveOn", () => {
+  it("reads truthy values as on", () => {
+    expect(resolveOn(snap, "pump_run")).toBe(true)
+    expect(resolveOn(snap, "level_pct")).toBe(true)
+    expect(resolveOn(snap, { variable: "level_pct", expr: "x > 50", format: null })).toBe(false)
+  })
+  it("stays off for zero, unresolved and non-numeric values", () => {
+    expect(resolveOn(snap, { variable: "level_pct", expr: "x * 0", format: null })).toBe(false)
+    expect(resolveOn(snap, "ghost")).toBe(false)
+    expect(resolveOn(snap, "msg")).toBe(false)
+    expect(resolveOn(null, "pump_run")).toBe(false)
   })
 })
 

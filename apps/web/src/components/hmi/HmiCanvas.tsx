@@ -27,6 +27,7 @@ import {
   lookupVar,
   resolveBinding,
   resolveDisplay,
+  resolveOn,
 } from "@/lib/hmi-binding"
 import {
   pushTimedHistory,
@@ -575,15 +576,26 @@ function renderKind(
     }
     case "alarmbar":
       return <AlarmBar host={host} />
-    case "button":
+    case "button": {
+      // Optional state feedback: with `bind.on` the button lights while
+      // the bound value is truthy (the indicator's lit treatment), so a
+      // toggle shows the state it controls. No binding = plain button.
+      const onBind = node.bind["on"]
+      const lit = onBind !== undefined && resolveOn(snapshot, onBind)
       return (
         <button
           type="button"
-          className="h-full w-full rounded-md border border-border bg-card px-3 font-mono text-[12px] text-foreground hover:bg-accent/50"
+          className={cn(
+            "h-full w-full rounded-md border px-3 font-mono text-[12px]",
+            lit
+              ? "border-highlight bg-highlight/80 text-highlight-foreground hover:bg-highlight/70"
+              : "border-border bg-card text-foreground hover:bg-accent/50",
+          )}
         >
           {node.label}
         </button>
       )
+    }
     case "input":
       return <InputNode node={node} snapshot={snapshot} onAction={onAction} />
     case "nav":

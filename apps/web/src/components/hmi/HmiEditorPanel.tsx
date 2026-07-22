@@ -462,6 +462,7 @@ function BindingsEditor({
     const known: Record<string, string[]> = {
       value: ["value"],
       input: ["value"],
+      button: ["on"],
       symbol: symbolBindKeys(node),
       trend: [],
       alarmbar: [],

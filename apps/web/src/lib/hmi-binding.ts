@@ -64,6 +64,16 @@ export function resolveBinding(
   return Number.isFinite(value) ? value : null
 }
 
+/** On/off resolution for state-carrying bindings (the indicator symbol's
+ *  `on`, a button's `bind.on`): nonzero = on, unresolved = off — an
+ *  unknown variable must read as the calm state, not a lit one. */
+export function resolveOn(
+  snapshot: VarSnapshot | null,
+  b: HmiBinding,
+): boolean {
+  return (resolveBinding(snapshot, b) ?? 0) !== 0
+}
+
 /** Resolve a binding for the value/input readout — the contract is a
  *  numeric/boolean/STRING display, so unlike the numeric-only
  *  `resolveBinding` this surfaces non-numeric variables as text:

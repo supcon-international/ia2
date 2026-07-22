@@ -165,7 +165,9 @@ pub enum HmiNodeKind {
     /// Renders the run's fault (`last_error`) + per-device health. One per
     /// screen is the convention; generate puts it at the top.
     Alarmbar {},
-    /// Momentary control surface — pair with an `action.tap`.
+    /// Momentary control surface — pair with an `action.tap`. Optional
+    /// `bind.on`: the renderer lights the button while the bound value is
+    /// truthy (indicator rules), so a toggle shows the state it controls.
     Button { label: String },
     /// Numeric entry — pair with an `action.commit` of kind `set_value`.
     Input {
