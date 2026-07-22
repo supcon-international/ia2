@@ -14,7 +14,7 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::io;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use project::Edge;
 use serde::{Deserialize, Serialize};
@@ -382,9 +382,12 @@ pub async fn deploy_to_edge(
     // temp file on either side. The script on the edge extracts to a
     // timestamped dir and atomically flips the symlink.
     let mut tar = Command::new("tar");
-    tar.arg("-cf")
-        .arg("-")
-        .arg("-C")
+    tar.arg("-cf").arg("-");
+    // Keep host-only metadata out of the archive — a macOS bsdtar
+    // otherwise embeds pax records the edge's GNU tar warns about once
+    // per entry, drowning the deploy log.
+    tar.args(host_tar_metadata_flags());
+    tar.arg("-C")
         .arg(project_dir.parent().unwrap_or(project_dir))
         .arg(
             project_dir
@@ -454,7 +457,7 @@ pub async fn deploy_to_edge(
 
     let out = ssh.wait_with_output().await?;
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let stderr = strip_pax_keyword_warnings(&String::from_utf8_lossy(&out.stderr));
     let combined = format!(
         "{stdout}{}{stderr}",
         if !stderr.is_empty() {
@@ -504,6 +507,50 @@ pub async fn deploy_to_edge(
         version,
         log: combined,
     })
+}
+
+/// Metadata-suppression flags for the host `tar`, probed once per
+/// process. bsdtar (the macOS default) records xattrs as
+/// `LIBARCHIVE.xattr.*` pax headers, BSD file flags as `SCHILY.fflags`,
+/// and Finder blobs as AppleDouble `._*` copies; the edge's GNU tar
+/// prints "Ignoring unknown extended header keyword" for each such
+/// record. `--no-xattrs` drops the xattr headers, `--no-fflags` the
+/// fflags, `--no-mac-metadata` the AppleDouble copies. The
+/// COPYFILE_DISABLE=1 env only gates that last, AppleDouble path —
+/// measured on bsdtar 3.5.3 the pax headers still get written with it
+/// set, so the env var alone doesn't cut it. GNU tar stores none of
+/// this unless asked but rejects the two bsdtar-only flags as unknown
+/// options, hence the version sniff rather than passing them blindly.
+fn host_tar_metadata_flags() -> &'static [&'static str] {
+    static FLAGS: OnceLock<&'static [&'static str]> = OnceLock::new();
+    FLAGS.get_or_init(|| {
+        let version = std::process::Command::new("tar")
+            .arg("--version")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        tar_metadata_flags(&version)
+    })
+}
+
+fn tar_metadata_flags(version: &str) -> &'static [&'static str] {
+    if version.contains("bsdtar") {
+        &["--no-xattrs", "--no-fflags", "--no-mac-metadata"]
+    } else {
+        &[]
+    }
+}
+
+/// Drop the per-record "Ignoring unknown extended header keyword" lines
+/// GNU tar prints when pax metadata slips through anyway (a host tar the
+/// probe didn't recognise, or an archive packed by an older server).
+/// Everything else in stderr is kept verbatim.
+fn strip_pax_keyword_warnings(stderr: &str) -> String {
+    stderr
+        .lines()
+        .filter(|l| !l.contains("Ignoring unknown extended header keyword"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Quote `s` as a single shell word using single quotes, which disable
@@ -743,6 +790,41 @@ mod tests {
         assert!(s.contains("'dist$(id)'"), "{s}");
         // The pre-fix bug: the value inside a double-quoted assignment.
         assert!(!s.contains(r#"INSTALL_DIR="/opt/$(reboot)""#), "{s}");
+    }
+
+    #[test]
+    fn bsdtar_gets_metadata_suppression_flags() {
+        // The exact set measured to yield a pax-record-free archive on
+        // macOS bsdtar 3.5.3 (see host_tar_metadata_flags).
+        assert_eq!(
+            tar_metadata_flags("bsdtar 3.5.3 - libarchive 3.7.4 zlib/1.2.12"),
+            ["--no-xattrs", "--no-fflags", "--no-mac-metadata"]
+        );
+    }
+
+    #[test]
+    fn gnu_and_unknown_tars_get_no_flags() {
+        // GNU tar stores no xattrs/fflags unless asked — and rejects the
+        // bsdtar-only flags as unknown options.
+        assert!(tar_metadata_flags("tar (GNU tar) 1.35").is_empty());
+        // A failed probe must not break packing.
+        assert!(tar_metadata_flags("").is_empty());
+    }
+
+    #[test]
+    fn deploy_log_drops_pax_keyword_warnings_only() {
+        let noisy = "tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'\n\
+                     tar: Ignoring unknown extended header keyword 'SCHILY.fflags'\n\
+                     real error: disk full";
+        assert_eq!(strip_pax_keyword_warnings(noisy), "real error: disk full");
+        // All-noise stderr collapses to empty, which keeps the
+        // `--stderr--` section out of the report entirely.
+        assert_eq!(
+            strip_pax_keyword_warnings(
+                "tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.FinderInfo'\n"
+            ),
+            ""
+        );
     }
 
     #[test]
