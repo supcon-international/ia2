@@ -15,7 +15,7 @@
 import type { HmiAction } from "@/types/generated/HmiAction"
 import type { VarSnapshot } from "@/types/generated/VarSnapshot"
 
-import { lookupVar } from "./hmi-binding"
+import { lookupVar, toNumber } from "./hmi-binding"
 
 /** A write fully resolved at request time: `value` is exactly what the
  *  confirm (or no-confirm) path will send. */
@@ -25,8 +25,11 @@ export type ResolvedWrite = {
   typeName: string
   /** Toggle only: the live value the inverse was taken from. */
   current?: "TRUE" | "FALSE"
-  /** set_value only: present when the min/max clamp changed the entry. */
+  /** set_value/increment: present when the min/max clamp changed the
+   *  outcome. */
   clamp?: { entered: number; bound: "min" | "max"; limit: number }
+  /** increment only: the live value the step was applied to. */
+  from?: number
 }
 
 export type ResolveResult =
@@ -91,6 +94,30 @@ export function resolveActionWrite(
       }
       return { ok: true, write }
     }
+    case "increment": {
+      // Step from the LIVE value — no live number, no step: guessing a
+      // base for a relative write is exactly the wrong-write category
+      // this resolver exists to refuse.
+      const from = toNumber(found.raw)
+      if (!Number.isFinite(from)) {
+        return {
+          ok: false,
+          reason: `${action.variable} has no numeric live value — action not sent`,
+        }
+      }
+      const lo = action.min ?? -Infinity
+      const hi = action.max ?? Infinity
+      const wanted = from + action.step
+      const value = Math.min(hi, Math.max(lo, wanted))
+      const write: ResolvedWrite = { variable: action.variable, value, typeName, from }
+      if (value !== wanted) {
+        write.clamp =
+          wanted < lo
+            ? { entered: wanted, bound: "min", limit: lo }
+            : { entered: wanted, bound: "max", limit: hi }
+      }
+      return { ok: true, write }
+    }
   }
 }
 
@@ -108,6 +135,10 @@ export function confirmSummary(action: HmiAction, write: ResolvedWrite): string 
       return write.clamp
         ? `Set ${write.variable} = ${write.value} (entered ${write.clamp.entered}, ${write.clamp.bound} ${write.clamp.limit})`
         : `Set ${write.variable} = ${write.value}`
+    case "increment":
+      return write.clamp
+        ? `Step ${write.variable}: ${write.from} → ${write.value} (${write.clamp.bound} ${write.clamp.limit})`
+        : `Step ${write.variable}: ${write.from} → ${write.value}`
     case "nav":
       return ""
   }

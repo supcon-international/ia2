@@ -85,7 +85,18 @@ runtime-side guarantee (the request carries `pulse_ms`), so it survives
 the operator's tab; keep `ms` under 10 s or check will tell you it's
 really a toggle. Buttons also honour an optional `bind.on` — the button
 lights while the bound value is truthy, so a toggle shows the state it
-controls without a separate indicator.
+controls without a separate indicator. `bind.enable` gates a button or
+input: 0 (or no live data) disables both the visual and the gesture —
+hide Start while running with `{"variable":"running","expr":"!x"}`. The
+`increment` action kind steps a setpoint from its LIVE value
+(`{"kind":"increment","variable":"speed_sp","step":5,"min":0,"max":100}`)
+— the widget's bounds are the safety envelope, and it refuses when no
+live base exists. For a state toggle that should read as a switch rather
+than a momentary button, use the `switch` symbol (rocker + ON/OFF
+captions) with an `action.tap` toggle. `generate` also groups mapped
+variables per device (an equipment section per wired device, qualified
+`instance.variable` bindings) — regenerate after wiring changes to see
+the plant's shape, then curate.
 
 ## Maps: values become colors and words, declaratively
 
@@ -130,7 +141,7 @@ area, reading left-to-right in flow order; use `level` honestly (1 plant
 overview → 4 diagnostic detail) and `nav` nodes to descend, rather than
 cramming levels together.
 
-Sixteen symbols (see `cs hmi symbols` for each one's contract). Beyond the
+Seventeen symbols (see `cs hmi symbols` for each one's contract). Beyond the
 original nine, reach for: `analog` — the moving analog indicator ISA-101
 prefers over gauges (scale + shaded normal band via `lo`/`hi` props + live
 pointer + `sp` bind for the setpoint tick); `bar` — linear fill, `h`/`v`;

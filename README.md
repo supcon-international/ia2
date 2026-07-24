@@ -7,6 +7,10 @@ A simple, agent-first IDE + runtime for IEC 61131-3 PLC programming.
 > first-class users alongside humans.** Every feature reachable via
 > GUI is also reachable via the `cs` CLI and the HTTP API.
 
+[![IA2 — agent-first automation software, 90-second demo](docs/assets/demo-poster.png)](https://www.sib-lab.dev/ia2-demo-en.mp4)
+
+**[▶ Watch the 90-second demo](https://www.sib-lab.dev/ia2-demo-en.mp4)** — one prompt, and an agent builds a carbonation batch line end to end: writes the control logic, draws the operator screen, tests it live, ships it to the plant edge with one command — then a real-hardware chapter on a live servo bench.
+
 ## Install it for your coding agent
 
 IA2 is built so a coding agent drives it (Claude Code, Cursor, Codex…). **Two ways to install the skill:**

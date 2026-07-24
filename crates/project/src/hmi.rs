@@ -42,6 +42,7 @@ pub const HMI_SYMBOLS: &[&str] = &[
     "pipe",
     "fan",
     "conveyor",
+    "switch",
 ];
 
 fn default_hmi_version() -> u32 {
@@ -341,6 +342,20 @@ pub enum HmiAction {
         #[serde(default = "default_true")]
         confirm: bool,
     },
+    /// Read the bound value, add `step` (may be negative), clamp to
+    /// `min`/`max`, write it back — bounded stepper buttons where the
+    /// widget's range IS the safety envelope (RFC #33). Refused
+    /// client-side when no live value exists to step from.
+    Increment {
+        variable: String,
+        step: f64,
+        #[serde(default)]
+        min: Option<f64>,
+        #[serde(default)]
+        max: Option<f64>,
+        #[serde(default = "default_true")]
+        confirm: bool,
+    },
     /// Client-side navigation to another screen.
     Nav { target: String },
 }
@@ -351,7 +366,8 @@ impl HmiAction {
             HmiAction::Write { variable, .. }
             | HmiAction::Toggle { variable, .. }
             | HmiAction::Pulse { variable, .. }
-            | HmiAction::SetValue { variable, .. } => Some(variable),
+            | HmiAction::SetValue { variable, .. }
+            | HmiAction::Increment { variable, .. } => Some(variable),
             HmiAction::Nav { .. } => None,
         }
     }
@@ -766,12 +782,25 @@ pub fn validate_hmi(doc: &HmiDoc) -> Vec<HmiIssue> {
                 min: Some(lo),
                 max: Some(hi),
                 ..
+            }
+            | HmiAction::Increment {
+                min: Some(lo),
+                max: Some(hi),
+                ..
             } = a
             {
                 if lo > hi {
                     issues.push(err(
                         Some(&n.id),
                         format!("action '{gesture}': min {lo} > max {hi}"),
+                    ));
+                }
+            }
+            if let HmiAction::Increment { step, .. } = a {
+                if *step == 0.0 || !step.is_finite() {
+                    issues.push(err(
+                        Some(&n.id),
+                        format!("action '{gesture}': increment step must be finite and nonzero"),
                     ));
                 }
             }

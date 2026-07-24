@@ -92,6 +92,44 @@ describe("resolveActionWrite", () => {
   })
 })
 
+describe("resolveActionWrite: increment", () => {
+  const inc = (over: Record<string, unknown> = {}) =>
+    ({
+      kind: "increment",
+      variable: "level_sp",
+      step: 5,
+      min: 0,
+      max: 100,
+      confirm: true,
+      ...over,
+    }) as WriteAction
+
+  it("steps from the live value and reports the base", () => {
+    const w = okWrite(resolveActionWrite(snap, inc()))
+    expect(w.value).toBe(55)
+    expect(w.from).toBe(50)
+    expect(w.clamp).toBeUndefined()
+  })
+  it("clamps at the envelope and flags the clamp", () => {
+    const w = okWrite(resolveActionWrite(snap, inc({ step: 60 })))
+    expect(w.value).toBe(100)
+    expect(w.clamp).toEqual({ entered: 110, bound: "max", limit: 100 })
+    const down = okWrite(resolveActionWrite(snap, inc({ step: -60 })))
+    expect(down.value).toBe(0)
+    expect(down.clamp?.bound).toBe("min")
+  })
+  it("refuses without a numeric live base", () => {
+    const r = resolveActionWrite(null, inc())
+    expect(r.ok).toBe(false)
+    const ghost = resolveActionWrite(snap, inc({ variable: "ghost" }))
+    expect(ghost.ok).toBe(false)
+  })
+  it("summarises as a from→to step", () => {
+    const w = okWrite(resolveActionWrite(snap, inc()))
+    expect(confirmSummary(inc(), w)).toBe("Step level_sp: 50 → 55")
+  })
+})
+
 describe("confirmSummary", () => {
   it("shows the toggle target value", () => {
     const a: WriteAction = { kind: "toggle", variable: "valve_cmd", confirm: true }

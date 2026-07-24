@@ -513,8 +513,8 @@ function BindingsEditor({
   const keys = useMemo(() => {
     const known: Record<string, string[]> = {
       value: ["value", "color"],
-      input: ["value"],
-      button: ["on"],
+      input: ["value", "enable"],
+      button: ["on", "enable"],
       symbol: symbolBindKeys(node),
       text: ["text", "color"],
       shape: ["fill", "stroke"],
@@ -595,6 +595,8 @@ function symbolBindKeys(node: HmiNode): string[] {
       return ["flow", "color"]
     case "indicator":
       return ["on", "alarm"]
+    case "switch":
+      return ["on"]
     default:
       return []
   }
@@ -616,7 +618,7 @@ function ActionsEditor({
   const kinds =
     node.type === "input"
       ? ["set_value"]
-      : ["toggle", "write", "pulse", "nav"]
+      : ["toggle", "write", "pulse", "increment", "nav"]
 
   const setKind = (kind: string) => {
     if (kind === "") {
@@ -632,7 +634,9 @@ function ActionsEditor({
             ? { kind, variable: "", ms: 500, confirm: true }
             : kind === "set_value"
               ? { kind, variable: "", min: null, max: null, confirm: true }
-              : { kind, variable: "", confirm: true }
+              : kind === "increment"
+                ? { kind, variable: "", step: 1, min: null, max: null, confirm: true }
+                : { kind, variable: "", confirm: true }
     void patch({ action: { [gesture]: next } })
   }
 
@@ -663,6 +667,17 @@ function ActionsEditor({
           onCommit={(v) =>
             void patch({ action: { [gesture]: { ...actionAsJson(a), variable: v } } })
           }
+        />
+      )}
+      {a && a.kind === "increment" && (
+        <TextField
+          label="step"
+          value={String(a.step)}
+          onCommit={(v) => {
+            const n = Number(v)
+            if (!Number.isNaN(n) && n !== 0)
+              void patch({ action: { [gesture]: { ...actionAsJson(a), step: n } } })
+          }}
         />
       )}
       {a && a.kind === "nav" && (

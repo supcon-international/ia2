@@ -459,6 +459,13 @@ pub fn symbol_catalog() -> Vec<HmiSymbolInfo> {
             &["label: string", "reverse: bool"],
             [200, 36],
         ),
+        sym(
+            "switch",
+            "Rocker switch — a STATE toggle, visually distinct from a momentary button; pair with an action.tap toggle.",
+            &["on"],
+            &["label: string", "on_text: string (default ON)", "off_text: string (default OFF)"],
+            [160, 28],
+        ),
     ]
 }
 
@@ -694,6 +701,9 @@ fn build_generated(store: &ProjectStore, title: &str) -> Result<HmiDoc, ApiError
     // running off the right edge of the grid.
     let mut col_bottom = [TOP; COLS];
     let mut trend_candidates: Vec<String> = Vec::new();
+    // Variable → declared type, project-wide: the equipment sections
+    // below pick indicator-vs-value per mapped variable from this.
+    let mut var_types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
     for pou_path in store.list_pou_paths()? {
         // Library blocks are implementation detail, not operator surface.
@@ -703,6 +713,9 @@ fn build_generated(store: &ProjectStore, title: &str) -> Result<HmiDoc, ApiError
         let vars = pou_gen_vars(store, &pou_path);
         if vars.is_empty() {
             continue;
+        }
+        for v in &vars {
+            var_types.insert(v.name.clone(), v.type_name.clone());
         }
         let col = (0..COLS).min_by_key(|&c| col_bottom[c]).unwrap_or(0);
         let sec_x = PAD + (col as i32) * (COL_W + PAD);
@@ -795,6 +808,97 @@ fn build_generated(store: &ProjectStore, title: &str) -> Result<HmiDoc, ApiError
             y += ROW_H;
         }
         col_bottom[col] = y + PAD;
+    }
+
+    // Equipment sections (device-aware generation, RFC #33-A-L1): one
+    // section per device the iomap wires, listing its mapped variables —
+    // inputs read as process values, outputs echo the commanded state.
+    // Deterministic like the POU sections; masonry continues in the same
+    // columns.
+    let iomap = store.read_iomap().unwrap_or_default();
+    if !iomap.mappings.is_empty() {
+        for dev in store.list_devices()? {
+            let mapped: Vec<&project::Mapping> = iomap
+                .mappings
+                .iter()
+                .filter(|m| m.device == dev.name)
+                .collect();
+            if mapped.is_empty() {
+                continue;
+            }
+            let col = (0..COLS).min_by_key(|&c| col_bottom[c]).unwrap_or(0);
+            let sec_x = PAD + (col as i32) * (COL_W + PAD);
+            let mut y = col_bottom[col];
+            let proto = format!("{:?}", dev.config.protocol()).to_lowercase();
+            children.push(mk(
+                unique_id(format!("sec_dev_{}", dev.name)),
+                HmiNodeKind::Text {
+                    text: format!("{} · {proto}", dev.name),
+                    style: project::HmiTextStyle::Section,
+                    props: BTreeMap::new(),
+                },
+                sec_x,
+                y,
+                COL_W,
+                24,
+            ));
+            y += SECTION_HEAD;
+            for m in mapped.iter().take(14) {
+                let id = unique_id(format!(
+                    "dev_{}_{}",
+                    dev.name,
+                    m.variable.to_ascii_lowercase()
+                ));
+                // Qualified name: resolves exactly on multi-PROGRAM runs,
+                // and the tail rule still matches on single-PROGRAM ones.
+                let bind_name = format!("{}.{}", m.application, m.variable);
+                let is_bool = var_types
+                    .get(&m.variable)
+                    .map(|t| t.to_ascii_uppercase().starts_with("BOOL"))
+                    .unwrap_or(false);
+                let mut node = if is_bool {
+                    let mut n = mk(
+                        id,
+                        HmiNodeKind::Symbol {
+                            symbol: "indicator".into(),
+                            props: BTreeMap::from([(
+                                "label".to_string(),
+                                serde_json::Value::String(m.variable.clone()),
+                            )]),
+                        },
+                        sec_x,
+                        y,
+                        COL_W,
+                        24,
+                    );
+                    let key = if is_alarmish(&m.variable) {
+                        "alarm"
+                    } else {
+                        "on"
+                    };
+                    n.bind.insert(key.into(), HmiBinding::Var(bind_name));
+                    n
+                } else {
+                    let mut n = mk(
+                        id,
+                        HmiNodeKind::Value {
+                            label: Some(m.variable.clone()),
+                            unit: None,
+                        },
+                        sec_x,
+                        y,
+                        COL_W,
+                        24,
+                    );
+                    n.bind.insert("value".into(), HmiBinding::Var(bind_name));
+                    n
+                };
+                node.y = y;
+                children.push(node);
+                y += ROW_H;
+            }
+            col_bottom[col] = y + PAD;
+        }
     }
 
     if !trend_candidates.is_empty() {

@@ -533,6 +533,35 @@ fn spawn_units_inner(
     let device_reports_reconnect = device_reports.clone();
 
     let join_handle = std::thread::spawn(move || {
+        // Southbound adapters get their own I/O runtime, and devices are
+        // connected HERE — at the top of the thread, before the scan
+        // runtime exists — so every background task an adapter spawns
+        // during connect (the Modbus poll task, the CANopen bus task)
+        // lands on the "ia2-io" worker and NEVER shares the scan
+        // thread. Measured cost of sharing: a 9600-baud Modbus refresh
+        // interleaving its serial round-trips between 2 ms scan rounds
+        // lost ~20% cadence on a mixed servo+coupler bench (issue #30).
+        // The runtime lives on this thread's stack below the scan
+        // block_on, so it outlives the failsafe + teardown writes that
+        // flow through those poll tasks.
+        let io_rt = match tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .thread_name("ia2-io")
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                tracing::error!(%e, "failed to create io runtime");
+                return;
+            }
+        };
+        // Connect devices OUTSIDE the panic-guarded run_loop so that,
+        // no matter how the loop exits (clean stop, VM trap, or panic),
+        // we still own the `devices` vec and can drive every output to
+        // its safe state.
+        let (mut devices, reports, failed_specs) = io_rt.block_on(acquire_devices(device_source));
+
         let rt = match tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -544,11 +573,6 @@ fn spawn_units_inner(
             }
         };
         rt.block_on(async move {
-            // Connect devices OUTSIDE the panic-guarded run_loop so
-            // that, no matter how the loop exits (clean stop, VM trap,
-            // or panic), we still own the `devices` vec and can drive
-            // every output to its safe state.
-            let (mut devices, reports, failed_specs) = acquire_devices(device_source).await;
             // Seed health from the connect outcomes: configured devices
             // that failed to connect start unhealthy (the per-round
             // refresh doesn't touch them until a background reconnect

@@ -346,7 +346,13 @@ screen to a tablet with the dev machine offline.
 
 **P3 — depth, driven by field use.** Project-defined `ref` symbols with
 overrides; history-backed trends once the edge DAQ story exists; multi-source
-bindings (`device_health`, edge system stats); alarm acknowledgment flow.
+bindings (`device_health`, edge system stats); alarm acknowledgment flow;
+and **generation-as-proposal** (accepted from RFC #33-B): `generate`
+against an existing screen emits a reviewable op-diff the human accepts in
+the IDE — riding the mutation/spawn machinery — instead of `--force`
+overwriting curation. Provenance markers were considered and rejected
+(ownership of a generated node rots the moment a human drags it; a
+reviewed diff doesn't).
 
 ## Open questions (tracked, not blocking P0)
 

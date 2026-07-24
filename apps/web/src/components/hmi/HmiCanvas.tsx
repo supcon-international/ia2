@@ -480,7 +480,13 @@ function CanvasNode({
       }}
       onClick={(e) => {
         e.stopPropagation()
-        if (mode === "operate" && tapAction) onAction(node.id, tapAction)
+        if (mode !== "operate" || !tapAction) return
+        // `bind.enable` gates the gesture itself, not just the visual —
+        // a click on the wrapper around a disabled control must not
+        // reach the plant either.
+        const enBind = node.bind["enable"]
+        if (enBind !== undefined && !resolveOn(snapshot, enBind)) return
+        onAction(node.id, tapAction)
       }}
     >
       {body}
@@ -630,17 +636,24 @@ function renderKind(
     case "button": {
       // Optional state feedback: with `bind.on` the button lights while
       // the bound value is truthy (the indicator's lit treatment), so a
-      // toggle shows the state it controls. No binding = plain button.
+      // toggle shows the state it controls. `bind.enable` gates the
+      // control: 0 (or no live data — same refusal posture as the write
+      // resolver) renders it disabled, the context-dependent-controls
+      // lever from RFC #33-C4.
       const onBind = node.bind["on"]
       const lit = onBind !== undefined && resolveOn(snapshot, onBind)
+      const enBind = node.bind["enable"]
+      const disabled = enBind !== undefined && !resolveOn(snapshot, enBind)
       return (
         <button
           type="button"
+          disabled={disabled}
           className={cn(
             "h-full w-full rounded-md border px-3 font-mono text-[12px]",
             lit
               ? "border-highlight bg-highlight/80 text-highlight-foreground hover:bg-highlight/70"
               : "border-border bg-card text-foreground hover:bg-accent/50",
+            disabled && "cursor-not-allowed opacity-40 hover:bg-card",
           )}
         >
           {node.label}
@@ -735,6 +748,8 @@ function InputNode({
   // Display resolution (not resolveBinding): the placeholder echoes the
   // current value, which may legitimately be text (STRING var).
   const current = b !== undefined ? displayBinding(snapshot, b) : null
+  const enBind = node.bind["enable"]
+  const disabled = enBind !== undefined && !resolveOn(snapshot, enBind)
   return (
     <div className="flex h-full w-full items-center gap-1.5 overflow-hidden">
       {node.label && (
@@ -744,11 +759,12 @@ function InputNode({
       )}
       <input
         value={text}
+        disabled={disabled}
         onChange={(e) => setText(e.target.value)}
         onClick={(e) => e.stopPropagation()}
         onPointerDown={(e) => e.stopPropagation()}
         onKeyDown={(e) => {
-          if (e.key === "Enter" && commit) {
+          if (e.key === "Enter" && commit && !disabled) {
             // Number("") is 0, not NaN — an empty field must not commit.
             const v = parseCommitText(text)
             if (v !== null) onAction(node.id, commit, v)
@@ -756,7 +772,10 @@ function InputNode({
           }
         }}
         placeholder={current == null ? "—" : String(current)}
-        className="h-full min-w-0 flex-1 rounded border border-input bg-background px-1.5 font-mono text-[12px] text-foreground outline-none focus:border-ring"
+        className={cn(
+          "h-full min-w-0 flex-1 rounded border border-input bg-background px-1.5 font-mono text-[12px] text-foreground outline-none focus:border-ring",
+          disabled && "cursor-not-allowed opacity-40",
+        )}
       />
       {node.unit && (
         <span className="font-mono text-[10px] text-muted-foreground">

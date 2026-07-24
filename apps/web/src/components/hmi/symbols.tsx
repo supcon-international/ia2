@@ -89,6 +89,8 @@ export function HmiSymbol({ symbol, w, h, live, props, liveColor, history }: Pro
       return <Fan w={w} h={h} live={live} props={props} />
     case "conveyor":
       return <Conveyor h={h} live={live} props={props} />
+    case "switch":
+      return <Switch live={live} props={props} />
     default:
       // Unknown symbol: visible placeholder, never a silent hole —
       // validate warns about it too.
@@ -773,6 +775,50 @@ function Conveyor({
       </div>
       {lbl && (
         <div className="mt-0.5 font-mono text-[10px] text-muted-foreground">{lbl}</div>
+      )}
+    </div>
+  )
+}
+
+/** Rocker switch — a STATE toggle, visually distinct from a momentary
+ *  button (RFC #33-C1): pill track, sliding thumb, ON/OFF captions.
+ *  Pair with an `action.tap` toggle; bind `on` to the state it shows. */
+function Switch({
+  live,
+  props,
+}: {
+  live: SymbolLive
+  props: Record<string, unknown>
+}) {
+  const isOn = on(live["on"])
+  const onText = str(props, "on_text") ?? "ON"
+  const offText = str(props, "off_text") ?? "OFF"
+  const lbl = label(props)
+  return (
+    <div className="flex h-full w-full items-center gap-2 overflow-hidden">
+      <div
+        className={cn(
+          "relative h-[22px] w-[44px] shrink-0 rounded-full border transition-colors",
+          isOn ? "border-highlight bg-highlight/80" : "border-border bg-muted",
+        )}
+      >
+        <div
+          className="absolute top-[2px] size-[16px] rounded-full bg-background shadow"
+          style={{ left: isOn ? 24 : 2, transition: "left 0.2s ease" }}
+        />
+      </div>
+      <span
+        className={cn(
+          "font-mono text-[11px]",
+          isOn ? "text-foreground" : "text-muted-foreground",
+        )}
+      >
+        {isOn ? onText : offText}
+      </span>
+      {lbl && (
+        <span className="ml-auto truncate font-mono text-[10px] text-muted-foreground">
+          {lbl}
+        </span>
       )}
     </div>
   )
