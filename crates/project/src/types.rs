@@ -439,6 +439,52 @@ pub enum ModbusChannelKind {
 }
 
 #[cfg(test)]
+mod gear_config_compat_tests {
+    use super::*;
+
+    /// A legacy [[gear]] block authored before the dynamic-ratio channels
+    /// existed must still deserialize: the two new channel names default,
+    /// so old projects load unchanged.
+    #[test]
+    fn legacy_gear_block_gets_default_ratio_apply_channels() {
+        let toml = r#"
+            slave_index = 0
+            target_pos_offset = 2
+            actual_pos_offset = 4
+            status_word_offset = 2
+            master = { kind = "virtual" }
+        "#;
+        let g: EthercatGear = toml::from_str(toml).unwrap();
+        assert_eq!(g.ratio_apply_channel, "gear_ratio_apply");
+        assert_eq!(g.ratio_ack_channel, "gear_ratio_ack");
+        // and the pre-existing defaults still apply
+        assert_eq!(g.engage_channel, "gear_engage");
+        assert_eq!(g.trip_channel, "gear_trip");
+    }
+
+    /// Explicit channel names survive a round-trip.
+    #[test]
+    fn ratio_apply_channels_roundtrip_when_set() {
+        let toml = r#"
+            slave_index = 1
+            target_pos_offset = 2
+            actual_pos_offset = 4
+            status_word_offset = 2
+            master = { kind = "axis", slave_index = 0, actual_pos_offset = 4 }
+            ratio_apply_channel = "apply_now"
+            ratio_ack_channel = "apply_done"
+        "#;
+        let g: EthercatGear = toml::from_str(toml).unwrap();
+        assert_eq!(g.ratio_apply_channel, "apply_now");
+        assert_eq!(g.ratio_ack_channel, "apply_done");
+        let back = toml::to_string(&g).unwrap();
+        let g2: EthercatGear = toml::from_str(&back).unwrap();
+        assert_eq!(g2.ratio_apply_channel, "apply_now");
+        assert_eq!(g2.ratio_ack_channel, "apply_done");
+    }
+}
+
+#[cfg(test)]
 mod modbus_config_compat_tests {
     use super::*;
 
@@ -695,6 +741,17 @@ pub struct EthercatGear {
     pub engaged_channel: String,
     #[serde(default = "default_gear_trip_channel")]
     pub trip_channel: String,
+    /// Rising edge = apply the ratio currently in the ratio channels to the
+    /// running gear, phase-continuously (no position step): the engine
+    /// re-references its law origins and ramps from the OLD ratio to the new
+    /// one at `ratio_step` per cycle. Distinct from re-engage: it does not
+    /// reset the soft-engage ramp, clear a trip, or bypass the re-arm rule.
+    #[serde(default = "default_gear_ratio_apply_channel")]
+    pub ratio_apply_channel: String,
+    /// Read-only apply counter (engine → PLC/monitor): increments once per
+    /// accepted apply edge, so the slow plane can handshake the change.
+    #[serde(default = "default_gear_ratio_ack_channel")]
+    pub ratio_ack_channel: String,
 }
 
 /// Master position source for an in-cycle gear axis.
@@ -739,6 +796,12 @@ fn default_gear_engaged_channel() -> String {
 }
 fn default_gear_trip_channel() -> String {
     "gear_trip".into()
+}
+fn default_gear_ratio_apply_channel() -> String {
+    "gear_ratio_apply".into()
+}
+fn default_gear_ratio_ack_channel() -> String {
+    "gear_ratio_ack".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

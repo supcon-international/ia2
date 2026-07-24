@@ -47,15 +47,23 @@ pub struct GearShared {
     master_vel: AtomicU64,
     max_travel: AtomicU64,
     engage: AtomicBool,
+    /// Rising edge = apply the current ratio channels to the running gear,
+    /// phase-continuously. Release/Acquire-paired like `engage`: the slow
+    /// plane stores ratio_num/den (Relaxed) then raises this flag, so a tick
+    /// that observes it also sees those parameter writes.
+    ratio_apply: AtomicBool,
     // Engine → slow plane.
     engaged_fb: AtomicBool,
     trip_fb: AtomicBool,
+    /// Accepted-apply counter (handshake readback for the slow plane).
+    ratio_ack: AtomicU64,
 }
 
 /// Writable gear parameters (slow plane → engine).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GearParam {
     Engage,
+    RatioApply,
     RatioNum,
     RatioDen,
     RatioStep,
@@ -68,6 +76,8 @@ pub enum GearParam {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GearReadback {
     Engage,
+    RatioApply,
+    RatioAck,
     RatioNum,
     RatioDen,
     RatioStep,
@@ -103,15 +113,20 @@ impl GearShared {
             ChannelValue::Real(v) => v as f64,
             ChannelValue::F64(v) => v,
         };
-        if let GearParam::Engage = param {
-            // Release: the engage flag is the mailbox's publish point. A PLC
+        if matches!(param, GearParam::Engage | GearParam::RatioApply) {
+            let flag = match param {
+                GearParam::Engage => &self.engage,
+                GearParam::RatioApply => &self.ratio_apply,
+                _ => unreachable!(),
+            };
+            // Release: these flags are the mailbox's publish points. A PLC
             // scan sets ratio/phase (Relaxed stores above) and then raises
-            // engage in the same cycle; pairing this store with the engine's
-            // Acquire load (see `tick`) guarantees that a tick observing
-            // engage=true also sees those parameter writes, so the engage-edge
-            // latch can't capture a stale (ratio, phase) against a fresh
-            // engage on a weakly-ordered CPU.
-            self.engage.store(as_f64 != 0.0, Ordering::Release);
+            // engage (or ratio_apply) in the same cycle; pairing this store
+            // with the engine's Acquire load (see `tick`) guarantees that a
+            // tick observing the flag also sees those parameter writes, so
+            // the edge latch can't capture a stale (ratio, phase) against a
+            // fresh request on a weakly-ordered CPU.
+            flag.store(as_f64 != 0.0, Ordering::Release);
             return;
         }
         // Reject non-finite numeric params at the door: a slow-plane NaN/inf
@@ -123,7 +138,7 @@ impl GearShared {
             return;
         }
         match param {
-            GearParam::Engage => unreachable!(),
+            GearParam::Engage | GearParam::RatioApply => unreachable!(),
             GearParam::RatioNum => Self::store_f64(&self.ratio_num, as_f64),
             GearParam::RatioDen => Self::store_f64(&self.ratio_den, as_f64),
             GearParam::RatioStep => Self::store_f64(&self.ratio_step, as_f64),
@@ -137,6 +152,12 @@ impl GearShared {
     pub fn read(&self, rb: GearReadback) -> ChannelValue {
         match rb {
             GearReadback::Engage => ChannelValue::Bool(self.engage.load(Ordering::Relaxed)),
+            GearReadback::RatioApply => {
+                ChannelValue::Bool(self.ratio_apply.load(Ordering::Relaxed))
+            }
+            GearReadback::RatioAck => {
+                ChannelValue::F64(self.ratio_ack.load(Ordering::Relaxed) as f64)
+            }
             GearReadback::RatioNum => ChannelValue::F64(Self::load_f64(&self.ratio_num)),
             GearReadback::RatioDen => ChannelValue::F64(Self::load_f64(&self.ratio_den)),
             GearReadback::RatioStep => ChannelValue::F64(Self::load_f64(&self.ratio_step)),
@@ -189,8 +210,6 @@ pub struct GearEngine {
     /// here; it is the single source of what goes on the wire.
     target: f64,
     was_engaged: bool,
-    m0: f64,
-    s0: f64,
     ratio: f64,
     /// Gear parameters latched at the engage edge (the documented contract:
     /// mid-run edits are inert until re-engage). `ratio_step` stays live —
@@ -203,6 +222,19 @@ pub struct GearEngine {
     /// engage request to be observed low first (operator re-arm), so stale
     /// engage forces can't restart motion after a fault reset.
     need_rearm: bool,
+    /// Travel-limit anchor. Latched (= s0) at the engage edge and NEVER moved
+    /// by a mid-run ratio apply, so `max_travel` keeps meaning "total
+    /// excursion since engage" rather than a per-segment budget that a ratio
+    /// change would silently reset.
+    clamp_origin: f64,
+    /// Level tracker for the ratio-apply request (edge detection).
+    prev_apply: bool,
+    /// This tick's master advance (counts) — used by the apply rebase so the
+    /// apply cycle keeps the old ratio's contribution for the in-flight
+    /// master delta instead of a one-cycle zero-velocity notch.
+    last_master_delta: f64,
+    /// Accepted-apply counter, mirrored into the shared mailbox by emit().
+    ack: u64,
 }
 
 impl GearEngine {
@@ -228,14 +260,16 @@ impl GearEngine {
             prev_master_raw: None,
             target: 0.0,
             was_engaged: false,
-            m0: 0.0,
-            s0: 0.0,
             ratio: 0.0,
             ratio_num_l: 0.0,
             ratio_den_l: 1.0,
             phase_l: 0.0,
             trip: false,
             need_rearm: false,
+            clamp_origin: 0.0,
+            prev_apply: false,
+            last_master_delta: 0.0,
+            ack: 0,
         }
     }
 
@@ -273,25 +307,35 @@ impl GearEngine {
         // before raising engage (ratio/phase/…) is visible, so the engage-edge
         // latch below captures a coherent snapshot even on a weakly-ordered CPU.
         let engage_in = self.shared.engage.load(Ordering::Acquire);
+        // Same Release/Acquire pairing as engage: observing apply=true
+        // guarantees the ratio values written before it are visible.
+        let apply_in = self.shared.ratio_apply.load(Ordering::Acquire);
         // Slow-plane values are sanitized to finite at ingress (see
         // GearShared::write), so no NaN/inf can reach the law here.
         let ratio_step = GearShared::load_f64(&self.shared.ratio_step).max(0.0);
         let master_vel = GearShared::load_f64(&self.shared.master_vel);
         let max_travel = GearShared::load_f64(&self.shared.max_travel);
 
-        // Advance the continuous, wrap-free master position.
-        match master_actual {
+        // Advance the continuous, wrap-free master position, remembering this
+        // tick's delta for the apply rebase below.
+        self.last_master_delta = match master_actual {
             // Axis master: integrate the WRAPPING i32 delta so the encoder's
             // ±2^31 rollover contributes a small step, not a full-scale jump.
             Some(raw) => {
-                if let Some(prev) = self.prev_master_raw {
-                    self.master_pos += raw.wrapping_sub(prev) as f64;
-                }
+                let d = match self.prev_master_raw {
+                    Some(prev) => raw.wrapping_sub(prev) as f64,
+                    None => 0.0,
+                };
+                self.master_pos += d;
                 self.prev_master_raw = Some(raw);
+                d
             }
             // Virtual master: software accumulator, advances every tick.
-            None => self.master_pos += master_vel,
-        }
+            None => {
+                self.master_pos += master_vel;
+                master_vel
+            }
+        };
 
         // CiA402: Operation Enabled = statusword & 0x6F == 0x27.
         let enabled = (follower_sw & 0x006F) == 0x0027;
@@ -302,6 +346,7 @@ impl GearEngine {
             self.was_engaged = false;
             self.ratio = 0.0;
             self.need_rearm = true;
+            self.prev_apply = apply_in; // level-track: no edge from stale-high
         } else {
             if !engage_in {
                 self.need_rearm = false; // observed low while enabled: re-armed
@@ -309,15 +354,36 @@ impl GearEngine {
             }
             let engage = engage_in && !self.trip && !self.need_rearm && max_travel > 0.0;
             if engage && !self.was_engaged {
-                // Engage edge: latch origins AND gear params (documented
-                // contract — mid-run ratio/phase edits are inert until
-                // re-engage). ratio_step stays live (ramp speed only).
-                self.m0 = self.master_pos;
-                self.s0 = self.target;
+                // Engage edge: latch the travel-limit anchor and the gear
+                // params (documented contract — mid-run phase edits are inert
+                // until re-engage; ratio can be re-applied live, see below).
+                // The follower position accumulator `self.target` is already
+                // == shadowed actual here (no-jump); apply the phase offset
+                // once and start the ratio ramp from 0. ratio_step stays live.
+                self.clamp_origin = self.target;
                 self.ratio = 0.0;
                 self.ratio_num_l = GearShared::load_f64(&self.shared.ratio_num);
                 self.ratio_den_l = GearShared::load_f64(&self.shared.ratio_den);
                 self.phase_l = GearShared::load_f64(&self.shared.phase_ofs);
+                self.target += self.phase_l;
+            }
+            // Mid-run ratio apply: change the gear ratio on the fly, phase-
+            // continuously. Because the law integrates INCREMENTALLY
+            // (`target += ratio * master_delta`, below), re-targeting the
+            // ratio needs nothing but a re-latch: `self.ratio` keeps its value
+            // and the existing ratio_step clamp ramps it from the OLD ratio to
+            // the new one, so the follower velocity ramps monotonically with
+            // no position step and no lever-arm overshoot. Gated on "already
+            // engaged before this tick" (never races the engage edge), leaves
+            // clamp_origin alone (max_travel still bounds TOTAL excursion since
+            // engage), and is NOT a re-engage: a tripped / re-arm-pending
+            // engine ignores it entirely.
+            let apply_edge = apply_in && !self.prev_apply;
+            self.prev_apply = apply_in;
+            if apply_edge && engage && self.was_engaged {
+                self.ratio_num_l = GearShared::load_f64(&self.shared.ratio_num);
+                self.ratio_den_l = GearShared::load_f64(&self.shared.ratio_den);
+                self.ack = self.ack.wrapping_add(1);
             }
             self.was_engaged = engage;
             if engage {
@@ -328,15 +394,25 @@ impl GearEngine {
                 };
                 let d = (tgt_ratio - self.ratio).clamp(-ratio_step, ratio_step);
                 self.ratio += d;
-                let raw_target = self.s0 + self.ratio * (self.master_pos - self.m0) + self.phase_l;
-                // Hard travel bound: clamp the commanded excursion to
+                // Incremental integration: the follower advances by
+                // ratio × (this tick's master delta). Identical to the
+                // absolute lever form `s0 + ratio*(master-m0)` at constant
+                // ratio, but during a ratio ramp the follower velocity is
+                // exactly ratio×master_vel (monotonic) rather than
+                // overshooting by ratiȯ × lever — which is what makes an
+                // on-the-fly ratio change clean.
+                let raw_target = self.target + self.ratio * self.last_master_delta;
+                // Hard travel bound: clamp the commanded position to
                 // ±max_travel about the engage origin, so max_travel is a
                 // true limit on what reaches the wire — not just a
-                // fire-after-the-fact trip. A wild ratio typo or any other
-                // over-range demand is capped to one max_travel excursion,
-                // and the trip latches to hold there until engage drops.
-                self.target = raw_target.clamp(self.s0 - max_travel, self.s0 + max_travel);
-                if (raw_target - self.s0).abs() >= max_travel {
+                // fire-after-the-fact trip. A wild ratio or any other
+                // over-range demand is capped, and the trip latches to hold
+                // there until engage drops.
+                self.target = raw_target.clamp(
+                    self.clamp_origin - max_travel,
+                    self.clamp_origin + max_travel,
+                );
+                if (raw_target - self.clamp_origin).abs() >= max_travel {
                     self.trip = true;
                 }
             }
@@ -352,6 +428,7 @@ impl GearEngine {
             .engaged_fb
             .store(self.was_engaged, Ordering::Relaxed);
         self.shared.trip_fb.store(self.trip, Ordering::Relaxed);
+        self.shared.ratio_ack.store(self.ack, Ordering::Relaxed);
 
         // Saturate rather than wrap at the i32 edge (±256 motor revs on a
         // 23-bit encoder). Long unidirectional runs remain a known limit.
@@ -416,6 +493,8 @@ pub fn validate_channels(
             &g.max_travel_channel,
             &g.engaged_channel,
             &g.trip_channel,
+            &g.ratio_apply_channel,
+            &g.ratio_ack_channel,
         ] {
             if pdo_names.contains(name.as_str()) {
                 return Err(format!(
@@ -555,6 +634,8 @@ mod tests {
             max_travel_channel: "gear_max_travel".into(),
             engaged_channel: "gear_engaged".into(),
             trip_channel: "gear_trip".into(),
+            ratio_apply_channel: "gear_ratio_apply".into(),
+            ratio_ack_channel: "gear_ratio_ack".into(),
         };
         let shared = Arc::new(GearShared::default());
         (GearEngine::new(&cfg, shared.clone()), shared)
@@ -885,6 +966,268 @@ mod tests {
         assert_eq!(next - after, 50, "resumes 1:1 from the resynced position");
     }
 
+    // ---- dynamic ratio apply (phase-continuous on-the-fly ratio change) ----
+
+    /// Engage at `ratio` (hard, single-tick), run to steady state, return the
+    /// engine + shared so a test can then pulse ratio_apply with a new ratio.
+    fn engaged_at(ratio: f64) -> (GearEngine, Arc<GearShared>) {
+        let (mut e, s) = engine_virtual();
+        set(&s, GearParam::RatioNum, ratio);
+        set(&s, GearParam::RatioDen, 1.0);
+        set(&s, GearParam::RatioStep, 100.0); // hard: reach ratio in one tick
+        set(&s, GearParam::MasterVel, 100.0);
+        set(&s, GearParam::MaxTravel, 1e9);
+        s.write(GearParam::Engage, &ChannelValue::Bool(true));
+        for _ in 0..3 {
+            e.tick(OP_ENABLED, 0, None, true);
+        }
+        (e, s)
+    }
+
+    fn pulse_apply(s: &GearShared, num: f64, den: f64, step: f64) {
+        set(s, GearParam::RatioNum, num);
+        set(s, GearParam::RatioDen, den);
+        set(s, GearParam::RatioStep, step);
+        s.write(GearParam::RatioApply, &ChannelValue::Bool(true));
+    }
+
+    #[test]
+    fn ratio_apply_is_phase_continuous_no_step() {
+        let (mut e, s) = engaged_at(1.0); // 1:1 -> 100 cnt/cycle
+        let before = e.tick(OP_ENABLED, 0, None, true);
+        let a = e.tick(OP_ENABLED, 0, None, true);
+        assert_eq!(a - before, 100, "1:1 steady");
+        // Apply 2:1 with a SMALL ramp: the apply cycle must NOT jump — its
+        // single-cycle delta stays ~ old ratio * master_vel (100), not
+        // (2-1)*(master_pos-m0) which would be a large step.
+        pulse_apply(&s, 2.0, 1.0, 0.01);
+        let at_apply = e.tick(OP_ENABLED, 0, None, true);
+        let step = at_apply - a;
+        assert!(
+            (95..=115).contains(&step),
+            "apply cycle delta {step} must stay near the old-ratio velocity (no jump)"
+        );
+    }
+
+    #[test]
+    fn ratio_apply_ramps_from_old_to_new_and_converges() {
+        let (mut e, s) = engaged_at(1.0);
+        pulse_apply(&s, 2.0, 1.0, 0.05); // ramp 1->2 at 0.05/cycle
+        let mut prev = e.tick(OP_ENABLED, 0, None, true);
+        let mut deltas = Vec::new();
+        for _ in 0..60 {
+            let t = e.tick(OP_ENABLED, 0, None, true);
+            deltas.push(t - prev);
+            prev = t;
+        }
+        // Monotonic non-decreasing per-cycle delta from ~100 toward ~200.
+        for w in deltas.windows(2) {
+            assert!(w[1] >= w[0] - 1, "ratio ramps monotonically up");
+        }
+        assert_eq!(*deltas.last().unwrap(), 200, "converges exactly to 2:1");
+    }
+
+    #[test]
+    fn ratio_apply_ramps_down_and_into_negative() {
+        let (mut e, s) = engaged_at(2.0); // 200 cnt/cycle
+        pulse_apply(&s, -1.0, 1.0, 0.05); // 2 -> -1
+        let mut prev = e.tick(OP_ENABLED, 0, None, true);
+        let mut deltas = Vec::new();
+        for _ in 0..90 {
+            let t = e.tick(OP_ENABLED, 0, None, true);
+            deltas.push(t - prev);
+            prev = t;
+        }
+        for w in deltas.windows(2) {
+            assert!(w[1] <= w[0] + 1, "ratio ramps monotonically down");
+        }
+        assert_eq!(
+            *deltas.last().unwrap(),
+            -100,
+            "converges to -1:1 (reversed)"
+        );
+    }
+
+    #[test]
+    fn ratio_apply_uncompensated_step_is_never_emitted() {
+        // Pin the compensation: run master far from the engage origin so the
+        // UNcompensated path (re-latch ratio without rebasing m0/s0) would
+        // emit a huge step. Assert the engine does not.
+        let (mut e, s) = engaged_at(1.0);
+        for _ in 0..100 {
+            e.tick(OP_ENABLED, 0, None, true); // master_pos now ~ +10000
+        }
+        let a = e.tick(OP_ENABLED, 0, None, true);
+        pulse_apply(&s, 3.0, 1.0, 0.02);
+        let at_apply = e.tick(OP_ENABLED, 0, None, true);
+        // Uncompensated would be s0 + 3*(master_pos - m0) ≈ +2*10000 step.
+        assert!(
+            (at_apply - a).abs() < 300,
+            "compensated: no lever-arm step ({}) at apply",
+            at_apply - a
+        );
+    }
+
+    #[test]
+    fn ratio_apply_keeps_total_travel_clamp_origin() {
+        // clamp_origin stays at the engage origin: a ratio apply must not
+        // reset the max_travel budget. Engage, travel near the limit, apply,
+        // and assert the trip still fires on TOTAL excursion from engage.
+        let (mut e, s) = engine_virtual();
+        set(&s, GearParam::RatioNum, 1.0);
+        set(&s, GearParam::RatioDen, 1.0);
+        set(&s, GearParam::RatioStep, 100.0);
+        set(&s, GearParam::MasterVel, 100.0);
+        set(&s, GearParam::MaxTravel, 450.0);
+        s.write(GearParam::Engage, &ChannelValue::Bool(true));
+        e.tick(OP_ENABLED, 0, None, true); // engage, clamp_origin = 0
+                                           // Travel 3 cycles (~300), then apply a new ratio.
+        for _ in 0..3 {
+            e.tick(OP_ENABLED, 0, None, true);
+        }
+        pulse_apply(&s, 1.0, 1.0, 100.0); // same ratio, just an apply
+        let mut tripped = false;
+        for _ in 0..5 {
+            e.tick(OP_ENABLED, 0, None, true);
+            if s.read(GearReadback::Trip) == ChannelValue::Bool(true) {
+                tripped = true;
+            }
+        }
+        assert!(
+            tripped,
+            "max_travel still bounds TOTAL excursion after apply"
+        );
+    }
+
+    #[test]
+    fn ratio_apply_is_not_a_reengage() {
+        // Apply must not clear a trip nor reset the soft-engage ramp: a
+        // tripped engine ignores apply and stays held.
+        let (mut e, s) = engine_virtual();
+        set(&s, GearParam::RatioNum, 1.0);
+        set(&s, GearParam::RatioDen, 1.0);
+        set(&s, GearParam::RatioStep, 100.0);
+        set(&s, GearParam::MasterVel, 100.0);
+        set(&s, GearParam::MaxTravel, 250.0);
+        s.write(GearParam::Engage, &ChannelValue::Bool(true));
+        for _ in 0..6 {
+            e.tick(OP_ENABLED, 0, None, true); // trips past 250
+        }
+        assert_eq!(s.read(GearReadback::Trip), ChannelValue::Bool(true));
+        let held = e.tick(OP_ENABLED, 0, None, true);
+        pulse_apply(&s, 2.0, 1.0, 100.0);
+        let after = e.tick(OP_ENABLED, 0, None, true);
+        assert_eq!(after, held, "apply on a tripped engine is a no-op (held)");
+        assert_eq!(s.read(GearReadback::Trip), ChannelValue::Bool(true));
+    }
+
+    #[test]
+    fn ratio_apply_is_edge_not_level_and_acks() {
+        let (mut e, s) = engaged_at(1.0);
+        assert_eq!(s.read(GearReadback::RatioAck), ChannelValue::F64(0.0));
+        // Hold apply HIGH across many cycles: exactly ONE rebase / ONE ack.
+        pulse_apply(&s, 2.0, 1.0, 100.0);
+        for _ in 0..10 {
+            e.tick(OP_ENABLED, 0, None, true);
+        }
+        assert_eq!(
+            s.read(GearReadback::RatioAck),
+            ChannelValue::F64(1.0),
+            "level-high applies exactly once"
+        );
+        // Drop and re-pulse -> second ack.
+        s.write(GearParam::RatioApply, &ChannelValue::Bool(false));
+        e.tick(OP_ENABLED, 0, None, true);
+        pulse_apply(&s, 3.0, 1.0, 100.0);
+        e.tick(OP_ENABLED, 0, None, true);
+        assert_eq!(s.read(GearReadback::RatioAck), ChannelValue::F64(2.0));
+    }
+
+    #[test]
+    fn ratio_apply_ignored_while_disengaged_or_disabled() {
+        let (mut e, s) = engine_virtual();
+        set(&s, GearParam::RatioNum, 1.0);
+        set(&s, GearParam::RatioDen, 1.0);
+        set(&s, GearParam::RatioStep, 100.0);
+        set(&s, GearParam::MaxTravel, 1e9);
+        // Not engaged: apply pulse is a no-op, no ack.
+        pulse_apply(&s, 2.0, 1.0, 100.0);
+        for _ in 0..5 {
+            e.tick(OP_ENABLED, 0, None, true);
+        }
+        assert_eq!(s.read(GearReadback::RatioAck), ChannelValue::F64(0.0));
+        // Not enabled: apply pulse is a no-op even if engage is set.
+        s.write(GearParam::Engage, &ChannelValue::Bool(true));
+        for _ in 0..3 {
+            e.tick(RDY_ONLY, 0, None, true);
+        }
+        assert_eq!(s.read(GearReadback::RatioAck), ChannelValue::F64(0.0));
+    }
+
+    #[test]
+    fn ratio_apply_stale_high_across_enable_does_not_edge() {
+        // apply held HIGH while disabled must not fire an edge when the drive
+        // comes enabled+engaged (level-tracked in the not-enabled branch).
+        let (mut e, s) = engine_virtual();
+        set(&s, GearParam::RatioNum, 1.0);
+        set(&s, GearParam::RatioDen, 1.0);
+        set(&s, GearParam::RatioStep, 100.0);
+        set(&s, GearParam::MasterVel, 100.0);
+        set(&s, GearParam::MaxTravel, 1e9);
+        s.write(GearParam::RatioApply, &ChannelValue::Bool(true)); // stale high
+        for _ in 0..3 {
+            e.tick(RDY_ONLY, 0, None, true);
+        }
+        s.write(GearParam::Engage, &ChannelValue::Bool(true));
+        for _ in 0..5 {
+            e.tick(OP_ENABLED, 0, None, true);
+        }
+        assert_eq!(
+            s.read(GearReadback::RatioAck),
+            ChannelValue::F64(0.0),
+            "stale-high apply must not edge on enable"
+        );
+    }
+
+    #[test]
+    fn ratio_apply_rejects_non_finite_new_ratio() {
+        let (mut e, s) = engaged_at(2.0);
+        let a = e.tick(OP_ENABLED, 0, None, true);
+        let b = e.tick(OP_ENABLED, 0, None, true);
+        assert_eq!(b - a, 200);
+        // NaN into ratio_num is dropped at ingress; apply keeps last-good 2:1.
+        s.write(GearParam::RatioNum, &ChannelValue::F64(f64::NAN));
+        s.write(GearParam::RatioApply, &ChannelValue::Bool(true));
+        let c = e.tick(OP_ENABLED, 0, None, true);
+        let d = e.tick(OP_ENABLED, 0, None, true);
+        assert_eq!(d - c, 200, "still 2:1 — NaN ratio never reached the law");
+    }
+
+    #[test]
+    fn ratio_apply_mid_soft_engage_ramp() {
+        // Apply while the initial soft-engage ramp hasn't reached the target:
+        // rebase keeps the partial ratio and re-targets, still continuous.
+        let (mut e, s) = engine_virtual();
+        set(&s, GearParam::RatioNum, 4.0);
+        set(&s, GearParam::RatioDen, 1.0);
+        set(&s, GearParam::RatioStep, 0.05); // slow ramp toward 4:1
+        set(&s, GearParam::MasterVel, 100.0);
+        set(&s, GearParam::MaxTravel, 1e9);
+        s.write(GearParam::Engage, &ChannelValue::Bool(true));
+        for _ in 0..10 {
+            e.tick(OP_ENABLED, 0, None, true); // ratio ~0.5, still ramping
+        }
+        let a = e.tick(OP_ENABLED, 0, None, true);
+        let pre = e.tick(OP_ENABLED, 0, None, true);
+        let vel_pre = pre - a;
+        pulse_apply(&s, 1.0, 1.0, 0.05); // retarget to 1:1 from partial
+        let at_apply = e.tick(OP_ENABLED, 0, None, true);
+        assert!(
+            (at_apply - pre - vel_pre).abs() <= 6,
+            "continuous through an apply during the soft-engage ramp"
+        );
+    }
+
     #[test]
     fn validate_channels_catches_gear_collisions() {
         use std::collections::HashSet;
@@ -903,6 +1246,8 @@ mod tests {
             max_travel_channel: "gear_max_travel".into(),
             engaged_channel: "gear_engaged".into(),
             trip_channel: "gear_trip".into(),
+            ratio_apply_channel: "gear_ratio_apply".into(),
+            ratio_ack_channel: "gear_ratio_ack".into(),
         };
         let empty: HashSet<&str> = HashSet::new();
         assert!(validate_channels(std::slice::from_ref(&a), &empty).is_ok());

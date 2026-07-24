@@ -352,6 +352,8 @@ mod tests {
             max_travel_channel: "max_travel".into(),
             engaged_channel: "engaged".into(),
             trip_channel: "trip".into(),
+            ratio_apply_channel: "ratio_apply".into(),
+            ratio_ack_channel: "ratio_ack".into(),
         }
     }
 
