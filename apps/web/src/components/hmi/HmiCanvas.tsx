@@ -23,10 +23,12 @@ import {
 } from "@/lib/hmi-action"
 import { canHostAction } from "@/lib/hmi-actions"
 import {
-  formatBinding,
+  bindingVariable,
+  colorBinding,
+  cssColor,
+  displayBinding,
   lookupVar,
   resolveBinding,
-  resolveDisplay,
 } from "@/lib/hmi-binding"
 import {
   pushTimedHistory,
@@ -359,17 +361,20 @@ export function HmiCanvas({
           />
         ))}
         {/* Spawn overlays — the dashed sketch frame + glow live outside
-            the element so they're visible while it is still fading in. */}
+            the element so they're visible while it is still fading in.
+            Coordinates are accumulated to canvas space: a node inside a
+            nested group carries group-relative x/y. */}
         {[...spawnRef.current.entries()].map(([id, sp]) => {
-          const n = findNode(doc.root, id)
-          if (!n) return null
+          const hit = findNodeAbs(doc.root, id, 0, 0)
+          if (!hit) return null
+          const { node: n, x, y } = hit
           return (
             <div
               key={`spawn-${id}`}
               className="hmi-spawn-overlay"
               style={{
-                left: n.x,
-                top: n.y,
+                left: x,
+                top: y,
                 width: n.w > 0 ? n.w : 120,
                 height: n.h > 0 ? n.h : 32,
                 ...({ "--spawn-delay": `${sp.order * SPAWN_STAGGER_MS}ms` } as React.CSSProperties),
@@ -436,6 +441,13 @@ function CanvasNode({
   // action-host rule) — a tap on a text label must never reach the plant.
   const tapAction = canHostAction(node.type) ? node.action["tap"] : undefined
 
+  // `visible` bind: 0 hides the element in Operate; Arrange keeps it
+  // ghosted so it can still be selected and edited.
+  const visBind = node.bind["visible"]
+  const hidden =
+    visBind !== undefined && (resolveBinding(snapshot, visBind) ?? 1) === 0
+  if (hidden && mode === "operate") return null
+
   const body = renderKind(node, snapshot, historyRef, onAction, host)
 
   return (
@@ -454,6 +466,7 @@ function CanvasNode({
         top: pos.y,
         width: node.w > 0 ? node.w : undefined,
         height: node.h > 0 ? node.h : undefined,
+        opacity: hidden ? 0.35 : undefined,
         ...(spawning !== undefined
           ? ({ "--spawn-delay": `${spawning.order * SPAWN_STAGGER_MS}ms` } as React.CSSProperties)
           : {}),
@@ -507,11 +520,35 @@ function renderKind(
             : node.style === "caption"
               ? "text-[10px] text-muted-foreground"
               : "text-[12px] text-foreground"
-      return <div className={cn("truncate", cls)}>{node.text}</div>
+      // Live text (a mapped state label) wins over the static string;
+      // a live color (map output) wins over the prop color.
+      const textBind = node.bind["text"]
+      const liveText =
+        textBind !== undefined ? displayBinding(snapshot, textBind) : null
+      const colorB = node.bind["color"]
+      const liveColor =
+        colorB !== undefined ? colorBinding(snapshot, colorB) : null
+      const p = node.props
+      const color = liveColor ?? (typeof p["color"] === "string" ? (p["color"] as string) : null)
+      const style: React.CSSProperties = {}
+      if (color) style.color = cssColor(color)
+      if (typeof p["size"] === "number") style.fontSize = p["size"] as number
+      if (typeof p["align"] === "string")
+        style.textAlign = p["align"] as React.CSSProperties["textAlign"]
+      if (typeof p["weight"] === "number" || typeof p["weight"] === "string")
+        style.fontWeight = p["weight"] as React.CSSProperties["fontWeight"]
+      return (
+        <div className={cn("truncate", cls)} style={style}>
+          {liveText ?? node.text}
+        </div>
+      )
     }
     case "value": {
       const b = node.bind["value"]
-      const v = b !== undefined ? resolveDisplay(snapshot, b) : null
+      const display = b !== undefined ? displayBinding(snapshot, b) : null
+      const colorB = node.bind["color"]
+      const liveColor =
+        colorB !== undefined ? colorBinding(snapshot, colorB) : null
       return (
         <div className="flex h-full w-full items-baseline justify-between gap-2 overflow-hidden">
           {node.label && (
@@ -519,12 +556,11 @@ function renderKind(
               {node.label}
             </span>
           )}
-          <span className="font-mono text-[13px] text-foreground">
-            {v == null || b === undefined
-              ? "—"
-              : typeof v === "number"
-                ? formatBinding(b, v)
-                : v}
+          <span
+            className="font-mono text-[13px] text-foreground"
+            style={liveColor ? { color: cssColor(liveColor) } : undefined}
+          >
+            {display ?? "—"}
             {node.unit && (
               <span className="ml-0.5 text-[10px] text-muted-foreground">
                 {node.unit}
@@ -539,6 +575,17 @@ function renderKind(
       for (const [k, b] of Object.entries(node.bind)) {
         live[k] = b === undefined ? null : resolveBinding(snapshot, b)
       }
+      const colorB = node.bind["color"]
+      const liveColor =
+        colorB !== undefined ? colorBinding(snapshot, colorB) : null
+      const valueBind = node.bind["value"]
+      const history =
+        node.symbol === "sparkline" && valueBind !== undefined
+          ? windowSlice(
+              historyRef.current.get(bindingVariable(valueBind)) ?? [],
+              SPARKLINE_WINDOW_S,
+            ).map((p) => p.v)
+          : undefined
       return (
         <HmiSymbol
           symbol={node.symbol}
@@ -546,6 +593,8 @@ function renderKind(
           h={node.h || 48}
           live={live}
           props={node.props}
+          liveColor={liveColor}
+          history={history}
         />
       )
     }
@@ -593,9 +642,40 @@ function renderKind(
         </div>
       )
     case "shape": {
-      if (node.shape === "rect") {
+      // Style: props give the static look, `fill`/`stroke` binds (map
+      // outputs) override it live — free-form P&ID pieces that carry
+      // state color without a dedicated symbol.
+      const p = node.props
+      const fillB = node.bind["fill"]
+      const strokeB = node.bind["stroke"]
+      const liveFill = fillB !== undefined ? colorBinding(snapshot, fillB) : null
+      const liveStroke =
+        strokeB !== undefined ? colorBinding(snapshot, strokeB) : null
+      const fill =
+        liveFill ?? (typeof p["fill"] === "string" ? (p["fill"] as string) : null)
+      const stroke =
+        liveStroke ??
+        (typeof p["stroke"] === "string" ? (p["stroke"] as string) : null)
+      const strokeW =
+        typeof p["stroke_width"] === "number" ? (p["stroke_width"] as number) : null
+      const dash = typeof p["dash"] === "string" ? (p["dash"] as string) : null
+
+      if (node.shape === "rect" || node.shape === "ellipse") {
+        const rx = typeof p["rx"] === "number" ? (p["rx"] as number) : 4
         return (
-          <div className="h-full w-full rounded border border-muted-foreground/40" />
+          <div
+            className={cn(
+              "h-full w-full border",
+              !stroke && "border-muted-foreground/40",
+            )}
+            style={{
+              borderRadius: node.shape === "ellipse" ? "50%" : rx,
+              background: fill ? cssColor(fill) : undefined,
+              borderColor: stroke ? cssColor(stroke) : undefined,
+              borderWidth: strokeW ?? undefined,
+              borderStyle: dash ? "dashed" : undefined,
+            }}
+          />
         )
       }
       // line / polyline: draw through the points within the node box.
@@ -612,8 +692,10 @@ function renderKind(
         >
           <path
             d={path}
-            className="fill-none stroke-muted-foreground/40"
-            strokeWidth={3}
+            className={cn("fill-none", !stroke && "stroke-muted-foreground/40")}
+            style={stroke ? { stroke: cssColor(stroke) } : undefined}
+            strokeWidth={strokeW ?? 3}
+            strokeDasharray={dash ?? undefined}
             strokeLinecap="round"
           />
         </svg>
@@ -638,7 +720,7 @@ function InputNode({
   const b = node.bind["value"]
   // Display resolution (not resolveBinding): the placeholder echoes the
   // current value, which may legitimately be text (STRING var).
-  const current = b !== undefined ? resolveDisplay(snapshot, b) : null
+  const current = b !== undefined ? displayBinding(snapshot, b) : null
   return (
     <div className="flex h-full w-full items-center gap-1.5 overflow-hidden">
       {node.label && (
@@ -786,15 +868,43 @@ export function findNode(root: HmiNode, id: string): HmiNode | null {
   return null
 }
 
+/** Same lookup as findNode, but accumulating group offsets into canvas
+ *  coordinates (spawn overlays render at the root layer). */
+function findNodeAbs(
+  n: HmiNode,
+  id: string,
+  baseX: number,
+  baseY: number,
+): { node: HmiNode; x: number; y: number } | null {
+  const ax = baseX + n.x
+  const ay = baseY + n.y
+  if (n.id === id) return { node: n, x: ax, y: ay }
+  if (n.type === "group") {
+    for (const c of n.children) {
+      const hit = findNodeAbs(c, id, ax, ay)
+      if (hit) return hit
+    }
+  }
+  return null
+}
+
+/** Retention window a sparkline keeps for its bound variable. */
+const SPARKLINE_WINDOW_S = 120
+
 /** Per-variable retention window: the max `window_s` among the trend
- *  nodes referencing it (one shared buffer serves them all). */
+ *  nodes referencing it, plus SPARKLINE_WINDOW_S for every sparkline's
+ *  `value` bind (one shared buffer serves them all). */
 function trendWindows(doc: HmiDoc): Map<string, number> {
   const out = new Map<string, number>()
+  const bump = (v: string, w: number) =>
+    out.set(v, Math.max(out.get(v) ?? 0, w))
   const walk = (n: HmiNode) => {
     if (n.type === "trend") {
-      for (const s of n.series) {
-        out.set(s.variable, Math.max(out.get(s.variable) ?? 0, n.window_s))
-      }
+      for (const s of n.series) bump(s.variable, n.window_s)
+    }
+    if (n.type === "symbol" && n.symbol === "sparkline") {
+      const b = n.bind["value"]
+      if (b !== undefined) bump(bindingVariable(b), SPARKLINE_WINDOW_S)
     }
     if (n.type === "group") n.children.forEach(walk)
   }

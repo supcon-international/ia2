@@ -34,6 +34,7 @@ const BASE_KINDS: {
   { label: "alarmbar", make: () => ({ type: "alarmbar" }), w: 600, h: 32 },
   { label: "nav", make: () => ({ type: "nav", label: "Detail", target: "" }), w: 120, h: 32 },
   { label: "rect", make: () => ({ type: "shape", shape: "rect", points: [] }), w: 160, h: 100 },
+  { label: "ellipse", make: () => ({ type: "shape", shape: "ellipse", points: [] }), w: 100, h: 100 },
 ]
 
 export function HmiPalette({
@@ -350,7 +351,9 @@ function TypeFields({
   patch: (p: Record<string, unknown>) => Promise<void>
 }) {
   switch (node.type) {
-    case "text":
+    case "text": {
+      const color = typeof node.props["color"] === "string" ? (node.props["color"] as string) : ""
+      const size = typeof node.props["size"] === "number" ? String(node.props["size"]) : ""
       return (
         <Section label="Text">
           <div className="space-y-1.5">
@@ -361,9 +364,58 @@ function TypeFields({
               placeholder="body | section | title | caption"
               onCommit={(v) => void patch({ style: v })}
             />
+            <TextField
+              label="color"
+              value={color}
+              placeholder="ok | warn | alarm | #hex"
+              onCommit={(v) => void patch({ props: { color: v || null } })}
+            />
+            <TextField
+              label="size"
+              value={size}
+              placeholder="px"
+              onCommit={(v) => {
+                const n = Number(v)
+                void patch({ props: { size: v === "" || Number.isNaN(n) ? null : n } })
+              }}
+            />
           </div>
         </Section>
       )
+    }
+    case "shape": {
+      const fill = typeof node.props["fill"] === "string" ? (node.props["fill"] as string) : ""
+      const stroke = typeof node.props["stroke"] === "string" ? (node.props["stroke"] as string) : ""
+      const sw =
+        typeof node.props["stroke_width"] === "number" ? String(node.props["stroke_width"]) : ""
+      return (
+        <Section label="Shape">
+          <div className="space-y-1.5">
+            <TextField
+              label="fill"
+              value={fill}
+              placeholder="ok | warn | #hex | empty"
+              onCommit={(v) => void patch({ props: { fill: v || null } })}
+            />
+            <TextField
+              label="stroke"
+              value={stroke}
+              placeholder="color/token"
+              onCommit={(v) => void patch({ props: { stroke: v || null } })}
+            />
+            <TextField
+              label="width"
+              value={sw}
+              placeholder="px"
+              onCommit={(v) => {
+                const n = Number(v)
+                void patch({ props: { stroke_width: v === "" || Number.isNaN(n) ? null : n } })
+              }}
+            />
+          </div>
+        </Section>
+      )
+    }
     case "value":
     case "input":
       return (
@@ -460,15 +512,19 @@ function BindingsEditor({
 }) {
   const keys = useMemo(() => {
     const known: Record<string, string[]> = {
-      value: ["value"],
+      value: ["value", "color"],
       input: ["value"],
       symbol: symbolBindKeys(node),
+      text: ["text", "color"],
+      shape: ["fill", "stroke"],
       trend: [],
       alarmbar: [],
     }
     const base = known[node.type] ?? []
     const existing = Object.keys(node.bind)
-    return Array.from(new Set([...base, ...existing]))
+    // Every element can be condition-shown; keep `visible` last so the
+    // common keys stay on top.
+    return Array.from(new Set([...base, ...existing, "visible"]))
   }, [node])
 
   if (keys.length === 0) {
@@ -483,16 +539,26 @@ function BindingsEditor({
       {keys.map((k) => {
         const b = node.bind[k]
         const current = b == null ? "" : typeof b === "string" ? b : b.variable
+        const isSpec = b != null && typeof b !== "string"
         return (
           <TextField
             key={k}
-            label={k}
+            label={isSpec ? `${k}*` : k}
             value={current}
             placeholder="variable"
             list="hmi-vars"
-            onCommit={(v) =>
-              void patch({ bind: { [k]: v.trim() === "" ? null : v.trim() } })
-            }
+            onCommit={(v) => {
+              const name = v.trim()
+              // A spec binding (expr/format/map) keeps its transform when
+              // only the variable is renamed here; clearing removes it all.
+              const next =
+                name === ""
+                  ? null
+                  : isSpec
+                    ? { ...(b as object), variable: name }
+                    : name
+              void patch({ bind: { [k]: next } })
+            }}
           />
         )
       })}
@@ -504,15 +570,28 @@ function symbolBindKeys(node: HmiNode): string[] {
   if (node.type !== "symbol") return []
   switch (node.symbol) {
     case "tank":
-      return ["value", "alarm"]
+      return ["value", "alarm", "color"]
     case "valve":
       return ["open", "fault"]
     case "pump":
     case "motor":
       return ["running", "fault"]
+    case "fan":
+    case "conveyor":
+      return ["running", "fault"]
     case "gauge":
     case "setpoint":
+    case "sparkline":
       return ["value"]
+    case "analog":
+      return ["value", "sp"]
+    case "bar":
+    case "led":
+      return ["value", "color"]
+    case "pipe":
+    case "pipe_h":
+    case "pipe_v":
+      return ["flow", "color"]
     case "indicator":
       return ["on", "alarm"]
     default:

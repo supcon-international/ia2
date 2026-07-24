@@ -66,17 +66,52 @@ shows real values, which is the strongest self-review available.
 ## The document model, briefly
 
 Nodes are a closed set: `group` (absolute or simple flows), `text`,
-`value`, `symbol`, `trend`, `alarmbar`, `button`, `input`, `nav`, `shape`.
+`value`, `symbol`, `trend`, `alarmbar`, `button`, `input`, `nav`, `shape`
+(`rect` / `ellipse` / `line` / `polyline`).
 Coordinates live on a fixed grid (default 1280×800, snap 8) that every
 client letterboxes identically. `bind` maps a prop to a variable — a bare
 name in the common case, or `{"variable":"x_raw","expr":"x / 100",
 "format":"%.1f"}` for scaling; names resolve exactly like the Monitor's,
-including `instance.variable` on multi-PROGRAM runs. Expressions see only
+including `instance.variable` on multi-PROGRAM runs. When the same bare
+name exists in more than one PROGRAM the renderer shows "—" rather than
+guessing, and `check` tells you to qualify it. Expressions see only
 the single bound value `x` on purpose — logic that spans variables belongs
 in a POU, not hidden in a screen. `action` is the only write path
 (`write` / `toggle` / `pulse` / `set_value` / `nav`), every action is
 declared in the reviewable document, and `confirm` defaults to true —
 leave it on for anything that moves the plant.
+
+## Maps: values become colors and words, declaratively
+
+A binding spec can carry `map` — an ordered rule list applied after
+`expr`, first match wins: `{"eq":1,"out":"RUNNING"}` matches exactly,
+`{"min":80,"out":"alarm"}` and `{"min":50,"max":80,"out":"warn"}` match
+half-open `[min,max)` ranges, and an entry with no condition is the
+catch-all (put it last). The matched `out` string is the binding's output,
+and it is the only way a value becomes a color or a word — there is no
+scripting. Generic bind keys the renderer honors on top of each node's
+own: `visible` on every node (0 hides the element), `color` on
+`text`/`value`/`tank`/`bar`/`led`/`pipe`, `text` on text nodes, and
+`fill`/`stroke` on shapes. Color outputs should speak tokens — `ok`,
+`warn`, `alarm`, `info`, `muted`, `fg`, `agent` — which track the design
+system; any other string passes through as a literal CSS color when a
+brand truly needs it. `"format":"%s"` shows the raw value text, which is
+how STRING variables reach a screen.
+
+```bash
+# temperature readout that turns amber above 50 and red above 80
+echo '[{"op":"update_node","id":"temp_val","patch":{"bind":{"color":{
+  "variable":"temp_c","map":[
+    {"min":80,"out":"alarm"},{"min":50,"out":"warn"},{"out":"ok"}]}}}}]' \
+  | cs hmi op overview --from -
+
+# a state word instead of a number
+echo '[{"op":"add_node","node":{"id":"phase_lbl","type":"text","text":"—",
+  "x":80,"y":120,"style":"title",
+  "bind":{"text":{"variable":"phase","map":[
+    {"eq":0,"out":"IDLE"},{"eq":1,"out":"FILLING"},{"eq":2,"out":"CARBONATING"},
+    {"out":"?"}]}}}}]' | cs hmi op overview --from -
+```
 
 ## Style: high-performance HMI, already built in
 
@@ -88,6 +123,20 @@ resist decorating. One alarm bar per screen at the top; group by process
 area, reading left-to-right in flow order; use `level` honestly (1 plant
 overview → 4 diagnostic detail) and `nav` nodes to descend, rather than
 cramming levels together.
+
+Sixteen symbols (see `cs hmi symbols` for each one's contract). Beyond the
+original nine, reach for: `analog` — the moving analog indicator ISA-101
+prefers over gauges (scale + shaded normal band via `lo`/`hi` props + live
+pointer + `sp` bind for the setpoint tick); `bar` — linear fill, `h`/`v`;
+`led` — headline numeric on a dark plate for the one number the room reads
+from across the floor; `sparkline` — axis-less inline history; `pipe` —
+process line whose `flow` bind animates travel (sign flips direction, zero
+is still); `fan` and `conveyor` — spin/travel while running. Text nodes
+take `color`/`size`/`align`/`weight` props; shapes take
+`fill`/`stroke`/`stroke_width`/`rx`/`dash`. Motion is state, not
+decoration: running equipment spins, flowing lines travel, levels ease —
+and all of it is also legible from color alone (reduced-motion clients
+drop the animation, not the meaning).
 
 ## The screens travel with the project — the edge serves them
 

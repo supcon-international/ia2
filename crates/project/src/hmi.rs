@@ -35,6 +35,13 @@ pub const HMI_SYMBOLS: &[&str] = &[
     "gauge",
     "indicator",
     "setpoint",
+    "analog",
+    "bar",
+    "led",
+    "sparkline",
+    "pipe",
+    "fan",
+    "conveyor",
 ];
 
 fn default_hmi_version() -> u32 {
@@ -133,11 +140,17 @@ pub enum HmiNodeKind {
         #[serde(default)]
         children: Vec<HmiNode>,
     },
-    /// Static label. `style` picks one of the fixed text roles.
+    /// Static label. `style` picks one of the fixed text roles; `props`
+    /// optionally overrides presentation (`color`, `size`, `align`,
+    /// `weight`). Bind `text` (with a map) to turn it into a live state
+    /// label, `color` to recolor it by value.
     Text {
         text: String,
         #[serde(default)]
         style: HmiTextStyle,
+        #[serde(default)]
+        #[ts(type = "Record<string, unknown>")]
+        props: BTreeMap<String, serde_json::Value>,
     },
     /// Live readout: bind `value`; shows label, formatted value, unit.
     Value {
@@ -176,11 +189,16 @@ pub enum HmiNodeKind {
     },
     /// Jump to another screen by slug.
     Nav { label: String, target: String },
-    /// Minimal process graphics: rect vessels, line pipes.
+    /// Process graphics: rect/ellipse vessels, line/polyline pipes.
+    /// `props` styles the shape (`fill`, `stroke`, `stroke_width`, `rx`,
+    /// `dash`); bind `fill`/`stroke` (with maps) for state-driven color.
     Shape {
         shape: HmiShapeKind,
         #[serde(default)]
         points: Vec<[i32; 2]>,
+        #[serde(default)]
+        #[ts(type = "Record<string, unknown>")]
+        props: BTreeMap<String, serde_json::Value>,
     },
 }
 
@@ -210,6 +228,7 @@ pub enum HmiTextStyle {
 #[ts(export)]
 pub enum HmiShapeKind {
     Rect,
+    Ellipse,
     Line,
     Polyline,
 }
@@ -252,9 +271,32 @@ pub struct HmiBindingSpec {
     /// `x / 100`, `x > 50`. Evaluated client-side; no side effects.
     #[serde(default)]
     pub expr: Option<String>,
-    /// printf-ish: `%.1f`, `%d`. Applied after `expr`.
+    /// printf-ish: `%.1f`, `%d`, `%s` (raw value text). Applied after
+    /// `expr` when no map entry matches.
     #[serde(default)]
     pub format: Option<String>,
+    /// Value → output mapping, tried in order after `expr`; the first
+    /// matching entry wins. Outputs are strings — a color (token or CSS)
+    /// for color-class props, display text for text-class props. This is
+    /// the declarative equivalent of a SCADA "map transform": state
+    /// colors and state labels without scripting.
+    #[serde(default)]
+    pub map: Option<Vec<HmiMapEntry>>,
+}
+
+/// One map rule. `eq` matches exactly; otherwise `min`/`max` bound a
+/// half-open range `[min, max)` (either side may be omitted). An entry
+/// with no condition matches everything — put it last as the fallback.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct HmiMapEntry {
+    #[serde(default)]
+    pub eq: Option<f64>,
+    #[serde(default)]
+    pub min: Option<f64>,
+    #[serde(default)]
+    pub max: Option<f64>,
+    pub out: String,
 }
 
 /// The write path. Actions are the ONLY way a screen mutates the plant,
@@ -720,6 +762,25 @@ pub fn validate_hmi(doc: &HmiDoc) -> Vec<HmiIssue> {
                 }
             }
         }
+        for (prop, b) in &n.bind {
+            let HmiBinding::Spec(spec) = b else { continue };
+            for (i, entry) in spec.map.iter().flatten().enumerate() {
+                if entry.out.trim().is_empty() {
+                    issues.push(err(
+                        Some(&n.id),
+                        format!("bind '{prop}': map entry #{i} has empty out"),
+                    ));
+                }
+                if let (Some(lo), Some(hi)) = (entry.min, entry.max) {
+                    if lo > hi {
+                        issues.push(err(
+                            Some(&n.id),
+                            format!("bind '{prop}': map entry #{i} min {lo} > max {hi}"),
+                        ));
+                    }
+                }
+            }
+        }
     });
     issues
 }
@@ -1082,6 +1143,7 @@ mod tests {
             HmiNodeKind::Text {
                 text: "Just a label".into(),
                 style: HmiTextStyle::Body,
+                props: BTreeMap::new(),
             },
         );
         label.action.insert("tap".into(), write.clone());
@@ -1195,6 +1257,72 @@ mod tests {
     }
 
     #[test]
+    fn map_binding_round_trips_and_validates() {
+        let mut doc = empty_hmi("t");
+        let mut v = node(
+            "v",
+            HmiNodeKind::Value {
+                label: Some("Temp".into()),
+                unit: Some("°C".into()),
+            },
+        );
+        v.bind.insert(
+            "color".into(),
+            HmiBinding::Spec(HmiBindingSpec {
+                variable: "temp".into(),
+                expr: None,
+                format: None,
+                map: Some(vec![
+                    HmiMapEntry {
+                        eq: None,
+                        min: Some(80.0),
+                        max: None,
+                        out: "alarm".into(),
+                    },
+                    HmiMapEntry {
+                        eq: None,
+                        min: None,
+                        max: None,
+                        out: "ok".into(),
+                    },
+                ]),
+            }),
+        );
+        apply_hmi_ops(
+            &mut doc,
+            &[HmiOp::AddNode {
+                parent: None,
+                node: v,
+                index: None,
+            }],
+        )
+        .unwrap();
+        let json = serde_json::to_string(&doc).unwrap();
+        let back: HmiDoc = serde_json::from_str(&json).unwrap();
+        assert_eq!(doc, back);
+        assert!(validate_hmi(&doc).is_empty());
+
+        // Inverted range and empty out are structural errors.
+        apply_hmi_ops(
+            &mut doc,
+            &[HmiOp::UpdateNode {
+                id: "v".into(),
+                patch: serde_json::json!({ "bind": { "color": {
+                    "variable": "temp",
+                    "map": [
+                        { "min": 50.0, "max": 10.0, "out": "warn" },
+                        { "out": "" }
+                    ]
+                } } }),
+            }],
+        )
+        .unwrap();
+        let issues = validate_hmi(&doc);
+        assert!(issues.iter().any(|i| i.message.contains("min 50 > max 10")));
+        assert!(issues.iter().any(|i| i.message.contains("empty out")));
+    }
+
+    #[test]
     fn variables_are_collected_from_all_surfaces() {
         let mut doc = empty_hmi("t");
         let mut v = node(
@@ -1210,6 +1338,7 @@ mod tests {
                 variable: "a".into(),
                 expr: Some("x / 10".into()),
                 format: None,
+                map: None,
             }),
         );
         v.action.insert(

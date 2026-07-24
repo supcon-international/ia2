@@ -232,11 +232,23 @@ pub(crate) fn check_hmi_doc(store: &ProjectStore, doc: &HmiDoc) -> Result<Vec<Hm
     // the bare tail so both spellings pass.
     let tail_of = |var: &str| var.rsplit('.').next().unwrap_or(var).to_string();
     for (node_id, var) in hmi_variables(doc) {
-        if !known.contains_key(&tail_of(&var)) {
-            issues.push(hmi_warn(
+        match known.get(&tail_of(&var)) {
+            None => issues.push(hmi_warn(
                 node_id,
                 format!("variable '{var}' not found in any POU"),
-            ));
+            )),
+            // A bare name declared in more than one POU is a trap: the
+            // renderer refuses ambiguous tail matches, so the element
+            // would show "—". Say so at check time. (One declaration
+            // per POU, so the direction list's length IS the POU count.)
+            Some(dirs) if dirs.len() > 1 && !var.contains('.') => issues.push(hmi_warn(
+                node_id,
+                format!(
+                    "variable '{var}' exists in {} POUs — qualify it as instance.variable",
+                    dirs.len()
+                ),
+            )),
+            _ => {}
         }
     }
     for (node_id, var) in hmi_write_variables(doc) {
@@ -383,6 +395,69 @@ pub fn symbol_catalog() -> Vec<HmiSymbolInfo> {
             &["value"],
             &["label: string", "unit: string"],
             [140, 32],
+        ),
+        sym(
+            "analog",
+            "Moving analog indicator — vertical scale with a normal band and a live pointer (ISA-101's preferred analog display).",
+            &["value", "sp"],
+            &[
+                "min: number (default 0)",
+                "max: number (default 100)",
+                "lo: number (normal band low)",
+                "hi: number (normal band high)",
+                "label: string",
+                "unit: string",
+            ],
+            [72, 180],
+        ),
+        sym(
+            "bar",
+            "Linear fill bar for a scaled value; horizontal or vertical.",
+            &["value", "color"],
+            &[
+                "min: number (default 0)",
+                "max: number (default 100)",
+                "orientation: h|v (default h)",
+                "label: string",
+                "unit: string",
+                "color: string (fill color/token)",
+            ],
+            [180, 44],
+        ),
+        sym(
+            "led",
+            "Large numeric readout for headline process values; bind `color` (with a map) for state coloring.",
+            &["value", "color"],
+            &["label: string", "unit: string"],
+            [180, 72],
+        ),
+        sym(
+            "sparkline",
+            "Inline mini-trend of one variable, no axes — recent history at a glance.",
+            &["value"],
+            &["label: string"],
+            [160, 48],
+        ),
+        sym(
+            "pipe",
+            "Process line with a live flow animation — bind `flow`; nonzero animates (negative reverses).",
+            &["flow", "color"],
+            &["orientation: h|v (default h)", "color: string"],
+            [160, 10],
+        ),
+        sym(
+            "fan",
+            "Fan / blower — blades spin while running.",
+            &["running", "fault"],
+            &["label: string"],
+            [56, 56],
+        ),
+        sym(
+            "conveyor",
+            "Belt conveyor — surface stripes travel while running.",
+            &["running", "fault"],
+            &["label: string", "reverse: bool"],
+            [200, 36],
         ),
     ]
 }
@@ -639,6 +714,7 @@ fn build_generated(store: &ProjectStore, title: &str) -> Result<HmiDoc, ApiError
             HmiNodeKind::Text {
                 text: pou_path.clone(),
                 style: project::HmiTextStyle::Section,
+                props: BTreeMap::new(),
             },
             sec_x,
             y,

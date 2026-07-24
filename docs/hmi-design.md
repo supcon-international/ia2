@@ -180,6 +180,64 @@ directions — all surfaced as the same `CheckDiagnostic` shape the compile
 path uses, so `cs hmi check` and `/api/project/validate` fold HMI problems
 into the existing diagnostics story.
 
+## The expressiveness layer: maps, state color, motion
+
+The v1 vocabulary proved the model but capped what a screen could *say*: nine
+symbols, hard-coded colors, no way to express "above 80 °C this number turns
+red" without abusing an alarm bind. The expressiveness layer closes that gap
+against the commercial web-SCADA baseline (Ignition Perspective's
+binding-transform system was the reference) while refusing its scripting —
+everything below is still declarative data in the document, validated by
+`validate_hmi`, reviewable in a diff.
+
+**Maps.** A binding spec may carry `map`, an ordered list of rules evaluated
+after `expr`: `{ "eq": 1, "out": "RUNNING" }` matches exactly,
+`{ "min": 80, "out": "alarm" }` / `{ "min": 50, "max": 80, "out": "warn" }`
+match a half-open `[min, max)` range, and a condition-less entry is the
+catch-all. The first match wins and its `out` string becomes the binding's
+output. This is the declarative equivalent of Ignition's map transform, and
+it is the *only* way a value becomes a color or a word — no scripts, no
+per-client logic to drift.
+
+**Where map outputs land.** The renderer understands a small set of
+generic bind keys on top of each node's own: `visible` on every node
+(0 hides in Operate; Arrange ghosts it so it stays editable), `color` on
+`text`/`value` and on symbols that take an accent (tank liquid, bar fill,
+led digits, pipe stream), `text` on `text` nodes (a mapped state label:
+0→"STOPPED", 1→"RUNNING"), and `fill`/`stroke` on shapes. Color outputs
+speak the token vocabulary — `ok`, `warn`, `alarm`, `info`, `muted`, `fg`,
+`agent` map to the design system's CSS variables so screens follow theme
+changes; any other string passes through as a literal CSS color as the
+deliberate escape hatch. `%s` as a format shows the raw snapshot text,
+which is how STRING variables reach a screen.
+
+**Style props.** `text` accepts `color`, `size`, `align`, `weight`;
+`shape` accepts `fill`, `stroke`, `stroke_width`, `rx`, `dash` and adds an
+`ellipse` kind — enough free-form P&ID drawing to compose what the symbol
+library doesn't ship, without opening an arbitrary-SVG door.
+
+**The symbol library, round two.** Seven additions, each earning its place
+against a named competitor feature rather than padding the count: `analog`
+(the moving analog indicator ISA-101 actually prefers over gauges — scale,
+shaded normal band, live pointer, setpoint tick), `bar` (linear fill, h/v),
+`led` (headline numeric on a dark plate), `sparkline` (axis-less inline
+history), `pipe` (process line whose `flow` bind animates travel, sign =
+direction), `fan` (blades spin while running) and `conveyor` (stripes
+travel while running). Sixteen total.
+
+**Motion.** Running equipment spins (`pump`, `fan`), flowing lines travel
+(`pipe`, `conveyor`), levels ease between samples (tank fill, bar, analog
+pointer). Motion is state, not decoration — everything it says is also said
+by color/shape, and `prefers-reduced-motion` turns all of it off.
+
+**Binding reliability, hardened.** Tail-name resolution
+(`level` matching `feeder.level`) now requires the tail to be *unique* in
+the snapshot — two programs both owning a `temp` render "—" instead of
+whichever serialized first, and `cs hmi check` warns "exists in N POUs —
+qualify as instance.variable" at authoring time. Non-finite results
+(`x / 0`, STRING parsed as number) resolve to null, never to "Infinity" on
+an operator screen.
+
 ## Architecture: who does what
 
 **`project` crate** — schema types (ts-rs exported), store CRUD for

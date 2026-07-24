@@ -11,6 +11,7 @@
  */
 
 import { cn } from "@/lib/utils"
+import { cssColor } from "@/lib/hmi-binding"
 
 export type SymbolLive = Record<string, number | null>
 
@@ -20,6 +21,11 @@ type Props = {
   h: number
   live: SymbolLive
   props: Record<string, unknown>
+  /** Resolved color from the node's `color` bind (map output), when set.
+   *  Wins over `props.color`; both fall back to the symbol default. */
+  liveColor?: string | null
+  /** Recent samples for history-drawing symbols (sparkline). */
+  history?: number[]
 }
 
 const on = (v: number | null | undefined) => (v ?? 0) !== 0
@@ -29,10 +35,30 @@ function label(props: Record<string, unknown>): string | null {
   return typeof l === "string" && l.length > 0 ? l : null
 }
 
-export function HmiSymbol({ symbol, w, h, live, props }: Props) {
+function num(props: Record<string, unknown>, key: string, dflt: number): number {
+  const v = props[key]
+  return typeof v === "number" && Number.isFinite(v) ? v : dflt
+}
+
+function str(props: Record<string, unknown>, key: string): string | null {
+  const v = props[key]
+  return typeof v === "string" && v.length > 0 ? v : null
+}
+
+/** Effective accent color for a symbol: live map output, then the static
+ *  prop, then the given default — always run through the token table. */
+function accent(
+  liveColor: string | null | undefined,
+  props: Record<string, unknown>,
+  dflt: string,
+): string {
+  return cssColor(liveColor ?? str(props, "color") ?? dflt)
+}
+
+export function HmiSymbol({ symbol, w, h, live, props, liveColor, history }: Props) {
   switch (symbol) {
     case "tank":
-      return <Tank w={w} h={h} live={live} props={props} />
+      return <Tank w={w} h={h} live={live} props={props} liveColor={liveColor} />
     case "valve":
       return <Valve w={w} h={h} live={live} props={props} />
     case "pump":
@@ -40,15 +66,29 @@ export function HmiSymbol({ symbol, w, h, live, props }: Props) {
     case "motor":
       return <RoundMachine w={w} h={h} live={live} props={props} kind="motor" />
     case "pipe_h":
-      return <div className="h-[6px] w-full rounded-full bg-muted-foreground/30" />
+      return <Pipe live={live} props={{ ...props, orientation: "h" }} liveColor={liveColor} />
     case "pipe_v":
-      return <div className="h-full w-[6px] rounded-full bg-muted-foreground/30" />
+      return <Pipe live={live} props={{ ...props, orientation: "v" }} liveColor={liveColor} />
+    case "pipe":
+      return <Pipe live={live} props={props} liveColor={liveColor} />
     case "gauge":
       return <Gauge w={w} h={h} live={live} props={props} />
     case "indicator":
       return <Indicator live={live} props={props} />
     case "setpoint":
       return <SetpointChip live={live} props={props} />
+    case "analog":
+      return <Analog w={w} h={h} live={live} props={props} />
+    case "bar":
+      return <Bar h={h} live={live} props={props} liveColor={liveColor} />
+    case "led":
+      return <Led live={live} props={props} liveColor={liveColor} />
+    case "sparkline":
+      return <Sparkline w={w} h={h} live={live} props={props} history={history ?? []} />
+    case "fan":
+      return <Fan w={w} h={h} live={live} props={props} />
+    case "conveyor":
+      return <Conveyor h={h} live={live} props={props} />
     default:
       // Unknown symbol: visible placeholder, never a silent hole —
       // validate warns about it too.
@@ -60,21 +100,25 @@ export function HmiSymbol({ symbol, w, h, live, props }: Props) {
   }
 }
 
-/** Vessel with a live fill (0-100) and an alarm ring. */
+/** Vessel with a live fill (0-100) and an alarm ring. The fill level
+ *  eases between samples; a `color` bind/prop recolors the liquid. */
 function Tank({
   w,
   h,
   live,
   props,
+  liveColor,
 }: {
   w: number
   h: number
   live: SymbolLive
   props: Record<string, unknown>
+  liveColor?: string | null
 }) {
   const pct = Math.max(0, Math.min(100, live["value"] ?? 0))
   const alarm = on(live["alarm"])
   const unit = typeof props["unit"] === "string" ? (props["unit"] as string) : "%"
+  const liquid = liveColor ?? str(props, "color")
   const bodyH = h - 18
   const fillH = (bodyH - 4) * (pct / 100)
   return (
@@ -98,7 +142,11 @@ function Tank({
           width={w - 6}
           height={fillH}
           rx={6}
-          className={cn("fill-trend/25", alarm && "fill-destructive/20")}
+          className={cn(
+            "hmi-ease-geom",
+            !liquid && (alarm ? "fill-destructive/20" : "fill-trend/25"),
+          )}
+          style={liquid ? { fill: cssColor(liquid), opacity: 0.3 } : undefined}
         />
         <text
           x={w / 2}
@@ -208,7 +256,9 @@ function RoundMachine({
             d={`M${s / 2} ${s / 2} L${s / 2 + r * 0.8} ${s / 2 - r * 0.45} M${s / 2} ${s / 2} L${s / 2 - r * 0.2} ${s / 2 - r * 0.85}`}
             className={cn(
               "stroke-[1.5]",
-              running ? "stroke-highlight-foreground" : "stroke-muted-foreground",
+              running
+                ? "hmi-spin stroke-highlight-foreground"
+                : "stroke-muted-foreground",
             )}
             strokeLinecap="round"
           />
@@ -313,6 +363,417 @@ function Indicator({
       >
         {label(props) ?? "—"}
       </span>
+    </div>
+  )
+}
+
+/** Moving analog indicator — ISA-101's preferred analog display: a
+ *  vertical scale with a shaded normal band, a live pointer, and an
+ *  optional setpoint tick. Out-of-band values pull attention because the
+ *  pointer leaves the band, not because anything flashes. */
+function Analog({
+  w,
+  h,
+  live,
+  props,
+}: {
+  w: number
+  h: number
+  live: SymbolLive
+  props: Record<string, unknown>
+}) {
+  const min = num(props, "min", 0)
+  const max = num(props, "max", 100)
+  const span = max - min || 1
+  const lo = num(props, "lo", NaN)
+  const hi = num(props, "hi", NaN)
+  const unit = str(props, "unit") ?? ""
+  const lbl = label(props)
+  const svgH = h - (lbl ? 16 : 0)
+  const top = 8
+  const bottom = svgH - 8
+  const railX = 18
+  const yFor = (v: number) =>
+    bottom - ((Math.max(min, Math.min(max, v)) - min) / span) * (bottom - top)
+  const v = live["value"]
+  const sp = live["sp"]
+  const inBand =
+    v == null || !Number.isFinite(lo) || !Number.isFinite(hi)
+      ? true
+      : v >= lo && v <= hi
+  return (
+    <div className="flex h-full w-full flex-col items-center">
+      <svg width={w} height={svgH} viewBox={`0 0 ${w} ${svgH}`}>
+        <line
+          x1={railX}
+          y1={top}
+          x2={railX}
+          y2={bottom}
+          className="stroke-muted-foreground/40"
+          strokeWidth={2}
+        />
+        {Number.isFinite(lo) && Number.isFinite(hi) && (
+          <rect
+            x={railX - 5}
+            y={yFor(hi)}
+            width={10}
+            height={Math.max(0, yFor(lo) - yFor(hi))}
+            className="fill-muted-foreground/20"
+            rx={2}
+          />
+        )}
+        {sp != null && (
+          <line
+            x1={railX - 8}
+            y1={yFor(sp)}
+            x2={railX + 8}
+            y2={yFor(sp)}
+            className="stroke-trend"
+            strokeWidth={2}
+          />
+        )}
+        {v != null && (
+          <g className="hmi-ease-transform" transform={`translate(0 ${yFor(v)})`}>
+            <path
+              d={`M${railX - 12} 0 L${railX - 4} -5 L${railX - 4} 5 Z`}
+              className={cn(inBand ? "fill-foreground" : "fill-destructive")}
+            />
+            <text
+              x={railX + 14}
+              y={4}
+              className={cn(
+                "font-mono text-[12px]",
+                inBand ? "fill-foreground" : "fill-destructive",
+              )}
+            >
+              {v.toFixed(Number.isInteger(v) ? 0 : 1)}
+              {unit}
+            </text>
+          </g>
+        )}
+        {v == null && (
+          <text x={railX + 14} y={(top + bottom) / 2} className="fill-muted-foreground font-mono text-[12px]">
+            —
+          </text>
+        )}
+      </svg>
+      {lbl && (
+        <div className="font-mono text-[10px] text-muted-foreground">{lbl}</div>
+      )}
+    </div>
+  )
+}
+
+/** Linear fill bar, horizontal or vertical. */
+function Bar({
+  h,
+  live,
+  props,
+  liveColor,
+}: {
+  h: number
+  live: SymbolLive
+  props: Record<string, unknown>
+  liveColor?: string | null
+}) {
+  const min = num(props, "min", 0)
+  const max = num(props, "max", 100)
+  const span = max - min || 1
+  const vertical = str(props, "orientation") === "v"
+  const v = live["value"]
+  const frac =
+    v == null ? 0 : Math.max(0, Math.min(1, (v - min) / span))
+  const fill = accent(liveColor, props, "info")
+  const unit = str(props, "unit") ?? ""
+  const lbl = label(props)
+  const text = v == null ? "—" : `${v.toFixed(Number.isInteger(v) ? 0 : 1)}${unit}`
+  const barH = vertical ? h - (lbl ? 16 : 0) - 16 : undefined
+  return (
+    <div
+      className={cn(
+        "flex h-full w-full gap-1.5",
+        vertical ? "flex-col items-center" : "flex-col justify-center",
+      )}
+    >
+      {!vertical && (lbl || true) && (
+        <div className="flex items-baseline justify-between">
+          {lbl && (
+            <span className="font-mono text-[10px] text-muted-foreground">{lbl}</span>
+          )}
+          <span className="font-mono text-[11px] text-foreground">{text}</span>
+        </div>
+      )}
+      {vertical ? (
+        <>
+          <span className="font-mono text-[11px] text-foreground">{text}</span>
+          <div
+            className="w-[14px] overflow-hidden rounded-full bg-muted-foreground/15"
+            style={{ height: barH }}
+          >
+            <div
+              className="hmi-ease-size w-full rounded-full"
+              style={{
+                height: `${frac * 100}%`,
+                marginTop: `${(1 - frac) * 100}%`,
+                background: fill,
+              }}
+            />
+          </div>
+          {lbl && (
+            <span className="font-mono text-[10px] text-muted-foreground">{lbl}</span>
+          )}
+        </>
+      ) : (
+        <div className="h-[10px] w-full overflow-hidden rounded-full bg-muted-foreground/15">
+          <div
+            className="hmi-ease-size h-full rounded-full"
+            style={{ width: `${frac * 100}%`, background: fill }}
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Headline numeric readout — dark plate, large mono digits. Bind
+ *  `color` (with a map) to state-color the digits. */
+function Led({
+  live,
+  props,
+  liveColor,
+}: {
+  live: SymbolLive
+  props: Record<string, unknown>
+  liveColor?: string | null
+}) {
+  const v = live["value"]
+  const unit = str(props, "unit") ?? ""
+  const lbl = label(props)
+  const color = liveColor ?? str(props, "color")
+  return (
+    <div className="flex h-full w-full flex-col justify-center overflow-hidden rounded-md border border-border bg-[#14181c] px-3 py-1.5">
+      {lbl && (
+        <div className="font-mono text-[9px] uppercase tracking-wider text-[#9aa39b]">
+          {lbl}
+        </div>
+      )}
+      <div className="flex items-baseline gap-1.5">
+        <span
+          className="font-mono text-[26px] font-semibold leading-tight"
+          style={{ color: color ? cssColor(color) : "#f4f6f3" }}
+        >
+          {v == null ? "—" : v.toFixed(Number.isInteger(v) ? 0 : 1)}
+        </span>
+        {unit && <span className="font-mono text-[11px] text-[#9aa39b]">{unit}</span>}
+      </div>
+    </div>
+  )
+}
+
+/** Inline mini-trend: the recent history of one bound variable, no axes. */
+function Sparkline({
+  w,
+  h,
+  live,
+  props,
+  history,
+}: {
+  w: number
+  h: number
+  live: SymbolLive
+  props: Record<string, unknown>
+  history: number[]
+}) {
+  const lbl = label(props)
+  const svgH = h - (lbl ? 14 : 0)
+  const pts = history.length >= 2 ? history : [0, 0]
+  let lo = Math.min(...pts)
+  let hi = Math.max(...pts)
+  if (hi - lo < 1e-9) {
+    lo -= 1
+    hi += 1
+  }
+  const step = w / (pts.length - 1)
+  const d = pts
+    .map(
+      (v, i) =>
+        `${i === 0 ? "M" : "L"}${(i * step).toFixed(1)} ${(
+          svgH - 3 - ((v - lo) / (hi - lo)) * (svgH - 6)
+        ).toFixed(1)}`,
+    )
+    .join(" ")
+  const v = live["value"]
+  return (
+    <div className="flex h-full w-full flex-col">
+      <svg width={w} height={svgH} viewBox={`0 0 ${w} ${svgH}`}>
+        <path d={d} className="fill-none stroke-trend" strokeWidth={1.5} />
+      </svg>
+      {lbl && (
+        <div className="flex items-baseline justify-between font-mono text-[10px] text-muted-foreground">
+          <span>{lbl}</span>
+          <span className="text-foreground">
+            {v == null ? "—" : v.toFixed(Number.isInteger(v) ? 0 : 1)}
+          </span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Process line. Bind `flow`: nonzero animates travel (sign sets the
+ *  direction); zero/unbound renders the familiar static line. */
+function Pipe({
+  live,
+  props,
+  liveColor,
+}: {
+  live: SymbolLive
+  props: Record<string, unknown>
+  liveColor?: string | null
+}) {
+  const vertical = str(props, "orientation") === "v"
+  const flow = live["flow"] ?? 0
+  const color = accent(liveColor, props, "muted")
+  const moving = flow !== 0
+  const base = vertical ? "h-full w-[6px]" : "h-[6px] w-full"
+  if (!moving) {
+    return (
+      <div
+        className={cn(base, "rounded-full")}
+        style={{ background: color === cssColor("muted") ? "color-mix(in oklab, var(--muted-foreground) 30%, transparent)" : color }}
+      />
+    )
+  }
+  const grad = vertical
+    ? `repeating-linear-gradient(180deg, ${color} 0 6px, transparent 6px 14px)`
+    : `repeating-linear-gradient(90deg, ${color} 0 6px, transparent 6px 14px)`
+  return (
+    <div className={cn(base, "relative overflow-hidden rounded-full")}>
+      <div
+        className="absolute inset-0 rounded-full"
+        style={{ background: "color-mix(in oklab, var(--muted-foreground) 18%, transparent)" }}
+      />
+      <div
+        className={cn(
+          "absolute inset-0",
+          vertical
+            ? flow < 0
+              ? "hmi-flow-v-rev"
+              : "hmi-flow-v"
+            : flow < 0
+              ? "hmi-flow-rev"
+              : "hmi-flow",
+        )}
+        style={{ background: grad, backgroundSize: vertical ? "6px 14px" : "14px 6px" }}
+      />
+    </div>
+  )
+}
+
+/** Fan / blower — three blades, spinning while running. */
+function Fan({
+  w,
+  h,
+  live,
+  props,
+}: {
+  w: number
+  h: number
+  live: SymbolLive
+  props: Record<string, unknown>
+}) {
+  const running = on(live["running"])
+  const fault = on(live["fault"])
+  const s = Math.min(w, h - (label(props) ? 14 : 0))
+  const c = s / 2
+  const r = s / 2 - 2
+  const blade = (angle: number) =>
+    `rotate(${angle} ${c} ${c})`
+  return (
+    <div className="flex h-full w-full flex-col items-center justify-center">
+      <svg width={s} height={s} viewBox={`0 0 ${s} ${s}`}>
+        <circle
+          cx={c}
+          cy={c}
+          r={r}
+          className={cn(
+            "fill-card",
+            fault
+              ? "stroke-destructive"
+              : running
+                ? "stroke-highlight"
+                : "stroke-muted-foreground/70",
+          )}
+          strokeWidth={fault ? 2 : 1.5}
+        />
+        <g className={cn(running && "hmi-spin")}>
+          {[0, 120, 240].map((a) => (
+            <ellipse
+              key={a}
+              cx={c}
+              cy={c - r * 0.45}
+              rx={r * 0.22}
+              ry={r * 0.42}
+              transform={blade(a)}
+              className={cn(
+                running ? "fill-highlight/80" : "fill-muted-foreground/40",
+              )}
+            />
+          ))}
+          <circle cx={c} cy={c} r={r * 0.16} className="fill-muted-foreground" />
+        </g>
+      </svg>
+      {label(props) && (
+        <div className="font-mono text-[10px] text-muted-foreground">
+          {label(props)}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Belt conveyor, side view — stripes travel while running. */
+function Conveyor({
+  h,
+  live,
+  props,
+}: {
+  h: number
+  live: SymbolLive
+  props: Record<string, unknown>
+}) {
+  const running = on(live["running"])
+  const fault = on(live["fault"])
+  const reverse = props["reverse"] === true
+  const lbl = label(props)
+  const beltH = Math.min(h - (lbl ? 14 : 0), 28)
+  const stripes = `repeating-linear-gradient(90deg, color-mix(in oklab, var(--muted-foreground) 35%, transparent) 0 3px, transparent 3px 12px)`
+  return (
+    <div className="flex h-full w-full flex-col items-center justify-center">
+      <div
+        className={cn(
+          "relative w-full overflow-hidden rounded-full border",
+          fault
+            ? "border-destructive"
+            : running
+              ? "border-highlight"
+              : "border-muted-foreground/50",
+        )}
+        style={{ height: beltH }}
+      >
+        <div
+          className={cn(
+            "absolute inset-0",
+            running && (reverse ? "hmi-flow-rev" : "hmi-flow"),
+          )}
+          style={{ background: stripes, backgroundSize: "12px 100%" }}
+        />
+        <div className="absolute left-[6px] top-1/2 size-[10px] -translate-y-1/2 rounded-full border border-muted-foreground/60" />
+        <div className="absolute right-[6px] top-1/2 size-[10px] -translate-y-1/2 rounded-full border border-muted-foreground/60" />
+      </div>
+      {lbl && (
+        <div className="mt-0.5 font-mono text-[10px] text-muted-foreground">{lbl}</div>
+      )}
     </div>
   )
 }

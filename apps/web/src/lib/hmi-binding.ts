@@ -13,6 +13,7 @@
  */
 
 import type { HmiBinding } from "@/types/generated/HmiBinding"
+import type { HmiMapEntry } from "@/types/generated/HmiMapEntry"
 import type { VarSnapshot } from "@/types/generated/VarSnapshot"
 
 export function bindingVariable(b: HmiBinding): string {
@@ -20,7 +21,10 @@ export function bindingVariable(b: HmiBinding): string {
 }
 
 /** Resolve a variable name against the snapshot: exact match, else match
- *  on the tail after the last `.` (multi-PROGRAM `instance.variable`). */
+ *  on the tail after the last `.` (multi-PROGRAM `instance.variable`) —
+ *  but ONLY when that tail is unambiguous. Two programs both owning a
+ *  `level` must show "—", not whichever happened to serialize first;
+ *  `cs hmi check` flags the ambiguity so it gets qualified, not guessed. */
 export function lookupVar(
   snapshot: VarSnapshot | null,
   name: string,
@@ -29,10 +33,12 @@ export function lookupVar(
   const exact = snapshot.vars.find((v) => v.name === name)
   if (exact) return { raw: exact.value, type_name: exact.type_name }
   const tail = name.split(".").pop() ?? name
-  const byTail = snapshot.vars.find(
+  const hits = snapshot.vars.filter(
     (v) => (v.name.split(".").pop() ?? v.name) === tail,
   )
-  return byTail ? { raw: byTail.value, type_name: byTail.type_name } : null
+  return hits.length === 1
+    ? { raw: hits[0].value, type_name: hits[0].type_name }
+    : null
 }
 
 /** Snapshot values arrive as display strings ("TRUE", "42", "3.14").
@@ -45,44 +51,118 @@ export function toNumber(raw: string): number {
   return Number.isFinite(n) ? n : NaN
 }
 
-/** Resolve a full binding to its numeric value (post-expr). Non-finite
- *  results — a non-numeric variable, a divide-by-zero expr — collapse
- *  to null so consumers (symbols, readouts) fall back to their
- *  unresolved state instead of propagating NaN/Infinity. */
+/** Everything a binding can produce: the post-expr number (null when the
+ *  variable is unresolved, ambiguous, non-numeric, or the expr failed /
+ *  overflowed — never NaN/Infinity), the first matching map output, and
+ *  the raw snapshot text + type (for `%s`, STRING and BOOL display). */
+export type ResolvedOutput = {
+  num: number | null
+  out: string | null
+  raw: string | null
+  type_name: string | null
+}
+
+export function resolveOutput(
+  snapshot: VarSnapshot | null,
+  b: HmiBinding,
+): ResolvedOutput {
+  const found = lookupVar(snapshot, bindingVariable(b))
+  if (!found) return { num: null, out: null, raw: null, type_name: null }
+  let value = toNumber(found.raw)
+  const spec = typeof b === "string" ? null : b
+  if (spec?.expr && Number.isFinite(value)) {
+    const v = evalExpr(spec.expr, value)
+    value = v === null ? NaN : v
+  }
+  if (!Number.isFinite(value)) {
+    // STRING variables, parse failures, division blow-ups: no number to
+    // format or map — callers show the raw text or an em-dash.
+    return { num: null, out: null, raw: found.raw, type_name: found.type_name }
+  }
+  const out = spec?.map ? applyMap(spec.map, value) : null
+  return { num: value, out, raw: found.raw, type_name: found.type_name }
+}
+
+/** Resolve a full binding to its numeric value (post-expr). */
 export function resolveBinding(
   snapshot: VarSnapshot | null,
   b: HmiBinding,
 ): number | null {
-  const found = lookupVar(snapshot, bindingVariable(b))
-  if (!found) return null
-  let value = toNumber(found.raw)
-  if (typeof b !== "string" && b.expr) {
-    const out = evalExpr(b.expr, value)
-    if (out === null) return null
-    value = out
-  }
-  return Number.isFinite(value) ? value : null
+  return resolveOutput(snapshot, b).num
 }
 
-/** Resolve a binding for the value/input readout — the contract is a
- *  numeric/boolean/STRING display, so unlike the numeric-only
- *  `resolveBinding` this surfaces non-numeric variables as text:
- *  STRING values show their content (quotes stripped), hex bit-field
- *  literals (`16#1637`) pass through verbatim, BOOLs read TRUE/FALSE.
- *  Exprs stay numeric; non-finite results stay null (em-dash). */
-export function resolveDisplay(
+/** First matching map entry's output. `eq` matches exactly; otherwise
+ *  `[min, max)` with either side optional; a condition-less entry is the
+ *  catch-all — order the list accordingly. */
+export function applyMap(entries: HmiMapEntry[], value: number): string | null {
+  for (const e of entries) {
+    if (e.eq != null) {
+      if (value === e.eq) return e.out
+      continue
+    }
+    if (e.min != null && value < e.min) continue
+    if (e.max != null && value >= e.max) continue
+    return e.out
+  }
+  return null
+}
+
+/** Strip the ST string-literal quotes from a raw snapshot value. */
+function stripQuotes(raw: string): string {
+  const quoted = /^'(.*)'$/.exec(raw.trim())
+  return quoted ? quoted[1] : raw.trim()
+}
+
+/** Display text for a binding, in priority order: map output; `%s` (raw
+ *  snapshot text, quotes stripped); explicit numeric format; BOOLs as
+ *  TRUE/FALSE; non-numeric variables (STRING content, `16#…` bit-field
+ *  literals) verbatim; then the compact numeric default. Null = "—"
+ *  (unresolved variable, or an expr that failed / blew up — an expr
+ *  declares numeric intent, so its failures never fall back to text). */
+export function displayBinding(
   snapshot: VarSnapshot | null,
   b: HmiBinding,
-): number | string | null {
-  if (typeof b !== "string" && b.expr) return resolveBinding(snapshot, b)
-  const found = lookupVar(snapshot, bindingVariable(b))
-  if (!found) return null
-  const raw = found.raw.trim()
-  if (found.type_name.toUpperCase() === "BOOL") return raw.toUpperCase()
-  const n = toNumber(raw)
-  if (Number.isFinite(n)) return n
-  const quoted = /^'(.*)'$/.exec(raw)
-  return quoted ? quoted[1] : raw
+): string | null {
+  const r = resolveOutput(snapshot, b)
+  if (r.out !== null) return r.out
+  if (r.raw === null) return null
+  const spec = typeof b === "string" ? null : b
+  const fmt = spec?.format ?? null
+  if (fmt === "%s") return stripQuotes(r.raw)
+  if (r.num === null) {
+    return spec?.expr ? null : stripQuotes(r.raw)
+  }
+  if (!fmt && r.type_name?.toUpperCase() === "BOOL") {
+    return r.raw.trim().toUpperCase()
+  }
+  return formatBinding(b, r.num)
+}
+
+/** Color for a color-class prop (`color`, `fill`, `stroke`): only a map
+ *  can produce one — a bare number is not a color. Null = default style. */
+export function colorBinding(
+  snapshot: VarSnapshot | null,
+  b: HmiBinding,
+): string | null {
+  return resolveOutput(snapshot, b).out
+}
+
+/** Named state-color tokens → the design system's CSS variables; any
+ *  other string passes through as a literal CSS color. Screens SHOULD
+ *  speak tokens (they follow theme changes); literals are the escape
+ *  hatch for brand/one-off needs. */
+const COLOR_TOKENS: Record<string, string> = {
+  ok: "var(--highlight)",
+  warn: "var(--warn)",
+  alarm: "var(--destructive)",
+  info: "var(--trend)",
+  muted: "var(--muted-foreground)",
+  fg: "var(--foreground)",
+  agent: "var(--agent)",
+}
+
+export function cssColor(c: string): string {
+  return COLOR_TOKENS[c] ?? c
 }
 
 /** Format per the binding's printf-ish `format` (%.2f, %d, %s), falling

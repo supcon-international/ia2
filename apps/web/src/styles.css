@@ -477,6 +477,71 @@ body {
   }
 }
 
+/* Live process motion — running equipment spins, flowing lines travel,
+   levels ease between samples. State is legible from stillness vs
+   motion at a glance (and legible without it: color/shape carry the
+   same states when reduced-motion turns these off). */
+@keyframes hmi-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.hmi-spin {
+  animation: hmi-rotate 1.4s linear infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+@keyframes hmi-travel-x {
+  to {
+    background-position-x: 14px;
+  }
+}
+@keyframes hmi-travel-y {
+  to {
+    background-position-y: 14px;
+  }
+}
+.hmi-flow {
+  animation: hmi-travel-x 0.45s linear infinite;
+}
+.hmi-flow-rev {
+  animation: hmi-travel-x 0.45s linear infinite reverse;
+}
+.hmi-flow-v {
+  animation: hmi-travel-y 0.45s linear infinite;
+}
+.hmi-flow-v-rev {
+  animation: hmi-travel-y 0.45s linear infinite reverse;
+}
+.hmi-ease-geom {
+  transition:
+    y 0.35s ease,
+    height 0.35s ease;
+}
+.hmi-ease-size {
+  transition:
+    width 0.35s ease,
+    height 0.35s ease,
+    margin-top 0.35s ease;
+}
+.hmi-ease-transform {
+  transition: transform 0.3s ease;
+}
+@media (prefers-reduced-motion: reduce) {
+  .hmi-spin,
+  .hmi-flow,
+  .hmi-flow-rev,
+  .hmi-flow-v,
+  .hmi-flow-v-rev {
+    animation: none;
+  }
+  .hmi-ease-geom,
+  .hmi-ease-size,
+  .hmi-ease-transform {
+    transition: none;
+  }
+}
+
 /* POU "generated" reveal — same machine-authorship vocabulary as the
  * HMI spawn. Two layers: an acid scan line sweeps down the editor area
  * (all four language editors), and the ST editor staggers its visible

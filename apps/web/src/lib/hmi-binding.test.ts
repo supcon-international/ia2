@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  applyMap,
+  colorBinding,
+  cssColor,
+  displayBinding,
   evalExpr,
   formatBinding,
   lookupVar,
   resolveBinding,
-  resolveDisplay,
   toNumber,
 } from "./hmi-binding"
 import type { VarSnapshot } from "@/types/generated/VarSnapshot"
@@ -19,6 +22,10 @@ const snap: VarSnapshot = {
     { name: "feeder.speed_rpm", type_name: "INT", value: "1500" },
     { name: "msg", type_name: "STRING", value: "'hello'" },
     { name: "status_w", type_name: "WORD", value: "16#1637" },
+    { name: "phase_txt", type_name: "STRING", value: "CARBONATE" },
+    // Same bare tail in two program instances — ambiguous on purpose.
+    { name: "line_a.temp", type_name: "REAL", value: "20" },
+    { name: "line_b.temp", type_name: "REAL", value: "80" },
   ],
 } as unknown as VarSnapshot
 
@@ -29,6 +36,11 @@ describe("lookupVar", () => {
     expect(lookupVar(snap, "feeder.speed_rpm")?.raw).toBe("1500")
     expect(lookupVar(snap, "ghost")).toBeNull()
     expect(lookupVar(null, "level_pct")).toBeNull()
+  })
+  it("refuses ambiguous tail matches instead of guessing", () => {
+    expect(lookupVar(snap, "temp")).toBeNull()
+    expect(lookupVar(snap, "line_a.temp")?.raw).toBe("20")
+    expect(lookupVar(snap, "line_b.temp")?.raw).toBe("80")
   })
 })
 
@@ -71,7 +83,7 @@ describe("resolveBinding + formatBinding", () => {
     expect(resolveBinding(snap, "pump_run")).toBe(1)
   })
   it("applies expr and format from spec bindings", () => {
-    const b = { variable: "level_pct", expr: "x / 100", format: "%.3f" }
+    const b = { variable: "level_pct", expr: "x / 100", format: "%.3f", map: null }
     expect(resolveBinding(snap, b)).toBe(0.425)
     expect(formatBinding(b, 0.425)).toBe("0.425")
   })
@@ -79,38 +91,98 @@ describe("resolveBinding + formatBinding", () => {
     expect(formatBinding("v", 3)).toBe("3")
     expect(formatBinding("v", 3.14159)).toBe("3.14")
     expect(
-      formatBinding({ variable: "v", expr: null, format: "%d" }, 3.7),
+      formatBinding({ variable: "v", expr: null, format: "%d", map: null }, 3.7),
     ).toBe("4")
   })
   it("collapses non-finite results to null / em-dash, never NaN text", () => {
     // Divide-by-zero expr, expr over a STRING, plain STRING/WORD vars.
-    expect(resolveBinding(snap, { variable: "level_pct", expr: "x / 0", format: null })).toBeNull()
-    expect(resolveBinding(snap, { variable: "msg", expr: "x + 1", format: null })).toBeNull()
+    expect(
+      resolveBinding(snap, { variable: "level_pct", expr: "x / 0", format: null, map: null }),
+    ).toBeNull()
+    expect(
+      resolveBinding(snap, { variable: "msg", expr: "x + 1", format: null, map: null }),
+    ).toBeNull()
     expect(resolveBinding(snap, "msg")).toBeNull()
     expect(formatBinding("v", Infinity)).toBe("—")
-    expect(formatBinding({ variable: "v", expr: null, format: "%.1f" }, NaN)).toBe("—")
+    expect(formatBinding({ variable: "v", expr: null, format: "%.1f", map: null }, NaN)).toBe("—")
   })
 })
 
-describe("resolveDisplay", () => {
-  it("keeps numerics numeric", () => {
-    expect(resolveDisplay(snap, "level_pct")).toBe(42.5)
+describe("applyMap", () => {
+  const entries = [
+    { eq: 0, min: null, max: null, out: "STOPPED" },
+    { eq: null, min: 80, max: null, out: "alarm" },
+    { eq: null, min: 50, max: 80, out: "warn" },
+    { eq: null, min: null, max: null, out: "ok" },
+  ]
+  it("tries entries in order: eq, ranges, catch-all", () => {
+    expect(applyMap(entries, 0)).toBe("STOPPED")
+    expect(applyMap(entries, 95)).toBe("alarm")
+    expect(applyMap(entries, 80)).toBe("alarm")
+    expect(applyMap(entries, 79.9)).toBe("warn")
+    expect(applyMap(entries, 10)).toBe("ok")
+  })
+  it("returns null when nothing matches and there is no catch-all", () => {
+    expect(applyMap([{ eq: 1, min: null, max: null, out: "x" }], 2)).toBeNull()
+  })
+})
+
+describe("displayBinding + colorBinding", () => {
+  it("map output wins over format", () => {
+    const b = {
+      variable: "pump_run",
+      expr: null,
+      format: "%d",
+      map: [
+        { eq: 1, min: null, max: null, out: "RUNNING" },
+        { eq: null, min: null, max: null, out: "STOPPED" },
+      ],
+    }
+    expect(displayBinding(snap, b)).toBe("RUNNING")
+  })
+  it("%s shows the raw snapshot text (STRING variables)", () => {
+    const b = { variable: "phase_txt", expr: null, format: "%s", map: null }
+    expect(displayBinding(snap, b)).toBe("CARBONATE")
+    // Bare STRINGs display directly too — no %s incantation required.
+    expect(displayBinding(snap, "phase_txt")).toBe("CARBONATE")
+    expect(displayBinding(snap, "msg")).toBe("hello")
+  })
+  it("surfaces hex literals and BOOL words instead of NaN", () => {
+    expect(displayBinding(snap, "status_w")).toBe("16#1637")
+    expect(displayBinding(snap, "pump_run")).toBe("TRUE")
+    // An explicit numeric format keeps BOOLs numeric.
     expect(
-      resolveDisplay(snap, { variable: "level_pct", expr: "x / 100", format: null }),
-    ).toBe(0.425)
+      displayBinding(snap, { variable: "pump_run", expr: null, format: "%d", map: null }),
+    ).toBe("1")
   })
-  it("surfaces STRING text and hex literals instead of NaN", () => {
-    expect(resolveDisplay(snap, "msg")).toBe("hello")
-    expect(resolveDisplay(snap, "status_w")).toBe("16#1637")
-  })
-  it("reads BOOLs as TRUE/FALSE", () => {
-    expect(resolveDisplay(snap, "pump_run")).toBe("TRUE")
-  })
-  it("stays null for unresolvable or non-finite values", () => {
-    expect(resolveDisplay(snap, "ghost")).toBeNull()
-    expect(resolveDisplay(null, "level_pct")).toBeNull()
+  it("stays null for unresolvable or blown-up values", () => {
+    expect(displayBinding(snap, "ghost")).toBeNull()
+    expect(displayBinding(null, "level_pct")).toBeNull()
+    // An expr declares numeric intent — its failures never fall back to text.
     expect(
-      resolveDisplay(snap, { variable: "level_pct", expr: "x / 0", format: null }),
+      displayBinding(snap, { variable: "msg", expr: "x + 1", format: null, map: null }),
     ).toBeNull()
+    expect(
+      displayBinding(snap, { variable: "level_pct", expr: "x / 0", format: null, map: null }),
+    ).toBeNull()
+  })
+  it("colors come only from maps", () => {
+    expect(colorBinding(snap, "level_pct")).toBeNull()
+    const b = {
+      variable: "level_pct",
+      expr: null,
+      format: null,
+      map: [{ eq: null, min: 40, max: null, out: "warn" }],
+    }
+    expect(colorBinding(snap, b)).toBe("warn")
+  })
+})
+
+describe("cssColor", () => {
+  it("maps tokens and passes literals through", () => {
+    expect(cssColor("ok")).toBe("var(--highlight)")
+    expect(cssColor("alarm")).toBe("var(--destructive)")
+    expect(cssColor("#b2ed1d")).toBe("#b2ed1d")
+    expect(cssColor("oklch(0.6 0.1 200)")).toBe("oklch(0.6 0.1 200)")
   })
 })

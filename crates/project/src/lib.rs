@@ -28,8 +28,8 @@ pub use fbd::{
 };
 pub use hmi::{
     apply_hmi_ops, hmi_nav_targets, hmi_variables, hmi_write_variables, validate_hmi, HmiAction,
-    HmiBinding, HmiBindingSpec, HmiDoc, HmiGrid, HmiIssue, HmiLayout, HmiNode, HmiNodeKind, HmiOp,
-    HmiSeries, HmiShapeKind, HmiTextStyle, HMI_SYMBOLS,
+    HmiBinding, HmiBindingSpec, HmiDoc, HmiGrid, HmiIssue, HmiLayout, HmiMapEntry, HmiNode,
+    HmiNodeKind, HmiOp, HmiSeries, HmiShapeKind, HmiTextStyle, HMI_SYMBOLS,
 };
 pub use iomap_check::{validate_iomap, IomapIssue, IomapIssueSeverity};
 pub use ld::{
