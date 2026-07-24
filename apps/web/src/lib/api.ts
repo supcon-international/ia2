@@ -485,13 +485,16 @@ export async function writeVariable(
   name: string,
   value: number,
   typeName: string = "",
+  pulseMs?: number,
 ): Promise<void> {
   const i32 = encodeForWrite(value, typeName)
   await jsonOrThrow(
     await apiFetch(`/api/runtime/variables/${encodeURIComponent(name)}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ value: i32 }),
+      body: JSON.stringify(
+        pulseMs != null ? { value: i32, pulse_ms: pulseMs } : { value: i32 },
+      ),
     }),
     `POST /api/runtime/variables/${name}`,
   )

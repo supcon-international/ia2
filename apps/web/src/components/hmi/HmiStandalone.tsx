@@ -136,11 +136,16 @@ export function HmiStandalone() {
     () => ({
       fetchDoc: (p) => jget(`/api/hmi/${encodeURIComponent(p)}`),
       // no saveDoc: screens are edited in the IDE and arrive via deploy
-      write: async (name, value, typeName) => {
+      write: async (name, value, typeName, pulseMs) => {
+        const body: Record<string, unknown> = {
+          name,
+          value: encodeForWrite(value, typeName),
+        }
+        if (pulseMs != null) body["pulse_ms"] = pulseMs
         const res = await fetch("/write", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name, value: encodeForWrite(value, typeName) }),
+          body: JSON.stringify(body),
         })
         if (!res.ok) {
           throw new Error(`${res.status}: ${await res.text()}`)

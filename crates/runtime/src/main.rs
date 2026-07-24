@@ -910,6 +910,12 @@ struct VarWriteReq {
     /// Bit-packed value — the caller resolves the variable's type, same
     /// as the IDE-side runtime write/force surface.
     value: i32,
+    /// Momentary hold: after `pulse_ms` the RUNTIME writes 0 back, so a
+    /// dead operator tab can't leave a momentary command latched. Same
+    /// contract as the IDE server's write route; latest-write-wins on
+    /// overlap.
+    #[serde(default)]
+    pulse_ms: Option<u32>,
 }
 
 #[derive(serde::Deserialize)]
@@ -938,6 +944,18 @@ async fn rt_write(
         .write_variable(&req.name, req.value)
         .await
         .map_err(write_err)?;
+    if let Some(ms) = req.pulse_ms {
+        let h = state.handle.clone();
+        let n = req.name.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(ms as u64)).await;
+            if let Err(e) = h.write_variable(&n, 0).await {
+                // A stopped scan loop also clears the variable, so this
+                // is benign then — but visible when the program is live.
+                tracing::warn!(variable = %n, ?e, "pulse reset write failed");
+            }
+        });
+    }
     Ok(Json(
         serde_json::json!({ "ok": true, "name": req.name, "value": v }),
     ))

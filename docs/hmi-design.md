@@ -127,8 +127,11 @@ The shape, abbreviated to its load-bearing parts:
 }
 ```
 
-Node types are a closed set: `group` (absolute or simple vertical/horizontal
-flow — enough for headers and bars without importing a layout engine),
+Node types are a closed set: `group` (absolute positioning only — flow
+layouts were designed, never implemented, and retired by decision: screens
+are spatial documents, and absolute coordinates are the truth the arrange
+editor, spawn overlays and letterboxing build on; `validate_hmi` warns on
+the legacy `vertical`/`horizontal` values),
 `text`, `value` (numeric/boolean/string readout with unit and format),
 `symbol` (an instance of a library symbol), `trend` (sparkline/strip chart
 over the live snapshot history), `alarmbar` (renders the run's
@@ -159,7 +162,12 @@ carrying `confirm: true|false` plus an optional `min`/`max` guard for
 numeric entry. Actions call the existing `/api/runtime/write` (or the
 edge's `/write`) — the HMI adds no new mutation surface to the runtime, so
 everything the safety review already covers (force semantics, failsafe,
-agent attribution) remains the single story.
+agent attribution) remains the single story. The pulse reset is a
+**server-side guarantee**: the write request carries `pulse_ms` and the
+runtime schedules the 0-write itself, so a closed tab, a suspended
+tablet, or a network drop cannot leave a momentary command latched
+(issue #22); overlapping pulses on one variable are latest-write-wins,
+and `validate_hmi` warns when `ms` exceeds 10 s (that's a toggle).
 
 **Symbols** are the component system, and v1 ships them as a *built-in
 library*, not user-defined components: `tank`, `valve`, `pump`, `motor`,

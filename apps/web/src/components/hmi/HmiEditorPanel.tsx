@@ -514,6 +514,7 @@ function BindingsEditor({
     const known: Record<string, string[]> = {
       value: ["value", "color"],
       input: ["value"],
+      button: ["on"],
       symbol: symbolBindKeys(node),
       text: ["text", "color"],
       shape: ["fill", "stroke"],

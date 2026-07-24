@@ -178,7 +178,10 @@ pub enum HmiNodeKind {
     /// Renders the run's fault (`last_error`) + per-device health. One per
     /// screen is the convention; generate puts it at the top.
     Alarmbar {},
-    /// Momentary control surface — pair with an `action.tap`.
+    /// Momentary control surface — pair with an `action.tap`. Optional
+    /// `bind.on`: the renderer lights the button while the bound value
+    /// is truthy (indicator rules), so a toggle shows the state it
+    /// controls.
     Button { label: String },
     /// Numeric entry — pair with an `action.commit` of kind `set_value`.
     Input {
@@ -720,6 +723,17 @@ pub fn validate_hmi(doc: &HmiDoc) -> Vec<HmiIssue> {
                     ),
                 ));
             }
+            // Flow layouts were designed but never implemented, and the
+            // decision (issue #23) is to retire them: screens are spatial
+            // documents — absolute coordinates are the truth the arrange
+            // editor, spawn overlays and letterboxing all build on.
+            HmiNodeKind::Group { layout, .. } if *layout != HmiLayout::Absolute => {
+                issues.push(warn(
+                    Some(&n.id),
+                    "flow layouts are retired — children render at their absolute x/y; \
+                     lay this group out with coordinates",
+                ));
+            }
             // Warnings, not errors: the palette places empty trends and
             // navs on purpose and the canvas renders a visible
             // placeholder — incomplete must stay saveable, or every
@@ -758,6 +772,20 @@ pub fn validate_hmi(doc: &HmiDoc) -> Vec<HmiIssue> {
                     issues.push(err(
                         Some(&n.id),
                         format!("action '{gesture}': min {lo} > max {hi}"),
+                    ));
+                }
+            }
+            if let HmiAction::Pulse { ms, .. } = a {
+                // The runtime holds the value high for the whole window
+                // (the reset is server-side by contract) — a multi-second
+                // "pulse" is almost always a mis-modelled toggle.
+                if *ms > 10_000 {
+                    issues.push(warn(
+                        Some(&n.id),
+                        format!(
+                            "action '{gesture}': pulse holds for {ms} ms — \
+                             longer than 10 s is probably a toggle, not a pulse"
+                        ),
                     ));
                 }
             }

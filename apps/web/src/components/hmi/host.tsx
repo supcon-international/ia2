@@ -35,8 +35,15 @@ export type HmiHost = {
    *  read-only, which is the edge panel's case. */
   saveDoc?(path: string, doc: HmiDoc): Promise<unknown>
   /** Write one variable. `typeName` comes from the live snapshot so the
-   *  host can bit-pack REALs correctly. */
-  write(name: string, value: number, typeName: string): Promise<void>
+   *  host can bit-pack REALs correctly. `pulseMs` asks the RUNTIME to
+   *  write 0 back after that many ms — the pulse reset must survive the
+   *  page, so it is never a client timer. */
+  write(
+    name: string,
+    value: number,
+    typeName: string,
+    pulseMs?: number,
+  ): Promise<void>
   /** Navigate to another screen (a `nav` action). */
   nav(target: string): void
   /** Polled by the alarm bar (~2 s cadence). */

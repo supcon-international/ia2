@@ -91,6 +91,14 @@ export function resolveBinding(
   return resolveOutput(snapshot, b).num
 }
 
+/** On/off resolution for state-carrying binds (indicator `on`, a
+ *  button's `bind.on`): nonzero = on, unresolved = off — an unknown
+ *  variable must read as the calm state, never a lit one. (Contrast
+ *  `visible`, whose unresolved default is SHOWN.) */
+export function resolveOn(snapshot: VarSnapshot | null, b: HmiBinding): boolean {
+  return (resolveBinding(snapshot, b) ?? 0) !== 0
+}
+
 /** First matching map entry's output. `eq` matches exactly; otherwise
  *  `[min, max)` with either side optional; a condition-less entry is the
  *  catch-all — order the list accordingly. */

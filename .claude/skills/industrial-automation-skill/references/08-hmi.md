@@ -65,7 +65,8 @@ shows real values, which is the strongest self-review available.
 
 ## The document model, briefly
 
-Nodes are a closed set: `group` (absolute or simple flows), `text`,
+Nodes are a closed set: `group` (absolute positioning only — flow
+layouts are retired; lay children out with coordinates), `text`,
 `value`, `symbol`, `trend`, `alarmbar`, `button`, `input`, `nav`, `shape`
 (`rect` / `ellipse` / `line` / `polyline`).
 Coordinates live on a fixed grid (default 1280×800, snap 8) that every
@@ -79,7 +80,12 @@ the single bound value `x` on purpose — logic that spans variables belongs
 in a POU, not hidden in a screen. `action` is the only write path
 (`write` / `toggle` / `pulse` / `set_value` / `nav`), every action is
 declared in the reviewable document, and `confirm` defaults to true —
-leave it on for anything that moves the plant.
+leave it on for anything that moves the plant. A pulse's 0-write is a
+runtime-side guarantee (the request carries `pulse_ms`), so it survives
+the operator's tab; keep `ms` under 10 s or check will tell you it's
+really a toggle. Buttons also honour an optional `bind.on` — the button
+lights while the bound value is truthy, so a toggle shows the state it
+controls without a separate indicator.
 
 ## Maps: values become colors and words, declaratively
 

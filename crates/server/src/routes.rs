@@ -2325,6 +2325,13 @@ pub struct WriteVariableRequest {
     /// `write_variable(VarIndex, i32)`, so callers map their domain type
     /// to an i32 (BOOL → 0/1, USINT/UINT → numeric, etc.).
     pub value: i32,
+    /// Momentary hold: after `pulse_ms` the SERVER writes 0 back. The
+    /// reset guarantee lives here — not in a page timer — so a closed
+    /// tab or suspended tablet can't leave a momentary command latched
+    /// (the HMI pulse action's contract). Overlapping pulses on one
+    /// variable are latest-write-wins.
+    #[serde(default)]
+    pub pulse_ms: Option<u32>,
 }
 
 #[derive(Debug, Serialize, TS)]
@@ -2352,6 +2359,19 @@ pub async fn write_runtime_variable(
     // the bridge::ProgramHandle docs.
     let handle: ProgramHandle = live_program(&state)?;
     let value = handle.write_variable(&name, req.value).await?;
+    if let Some(ms) = req.pulse_ms {
+        let h = handle.clone();
+        let n = name.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(ms as u64)).await;
+            if let Err(e) = h.write_variable(&n, 0).await {
+                // The program may have stopped in the window — that also
+                // clears the variable, so a failed reset here is benign;
+                // log it so a live-program failure is still visible.
+                tracing::warn!(variable = %n, %e, "pulse reset write failed");
+            }
+        });
+    }
     Ok(Json(WriteVariableResponse { name, value }))
 }
 
