@@ -315,6 +315,14 @@ explicitly out of scope for v1 and noted as the first hardening item once
 panels face real operators, consistent with the edge's current
 ssh-perimeter trust model.
 
+Two doctrines from field use (RFC #33), held as design law: **Stop never
+requires confirmation** — a stop action's `confirm` should be false, and
+adding a dialog in front of "make it stop" is a defect, not caution. And
+**a screen stop button is not an e-stop and must not cosplay as one** —
+label it Stop/Abort, style it as a control, and document the physical
+e-stop as the real safety device; a soft-PLC HMI never claims a safety
+function it cannot deliver.
+
 ## Phasing
 
 **P0 — format + runtime view + agent plumbing.** Schema/store/validate in
