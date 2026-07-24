@@ -16,6 +16,7 @@
 //! them identically with Modbus devices.
 
 mod bits;
+pub mod cam;
 mod esi_map;
 pub mod gear;
 mod real;
