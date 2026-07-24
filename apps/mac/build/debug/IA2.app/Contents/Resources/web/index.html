@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      Title bar / window title for the desktop shell (WKWebView / WebView2).
+      The shell reads this through KVO on the WebView's `title` property and
+      forwards it to NSWindow.title / Win32 SetWindowText; keep it in sync
+      with the actual product brand.
+    -->
+    <title>IA2</title>
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <script type="module" crossorigin src="/assets/index-CeYOZGUe.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-CsrDps2O.css">
+  </head>
+  <body>
+    <!--
+      The whole React tree mounts inside #root. We don't render any
+      placeholder content here because the WebView would briefly show
+      it during JS load — which is exactly the "white flash" the
+      native shell paints over via `_doAfterNextPresentationUpdate`.
+    -->
+    <div id="root"></div>
+  </body>
+</html>

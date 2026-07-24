@@ -1,0 +1,40 @@
+{
+  "": {
+    "swift-dependencies": "/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/master.swiftdeps"
+  },
+  "/Users/au73/soft-PLC/ia2/apps/mac/Sources/IA2/AppDelegate.swift": {
+    "dependencies": "/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/AppDelegate.d",
+    "object": "/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/AppDelegate.swift.o",
+    "swiftmodule": "/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/AppDelegate~partial.swiftmodule",
+    "swift-dependencies": "/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/AppDelegate.swiftdeps",
+    "diagnostics": "/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/AppDelegate.dia"
+  },
+  "/Users/au73/soft-PLC/ia2/apps/mac/Sources/IA2/BackendSupervisor.swift": {
+    "dependencies": "/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/BackendSupervisor.d",
+    "object": "/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/BackendSupervisor.swift.o",
+    "swiftmodule": "/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/BackendSupervisor~partial.swiftmodule",
+    "swift-dependencies": "/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/BackendSupervisor.swiftdeps",
+    "diagnostics": "/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/BackendSupervisor.dia"
+  },
+  "/Users/au73/soft-PLC/ia2/apps/mac/Sources/IA2/WebViewHost.swift": {
+    "dependencies": "/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/WebViewHost.d",
+    "object": "/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/WebViewHost.swift.o",
+    "swiftmodule": "/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/WebViewHost~partial.swiftmodule",
+    "swift-dependencies": "/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/WebViewHost.swiftdeps",
+    "diagnostics": "/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/WebViewHost.dia"
+  },
+  "/Users/au73/soft-PLC/ia2/apps/mac/Sources/IA2/WindowController.swift": {
+    "dependencies": "/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/WindowController.d",
+    "object": "/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/WindowController.swift.o",
+    "swiftmodule": "/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/WindowController~partial.swiftmodule",
+    "swift-dependencies": "/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/WindowController.swiftdeps",
+    "diagnostics": "/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/WindowController.dia"
+  },
+  "/Users/au73/soft-PLC/ia2/apps/mac/Sources/IA2/main.swift": {
+    "dependencies": "/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/main.d",
+    "object": "/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/main.swift.o",
+    "swiftmodule": "/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/main~partial.swiftmodule",
+    "swift-dependencies": "/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/main.swiftdeps",
+    "diagnostics": "/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/main.dia"
+  }
+}

@@ -1,0 +1,81 @@
+client:
+  name: basic
+  file-system: device-agnostic
+tools: {}
+targets:
+  "IA2-arm64-apple-macosx26.0-debug.exe": ["<IA2-arm64-apple-macosx26.0-debug.exe>"]
+  "IA2-arm64-apple-macosx26.0-debug.module": ["<IA2-arm64-apple-macosx26.0-debug.module>"]
+  "PackageStructure": ["<PackageStructure>"]
+  "main": ["<IA2-arm64-apple-macosx26.0-debug.exe>","<IA2-arm64-apple-macosx26.0-debug.module>"]
+  "test": ["<IA2-arm64-apple-macosx26.0-debug.exe>","<IA2-arm64-apple-macosx26.0-debug.module>"]
+default: "main"
+nodes:
+  "/Users/au73/soft-PLC/ia2/apps/mac/Sources/IA2/":
+    is-directory-structure: true
+    content-exclusion-patterns: [".git",".build"]
+  "/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2":
+    is-mutated: true
+commands:
+  "/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2-entitlement.plist":
+    tool: write-auxiliary-file
+    inputs: ["<entitlement-plist>","<com.apple.security.get-task-allow>"]
+    outputs: ["/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2-entitlement.plist"]
+    description: "Write auxiliary file /Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2-entitlement.plist"
+
+  "/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/sources":
+    tool: write-auxiliary-file
+    inputs: ["<sources-file-list>","/Users/au73/soft-PLC/ia2/apps/mac/Sources/IA2/AppDelegate.swift","/Users/au73/soft-PLC/ia2/apps/mac/Sources/IA2/BackendSupervisor.swift","/Users/au73/soft-PLC/ia2/apps/mac/Sources/IA2/WebViewHost.swift","/Users/au73/soft-PLC/ia2/apps/mac/Sources/IA2/WindowController.swift","/Users/au73/soft-PLC/ia2/apps/mac/Sources/IA2/main.swift"]
+    outputs: ["/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/sources"]
+    description: "Write auxiliary file /Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/sources"
+
+  "/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.product/Objects.LinkFileList":
+    tool: write-auxiliary-file
+    inputs: ["<link-file-list>","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/AppDelegate.swift.o","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/BackendSupervisor.swift.o","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/WebViewHost.swift.o","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/WindowController.swift.o","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/main.swift.o"]
+    outputs: ["/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.product/Objects.LinkFileList"]
+    description: "Write auxiliary file /Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.product/Objects.LinkFileList"
+
+  "/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt":
+    tool: write-auxiliary-file
+    inputs: ["<swift-get-version>","/Library/Developer/CommandLineTools/usr/bin/swiftc"]
+    outputs: ["/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt"]
+    always-out-of-date: "true"
+    description: "Write auxiliary file /Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt"
+
+  "<IA2-arm64-apple-macosx26.0-debug.exe>":
+    tool: phony
+    inputs: ["<IA2-arm64-apple-macosx26.0-debug.exe-CodeSigning>"]
+    outputs: ["<IA2-arm64-apple-macosx26.0-debug.exe>"]
+
+  "<IA2-arm64-apple-macosx26.0-debug.module>":
+    tool: phony
+    inputs: ["/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/AppDelegate.swift.o","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/BackendSupervisor.swift.o","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/WebViewHost.swift.o","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/WindowController.swift.o","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/main.swift.o","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/Modules/IA2.swiftmodule"]
+    outputs: ["<IA2-arm64-apple-macosx26.0-debug.module>"]
+
+  "C.IA2-arm64-apple-macosx26.0-debug.exe":
+    tool: shell
+    inputs: ["/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/AppDelegate.swift.o","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/BackendSupervisor.swift.o","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/WebViewHost.swift.o","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/WindowController.swift.o","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/main.swift.o","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.product/Objects.LinkFileList"]
+    outputs: ["/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2"]
+    description: "Linking ./.build/arm64-apple-macosx/debug/IA2"
+    args: ["/Library/Developer/CommandLineTools/usr/bin/swiftc","-L","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug","-o","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2","-module-name","IA2","-Xlinker","-no_warn_duplicate_libraries","-emit-executable","-Xlinker","-alias","-Xlinker","_IA2_main","-Xlinker","_main","-Xlinker","-rpath","-Xlinker","@loader_path","@/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.product/Objects.LinkFileList","-Xlinker","-rpath","-Xlinker","/Library/Developer/CommandLineTools/usr/lib/swift-6.2/macosx","-target","arm64-apple-macosx13.0","-Xlinker","-add_ast_path","-Xlinker","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/Modules/IA2.swiftmodule","-I","/Library/Developer/CommandLineTools/Library/Developer/Frameworks","-L","/Library/Developer/CommandLineTools/Library/Developer/Frameworks","-plugin-path","/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing","-sdk","/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk","-g"]
+
+  "C.IA2-arm64-apple-macosx26.0-debug.exe-entitlements":
+    tool: shell
+    inputs: ["/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2-entitlement.plist"]
+    outputs: ["<IA2-arm64-apple-macosx26.0-debug.exe-CodeSigning>"]
+    description: "Applying debug entitlements to ./.build/arm64-apple-macosx/debug/IA2"
+    args: ["codesign","--force","--sign","-","--entitlements","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2-entitlement.plist","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2"]
+
+  "C.IA2-arm64-apple-macosx26.0-debug.module":
+    tool: shell
+    inputs: ["/Users/au73/soft-PLC/ia2/apps/mac/Sources/IA2/AppDelegate.swift","/Users/au73/soft-PLC/ia2/apps/mac/Sources/IA2/BackendSupervisor.swift","/Users/au73/soft-PLC/ia2/apps/mac/Sources/IA2/WebViewHost.swift","/Users/au73/soft-PLC/ia2/apps/mac/Sources/IA2/WindowController.swift","/Users/au73/soft-PLC/ia2/apps/mac/Sources/IA2/main.swift","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/swift-version--1AB21518FC5DEDBE.txt","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/sources"]
+    outputs: ["/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/AppDelegate.swift.o","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/BackendSupervisor.swift.o","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/WebViewHost.swift.o","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/WindowController.swift.o","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/main.swift.o","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/Modules/IA2.swiftmodule"]
+    description: "Compiling Swift Module 'IA2' (5 sources)"
+    args: ["/Library/Developer/CommandLineTools/usr/bin/swiftc","-module-name","IA2","-emit-dependencies","-emit-module","-emit-module-path","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/Modules/IA2.swiftmodule","-output-file-map","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/output-file-map.json","-incremental","-c","@/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/IA2.build/sources","-I","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/Modules","-target","arm64-apple-macosx13.0","-incremental","-enable-batch-mode","-serialize-diagnostics","-index-store-path","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/index/store","-Onone","-enable-testing","-j10","-DSWIFT_PACKAGE","-DDEBUG","-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE","-module-cache-path","/Users/au73/soft-PLC/ia2/apps/mac/.build/arm64-apple-macosx/debug/ModuleCache","-parseable-output","-Xfrontend","-entry-point-function-name","-Xfrontend","IA2_main","-swift-version","5","-I","/Library/Developer/CommandLineTools/Library/Developer/Frameworks","-L","/Library/Developer/CommandLineTools/Library/Developer/Frameworks","-plugin-path","/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing","-sdk","/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk","-g","-Xcc","-isysroot","-Xcc","/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk","-Xcc","-fPIC","-Xcc","-g","-package-name","mac"]
+
+  "PackageStructure":
+    tool: package-structure-tool
+    inputs: ["/Users/au73/soft-PLC/ia2/apps/mac/Sources/IA2/","/Users/au73/soft-PLC/ia2/apps/mac/Package.swift","/Users/au73/soft-PLC/ia2/apps/mac/Package.resolved"]
+    outputs: ["<PackageStructure>"]
+    description: "Planning build"
+    allow-missing-inputs: true
+
