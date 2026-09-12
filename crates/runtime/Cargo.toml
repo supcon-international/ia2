@@ -34,4 +34,5 @@ ironplc-bridge = { path = "../ironplc-bridge" }
 project = { path = "../project" }
 
 [dev-dependencies]
+rumqttd = "0.20.0"
 tempfile = "3"
