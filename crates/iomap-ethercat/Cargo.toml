@@ -16,8 +16,16 @@ iocore = { path = "../iocore" }
 project = { path = "../project" }
 esi = { path = "../esi" }
 
-# The real driver uses Unix raw sockets. Windows engineering stations
-# retain the simulator without pulling in EtherCrab's pcap dependency.
+# Keep the existing Unix raw-socket implementation.
 [target.'cfg(unix)'.dependencies]
-ethercrab.workspace = true
+ethercrab = { workspace = true, default-features = true }
 smol.workspace = true
+
+# Use the protocol core without upstream's statically linked Windows
+# transport. Npcap is loaded only when a real EtherCAT device is opened.
+[target.'cfg(windows)'.dependencies]
+ethercrab = { workspace = true, default-features = false }
+smol.workspace = true
+embassy-time = { version = "0.4.0", features = ["std", "generic-queue-128"] }
+libloading = "0.8.9"
+windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation", "Win32_System_LibraryLoader", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis"] }

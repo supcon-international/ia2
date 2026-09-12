@@ -38,7 +38,7 @@ try {
     Assert ($metadata -match '(?m)^description: .+') 'Skill description is missing.'
     Assert ((Get-Content -LiteralPath (Join-Path $skill 'agents\openai.yaml') -Raw).Contains('default_prompt: "Use $industrial-automation-skill')) 'Codex default prompt must invoke the skill.'
     Assert (Test-Path -LiteralPath (Join-Path $skill 'checklists\offline-readiness.md')) 'Offline handoff checklist is missing.'
-    foreach ($script in @('install-skill.ps1', 'package-windows.ps1', 'build-windows.ps1', 'check-windows.ps1')) {
+    foreach ($script in @('install-skill.ps1', 'package-windows.ps1', 'build-windows.ps1', 'check-windows.ps1', 'test-windows-runtime.ps1', 'test-windows-fieldbus.ps1')) {
         $tokens = $null
         $errors = $null
         [Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot $script), [ref]$tokens, [ref]$errors) | Out-Null
@@ -92,6 +92,7 @@ try {
         Invoke-Native cargo @('test', '--locked', '--workspace')
         & (Join-Path $PSScriptRoot 'build-windows.ps1')
         & (Join-Path $PSScriptRoot 'test-windows-runtime.ps1') -RuntimePath (Join-Path $SourceRoot 'target\x86_64-pc-windows-msvc\release\ia2-runtime.exe')
+        & (Join-Path $PSScriptRoot 'test-windows-fieldbus.ps1') -RuntimePath (Join-Path $SourceRoot 'target\x86_64-pc-windows-msvc\release\ia2-runtime.exe')
         Invoke-Native pnpm @('--filter', '@cs/web', 'build')
         Invoke-Native pnpm @('--filter', '@cs/web', 'test')
         Write-Host 'Native Windows quality gate passed.'

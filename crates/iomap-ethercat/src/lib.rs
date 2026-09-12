@@ -2,29 +2,32 @@
 //!
 //! Two operating modes, picked by `EthercatConfig.nic`:
 //!
-//! - `"_sim"` — in-memory PDO buffer, no hardware. Used for Windows/macOS
-//!   development (raw L2 sockets aren't portable), IDE round-trip
+//! - `"_sim"` — in-memory PDO buffer, no hardware. Used for development,
+//!   IDE round-trip
 //!   verification, and CI tests. Output channels echo what the program
 //!   writes; input channels start at zero.
 //!
 //! - Anything else (e.g. `"eth0"`, `"eth1"`) — real `ethercrab::MainDevice`
 //!   on the named NIC. Walks the bus on connect, transitions to OP,
 //!   and drives a cyclic PDO exchange on its own thread (ethercrab uses
-//!   `async-io`, not tokio). Requires Linux + `CAP_NET_RAW`.
-//!   Unavailable on Windows; a real NIC returns an explicit connect error.
+//!   `async-io`, not tokio). Unix uses raw sockets and requires device
+//!   permissions. Windows uses an independently installed Npcap driver,
+//!   loaded on demand; missing Npcap is a connect error, not a startup error.
 //!
 //! Both modes implement the same `IoDevice` trait so the runtime composes
 //! them identically with Modbus devices.
 
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows, test))]
 mod bits;
 pub mod cam;
 mod esi_map;
 pub mod gear;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod real;
 mod sim;
 mod validate;
+#[cfg(any(windows, test))]
+mod windows_transport;
 
 use async_trait::async_trait;
 use iocore::{ChannelValue, IoDevice, IoError};
@@ -65,7 +68,7 @@ pub struct EthercatDevice(Inner);
 
 enum Inner {
     Sim(sim::SimEthercat),
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     Real(real::RealEthercat),
 }
 
@@ -77,14 +80,14 @@ impl EthercatDevice {
                 .map(Inner::Sim)
                 .map(EthercatDevice)
         } else {
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             {
                 real::RealEthercat::connect(name, config)
                     .await
                     .map(Inner::Real)
                     .map(EthercatDevice)
             }
-            #[cfg(not(unix))]
+            #[cfg(not(any(unix, windows)))]
             {
                 Err(IoError::Connect(format!(
                     "real EtherCAT is not supported on {}; use nic=\"_sim\" for simulation or connect the hardware to a Linux edge runtime (device {name}, NIC {})",
@@ -101,7 +104,7 @@ impl EthercatDevice {
     pub fn discovered(&self) -> Vec<SlaveDiscovery> {
         match &self.0 {
             Inner::Sim(s) => s.discovered(),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             Inner::Real(r) => r.discovered(),
         }
     }
@@ -116,7 +119,7 @@ impl IoDevice for EthercatDevice {
     fn name(&self) -> &str {
         match &self.0 {
             Inner::Sim(s) => s.name(),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             Inner::Real(r) => r.name(),
         }
     }
@@ -128,7 +131,7 @@ impl IoDevice for EthercatDevice {
     fn is_healthy(&self) -> bool {
         match &self.0 {
             Inner::Sim(s) => s.is_healthy(),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             Inner::Real(r) => r.is_healthy(),
         }
     }
@@ -136,7 +139,7 @@ impl IoDevice for EthercatDevice {
     async fn read_channel(&mut self, channel: &str) -> Result<ChannelValue, IoError> {
         match &mut self.0 {
             Inner::Sim(s) => s.read_channel(channel).await,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             Inner::Real(r) => r.read_channel(channel).await,
         }
     }
@@ -144,7 +147,7 @@ impl IoDevice for EthercatDevice {
     async fn write_channel(&mut self, channel: &str, value: ChannelValue) -> Result<(), IoError> {
         match &mut self.0 {
             Inner::Sim(s) => s.write_channel(channel, value).await,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             Inner::Real(r) => r.write_channel(channel, value).await,
         }
     }
@@ -152,7 +155,7 @@ impl IoDevice for EthercatDevice {
     async fn enter_failsafe(&mut self) -> Result<(), IoError> {
         match &mut self.0 {
             Inner::Sim(s) => s.enter_failsafe().await,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             Inner::Real(r) => r.enter_failsafe().await,
         }
     }
@@ -165,7 +168,7 @@ impl IoDevice for EthercatDevice {
     async fn shutdown(&mut self) -> Result<(), IoError> {
         match &mut self.0 {
             Inner::Sim(s) => s.shutdown().await,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             Inner::Real(r) => r.shutdown().await,
         }
     }
@@ -240,7 +243,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     async fn real_nic_fails_explicitly_on_unsupported_platform() {
         let mut config = sim_config_with_two_outputs_and_one_input();
         config.nic = "Ethernet".into();

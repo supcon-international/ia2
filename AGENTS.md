@@ -117,8 +117,11 @@ your local copies stay current; there is nothing to commit.
   `~/.local/share/ia2/library`. Windows installs at
   `%LOCALAPPDATA%\IA2\library`; its launcher passes both library and web
   paths explicitly. Keep projects outside the replaceable install tree.
-- Real EtherCAT/CANopen remain Linux-only; Windows engineering/simulation
-  is a separate claim. Windows RTU uses COM ports and rejects Linux
+- Windows real fieldbus paths are EtherCrab with optional Npcap and
+  CANopen over gs_usb/WinUSB; use `docs/windows-can-ethercat.md` for
+  selectors, dependencies and bench-pending limits. Compilation and
+  simulation do not prove real bus traffic or hard real-time. Windows
+  RTU uses COM ports and rejects Linux
   `rs485` direction-control settings. A Windows `.exe` is never a Linux
   deployment payload: use a matching Linux ELF or the provisioned runtime.
 - Snapshot `bits` is the raw VM slot (REAL = IEEE-754 bits); decode

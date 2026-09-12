@@ -10,6 +10,12 @@ Bash heredocs. Session wrapper:
 `cs agent run --label "Build line" -- powershell.exe -NoProfile -File .\workflow.ps1`.
 Windows server startup, packages and hardware limits are documented in
 repository `docs/windows.md`; do not deploy a Windows runtime to Linux.
+Real Windows fieldbus configuration uses the same `devices/<name>`
+resource: EtherCAT `nic` is `\Device\NPF_{GUID}` (Npcap required at
+connect), and CANopen `interface` is
+`gs_usb:<vid_hex>:<pid_hex>:<serial>:<channel>` with an explicit `bitrate`.
+See reference 06 and `docs/windows-can-ethercat.md`; successful simulation
+or a missing-device error is not evidence of physical bus operation.
 
 The surface is bash-sized on purpose: **five meta-primitives** cover
 every resource (present and future), and a short list of **domain

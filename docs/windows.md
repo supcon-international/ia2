@@ -13,14 +13,16 @@ environment, results and remaining hardware boundaries.
 | Simulation, monitor, alarms, history, HMI | Native server/runtime; scenario evidence required |
 | Modbus TCP, OPC UA, MQTT | Native implementations; physical integration requires a separate test |
 | Modbus RTU | COM ports; omit Linux-only `transport.rs485` direction control and use an automatic-direction adapter |
-| EtherCAT | `_sim` only (empty NIC retains the simulation default); a real NIC is rejected |
-| CANopen | Simulation only; real SocketCAN stays Linux-only |
+| EtherCAT | EtherCrab/Npcap native transport; `_sim` remains available; software checks passed, physical bus acceptance pending |
+| CANopen | gs_usb/WinUSB native transport; software checks passed, physical bus acceptance pending; Linux SocketCAN is a separate backend |
 | Linux edge deploy | Windows OpenSSH client and `tar.exe`; the runtime must match the Linux edge architecture |
 | Windows runtime lifecycle | Foreground process; no Windows service installer, hard real-time claim or automatic restart guarantee |
 
 Windows runtime `GET /system` enumerates native network interfaces and
 COM ports. Carrier means connected media, not proof that a field device
-is reachable. Inventory does not enable Windows EtherCAT support.
+is reachable. See [Windows CANopen and EtherCAT](windows-can-ethercat.md)
+for external drivers, licensing and the separate bus acceptance record.
+No physical CAN or EtherCAT device has been validated by this work.
 
 ## Install a prebuilt package
 
@@ -34,7 +36,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-skill.
 The package includes four binaries, built web assets, the FB library and
 complete skill references/checklists. The release build uses a static
 Microsoft C runtime, so installation needs no Rust, Node, pnpm or VC++
-Redistributable installer. `windows-package.json` records the source
+Redistributable installer. Physical EtherCAT additionally requires the
+separately installed Npcap driver; that driver and its installer are not
+included in the IA2 package. `windows-package.json` records the source
 commit, dirty status, target and packaging time. The adjacent `.sha256`
 file checks transfer integrity, not publisher identity; the ZIP is unsigned.
 

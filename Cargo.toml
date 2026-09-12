@@ -59,7 +59,7 @@ tokio-modbus = { version = "0.17", features = ["rtu", "tcp", "rtu-server", "tcp-
 # it explicitly here keeps the Parity / StopBits / DataBits enums we
 # use in `project::types` stable across tokio-modbus upgrades.
 tokio-serial = "5"
-ethercrab = "0.7"
+ethercrab = { version = "=0.7.1", default-features = false }
 # Drives ethercrab's async-io-based tx_rx_task on a dedicated thread; we
 # don't impose smol on the rest of the codebase (everything else is tokio).
 smol = "2"

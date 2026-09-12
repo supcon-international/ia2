@@ -93,7 +93,7 @@ export function CanopenDeviceEditor({ device, onSave, link }: DeviceEditorProps)
               <Input
                 value={draft.interface}
                 onChange={(e) => update({ interface: e.target.value })}
-                placeholder='can0 — or "_sim" for the simulated bus'
+                placeholder='can0 / gs_usb:VID:PID:serial:0 / _sim'
                 className="font-mono"
               />
             </Field>
@@ -121,7 +121,13 @@ export function CanopenDeviceEditor({ device, onSave, link }: DeviceEditorProps)
                 onChange={(n) => update({ heartbeat_timeout_ms: n })}
               />
             </Field>
-            <Field label="Bitrate (informational)">
+            <Field
+              label={
+                draft.interface.startsWith("gs_usb:")
+                  ? "Bitrate (required, bit/s)"
+                  : "Bitrate (informational)"
+              }
+            >
               <Input
                 value={draft.bitrate ?? ""}
                 onChange={(e) => {

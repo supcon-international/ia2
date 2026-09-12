@@ -107,6 +107,18 @@ holding registers/coils explicitly `read`; register kind alone is not permission
 configuration cannot be read or parsed; it never substitutes empty data
 or cached governance. Absent optional iomap/alarms files still mean none.
 
+Windows fieldbus uses the same `Device` JSON and device routes. EtherCAT
+`nic` is a Npcap name (`\\Device\\NPF_{GUID}` in JSON); Npcap is loaded
+only when connecting a real NIC. CANopen `interface` accepts
+`gs_usb:<vid_hex>:<pid_hex>:<serial>:<channel>` and requires `bitrate`
+in bits/s, which is applied to the controller. Empty serials require a
+unique matching USB adapter; this transport owns the adapter exclusively
+and supports one CANopen node per adapter. Linux SocketCAN names and
+`_sim` retain their behavior. Invalid selectors, missing dependencies and
+missing adapters produce connection errors, never simulated success.
+See [Windows CAN and EtherCAT](windows-can-ethercat.md) for the supported
+protocol subset, prerequisites and hardware acceptance limits.
+
 ## Edges (deploy targets)
 
 | Method | Path | Purpose |

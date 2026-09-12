@@ -92,6 +92,9 @@ try {
                     if ($dll.ToString() -match '^(?i:vcruntime|msvcp|ucrtbase|api-ms-win-crt-)') {
                         throw "$source imports $dll. Rebuild with scripts/build-windows.ps1 for the static-CRT package."
                     }
+                    if ($dll.ToString() -match '^(?i:wpcap|packet)\.dll$') {
+                        throw "$source imports $dll at process startup. Npcap must load only when real EtherCAT is requested; this package must also run without Npcap."
+                    }
                 }
             }
         } finally { $reader.Dispose() }
@@ -105,7 +108,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $SourceRoot '.claude\skills\industrial-automation-skill') -Destination (Join-Path $stage '.claude\skills\industrial-automation-skill') -Recurse -Force
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'install-skill.ps1') -Destination (Join-Path $stage 'scripts\install-skill.ps1')
     Copy-Item -LiteralPath (Join-Path $SourceRoot 'docs\windows.md') -Destination (Join-Path $stage 'WINDOWS.md')
-    foreach ($document in @('windows-validation.md', 'edge-deploy.md')) {
+    foreach ($document in @('windows-validation.md', 'windows-can-ethercat.md', 'edge-deploy.md')) {
         Copy-Item -LiteralPath (Join-Path $SourceRoot "docs\$document") -Destination (Join-Path $stage $document)
     }
     foreach ($notice in @('LICENSE', 'NOTICE')) {

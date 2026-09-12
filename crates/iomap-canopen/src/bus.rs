@@ -22,6 +22,11 @@ pub trait CanBus: Send {
     async fn send(&mut self, frame: CanFrame) -> Result<(), IoError>;
     /// Next frame off the bus. Long-poll — the caller select!s on it.
     async fn recv(&mut self) -> Result<CanFrame, IoError>;
+    /// Release the transport after failsafe writes. USB controllers must
+    /// be reset before their interface is released.
+    async fn shutdown(&mut self) -> Result<(), IoError> {
+        Ok(())
+    }
 }
 
 // ---------------- Sim ----------------

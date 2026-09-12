@@ -48,8 +48,13 @@ and check `$LASTEXITCODE` after each native command. Use UTF-8 files with
 `--from` instead of Bash heredocs. `-SkillOnly` installs real skill copies
 in both user discovery paths without requiring symlink privileges.
 
-Windows boundary: real EtherCAT/CANopen stay on Linux edges; Windows uses
-simulation for those buses. COM-based RTU rejects Linux-only
+Windows fieldbus paths: EtherCrab uses an optional Npcap installation and
+`nic = '\Device\NPF_{GUID}'`; CANopen uses a WinUSB-bound gs_usb adapter,
+`interface = 'gs_usb:<vid_hex>:<pid_hex>:<serial>:<channel>'`, and an
+explicit bitrate. `_sim` still selects simulation. The gs_usb transport
+owns its USB adapter exclusively, so this version supports one CANopen
+node per adapter. Real bus traffic and timing remain bench-dependent;
+see `docs/windows-can-ethercat.md`. COM-based RTU rejects Linux-only
 `transport.rs485` direction control; use an automatic-direction adapter
 without that setting. Windows network/COM enumeration is inventory, not
 hardware connection proof. A Windows `.exe` is never a Linux edge runtime;

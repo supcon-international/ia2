@@ -107,17 +107,17 @@ An `init_sdo` entry targets a CoE object the drive doesn't have. A failed startu
 
 ## CANopen
 
-- **All values frozen at 0, device unhealthy after `heartbeat_timeout_ms`** — node absent or wrong `node_id`. On a real bus check `ip link` (interface up? bitrate right?) and `candump can0` for the node's 0x700+id heartbeat.
+- **All values frozen at 0, device unhealthy after `heartbeat_timeout_ms`** — node absent or wrong `node_id`. On Linux check `ip link` (interface up? bitrate right?) and `candump can0` for the node's 0x700+id heartbeat. On Windows verify the gs_usb selector, WinUSB binding and configured bitrate; USB open or transmit completion alone does not prove the node answered. See `docs/windows-can-ethercat.md`.
 - **PDO channels never update but SDO ones do** — the node is not in Operational (PDOs only run there). Leave `start_on_connect` on, or start it from the vendor tool; also verify the PDO slot/offsets match the node's actual mapping.
 - **`needs a segmented SDO transfer (>4 bytes)`** — the object is a string/array/domain. Bind a scalar sub-object instead; segmented transfers are out of scope.
-- **macOS: `SocketCAN requires a Linux edge`** — expected; real CAN interfaces exist on the Linux edge only. Use `interface = "_sim"` for development.
+- **macOS: `SocketCAN requires a Linux edge`** — expected; use `interface = "_sim"` for development. Linux uses SocketCAN; the Windows branch uses gs_usb/WinUSB with one CANopen node per USB adapter. Physical Windows bus acceptance remains pending.
 
 ## Known limits (not bugs — design constraints today)
 
 - **Multi-PROGRAM runs are supported** — one container per scheduled instance, round-robin on one scan thread. The sole restriction is no `VAR_GLOBAL` shared across instances (rejected with a clear error). See `01-mental-model.md` fact 2.
 - **One running program per server.** Hardware (Modbus/EtherCAT bus) can have one master. Starting a program stops the previous, across all projects.
 - **No `AT %IX0.0` located variables.** Bind via `iomap.toml`, not IEC direct addressing.
-- **Real EtherCAT is Linux-only** (`CAP_NET_RAW`). On macOS use `nic: "_sim"`.
+- **Real EtherCAT requires a platform transport** — Linux uses raw sockets (`CAP_NET_RAW`); the Windows branch uses EtherCrab with a separately installed Npcap driver. Windows physical bus acceptance remains pending; see `docs/windows-can-ethercat.md`. On macOS use `nic = "_sim"` for development.
 - **RETAIN restores as i32** — wide types truncate.
 - **No per-entry iomap/tasks/device-channel edits.** Whole-document get → edit → set.
 - **WSTRING** is upstream-WIP; don't author WSTRING programs expecting them to run.

@@ -9,12 +9,13 @@ publish.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
+nusb = { version = "0.2.7", features = ["tokio"] }
 
 iocore = { path = "../iocore" }
 project = { path = "../project" }
 
 # SocketCAN is a Linux kernel interface; the real transport only exists
-# there. Dev machines (macOS) and tests use the `_sim` in-memory bus,
-# same convention as iomap-ethercat's `nic = "_sim"`.
+# there. Windows uses gs_usb-compatible USB adapters via nusb/WinUSB;
+# `_sim` remains available on every platform for offline tests.
 [target.'cfg(target_os = "linux")'.dependencies]
 socketcan = { version = "3.5", features = ["tokio"] }

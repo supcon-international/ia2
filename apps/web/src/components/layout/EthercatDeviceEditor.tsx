@@ -146,7 +146,7 @@ export function EthercatDeviceEditor({
               <Input
                 value={draft.nic}
                 onChange={(e) => update({ nic: e.target.value })}
-                placeholder="en0 / eth0"
+                placeholder={'eth0 / \\Device\\NPF_{GUID} / _sim'}
               />
             </Field>
             <Field label="Cycle time (µs)">

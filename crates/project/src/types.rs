@@ -847,7 +847,8 @@ pub enum EthercatBringup {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct EthercatConfig {
-    /// Network interface bound to the MainDevice (e.g. "eth0", "en0").
+    /// Network interface bound to the MainDevice (e.g. "eth0", "en0",
+    /// or `\Device\NPF_{GUID}` on Windows). `_sim` selects simulation.
     /// Persisted so the IDE can preserve the user's intent even on hosts
     /// where the NIC isn't currently up.
     pub nic: String,
@@ -1215,15 +1216,16 @@ pub enum OpcuaDataType {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct CanopenConfig {
-    /// CAN interface — a SocketCAN name (`can0`, Linux edge) or `_sim`
-    /// for the in-memory simulated bus (dev machines, tests). Same
-    /// convention as EtherCAT's `nic`.
+    /// CAN interface: a SocketCAN name (`can0`, Linux), a Windows USB
+    /// selector (`gs_usb:<vid_hex>:<pid_hex>:<serial>:<channel>`), or
+    /// `_sim` for the in-memory simulated bus. An empty USB serial is
+    /// allowed only when the vendor/product pair matches one adapter.
     pub interface: String,
     /// The remote node's CANopen node-id (1–127).
     pub node_id: u8,
-    /// Informational: the bus bitrate ops configured via `ip link`
-    /// (SocketCAN sets bitrate outside the process). Shown in the UI
-    /// so the project records what the wiring expects.
+    /// Bits per second. Required and applied to the controller for
+    /// gs_usb. Informational for SocketCAN, whose bitrate is configured
+    /// outside IA2 using `ip link`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bitrate: Option<u32>,
     /// Cyclic SDO poll period for `sdo`-transport channels, in ms.

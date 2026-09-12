@@ -57,7 +57,7 @@ Now just ask your agent to build a PLC program — it will author ST / LD / FBD 
 
 ## What's in the box
 
-On Windows, engineering, simulation and TCP protocols run natively; real EtherCAT and CANopen remain on Linux edges. Windows RTU uses COM ports and an adapter that controls RS485 direction itself. Windows runtime runs as a foreground process; there is no Windows service installer or hard real-time scan-timing claim.
+On Windows, engineering, simulation and TCP protocols run natively. The `codex/windows` branch includes EtherCrab/Npcap EtherCAT and gs_usb/WinUSB CANopen transports; physical bus communication remains unverified. Npcap is a separately installed, non-open-source driver and is not bundled with IA2. See [Windows bus dependencies and acceptance](docs/windows-can-ethercat.md). Windows RTU uses COM ports and an adapter that controls RS485 direction itself. Windows runtime runs as a foreground process; there is no Windows service installer or hard real-time scan-timing claim.
 
 | Component | Tech | Purpose |
 |---|---|---|

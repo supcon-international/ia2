@@ -97,7 +97,7 @@ The adapter merges channels into contiguous **read spans** per function code and
 }
 ```
 
-- `nic`: `"_sim"` (or `""`) → in-memory simulator, runs anywhere (macOS/CI). A real name (`"eth0"`) → real `ethercrab` master, **Linux + `CAP_NET_RAW` only**.
+- `nic`: `"_sim"` (or `""`) selects the in-memory simulator. A real name (`"eth0"`) selects EtherCrab on Linux with `CAP_NET_RAW`; Windows uses `\Device\NPF_{GUID}` with Npcap installed. In JSON escape each backslash (`"\\Device\\NPF_{GUID}"`). Use a dedicated wired adapter, with management traffic on another interface. Missing Npcap or an invalid NIC is an explicit connection error, never an automatic fallback to simulation. See repository `docs/windows-can-ethercat.md` for prerequisites and pending physical-bus acceptance.
 - `dc_sync` (def `"off"`): `"off"` = free-run (IO couplers). `"sync0"` = SYNC0 pulse at `cycle_us` — **servo drives (SV660N) need it to reach OP** or SAFE-OP→OP times out. `slaves[].dc_sync` overrides per-SubDevice for mixed buses (bus `"off"`, servo `"sync0"`); the bus goes DC if *any* slave is `"sync0"`, and `"off"` slaves free-run inside it.
 - `dc_static_sync_iterations` (def `0`): init-time drift compensation (FRMW burst). `0` is right for short buses; on a non-RT host one lost frame aborts init with `Timeout(Pdu)`. Raise to `1000`–`10000` on long DC buses.
 - `slaves[].init_sdo`: CoE writes applied in **PRE-OP on every connect**, in order, before PDO mapping — how non-persisting drives get set each power-up (SV660N needs `0x6060 = 8`; PDO remap goes here too). Each entry `{ index, sub_index, value, bits (8|16|32) }`, decimal (`24672` = `0x6060`). A failed write aborts init.
@@ -202,7 +202,7 @@ IA2 is the master side of a point-to-point conversation with one node; per-chann
 }
 ```
 
-- `interface`: SocketCAN name (`can0`) on a Linux edge, or `"_sim"` (default on creation). Ops bring the real one up: `ip link set can0 up type can bitrate 500000`.
+- `interface`: SocketCAN name (`can0`) on Linux, `gs_usb:<vid_hex>:<pid_hex>:<serial>:<channel>` on Windows, or `"_sim"` (default on creation). SocketCAN bitrate is configured externally: `ip link set can0 up type can bitrate 500000`. Windows gs_usb requires a WinUSB-bound adapter and explicit `bitrate` in bits/s; IA2 applies it to the CAN controller. An empty serial is permitted only for a unique vendor/product match. This version owns the USB adapter exclusively and supports one CANopen node per adapter; do not configure separate IA2 devices against different channels of the same USB adapter.
 - `index`/`sub_index`: object-dictionary address, decimal (`24641` = `0x6041`); editor renders hex.
 - `transport`: `{"kind":"sdo"}` polls/writes via SDO at `poll_interval_ms` (config-rate lane — setpoints, parameters). `tpdo`/`rpdo` ride process data on the CiA 301 predefined COB-IDs (`slot` 1–4, `byte_offset` into the ≤8-byte frame) using the node's existing mapping. Objects >4 bytes (segmented SDO) unsupported — bind a scalar.
 - `heartbeat_timeout_ms`: no heartbeat this long → unhealthy (inputs freeze at last-known); `0` disables (SDO failures flip health instead).

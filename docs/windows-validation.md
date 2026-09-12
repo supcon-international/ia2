@@ -4,6 +4,11 @@ Native Windows engineering-station work on `codex/windows`, based on
 `474364d`. The pinned `vendor/ironplc` submodule is unchanged at
 `72d6ac4272958bc61215c8fe06cb8ac00af3d416`.
 
+This record predates the native gs_usb and Npcap transport integration.
+Its passes do not validate those transports. See the separate
+[Windows CANopen/EtherCAT acceptance record](windows-can-ethercat.md)
+for their current status and hardware tests still pending.
+
 ## Environment
 
 - Windows 11 Home, x64, build 10.0.26200; Intel Core i9-13980HX, 64 GB RAM.
@@ -87,6 +92,8 @@ the installer's initial misclassification of runtime `--help` output.
 Physical Modbus RTU/TCP, OPC UA and MQTT device integration, deployment
 from Windows to a real Linux edge, sustained timing under production
 load, installer signing and Windows service lifecycle remain separate
-work. Real EtherCAT and CANopen are unsupported on Windows; simulation
-does not change that boundary. COM ports and network-interface records
-are native OS inventory, not proof of device communication.
+work. Real EtherCAT and CANopen were unsupported by the Windows build
+tested in this record. The subsequent native transport work has its own
+acceptance record; it does not retroactively establish hardware results.
+COM ports and network-interface records are native OS inventory, not
+proof of device communication.

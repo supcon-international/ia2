@@ -40,6 +40,7 @@ use tokio::time::Instant;
 
 pub mod bus;
 pub mod frame;
+pub mod gs_usb;
 #[cfg(target_os = "linux")]
 mod socketcan_bus;
 
@@ -73,6 +74,9 @@ pub struct CanopenDevice {
 }
 
 enum Cmd {
+    Shutdown {
+        resp: oneshot::Sender<Result<(), IoError>>,
+    },
     /// Write bytes to an object over SDO; resolves when the node acks.
     SdoWrite {
         index: u16,
@@ -115,6 +119,19 @@ impl CanopenDevice {
         let bus: Box<dyn CanBus> = if is_sim(&config.interface) {
             tracing::info!(device = %name, "canopen in simulation mode (interface=\"_sim\") — no real bus traffic");
             Box::new(bus::SimBus::connect(config))
+        } else if config.interface.starts_with("gs_usb:") {
+            let selection = gs_usb::Selection::parse(&config.interface, config.bitrate)?;
+            #[cfg(windows)]
+            {
+                Box::new(gs_usb::GsUsbBus::open(selection).await?)
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = selection;
+                return Err(IoError::Connect(
+                    "gs_usb transport is enabled on Windows; use a configured SocketCAN interface on Linux or _sim offline".into(),
+                ));
+            }
         } else {
             #[cfg(target_os = "linux")]
             {
@@ -124,15 +141,17 @@ impl CanopenDevice {
             #[cfg(not(target_os = "linux"))]
             {
                 return Err(IoError::Connect(format!(
-                    "canopen interface '{}': SocketCAN requires a Linux edge; \
-                     use \"_sim\" on this machine",
+                    "canopen interface '{}': SocketCAN requires Linux; \
+                     Windows uses gs_usb:<vid>:<pid>:<serial>:<channel> with bitrate, \
+                     or use \"_sim\" offline",
                     config.interface
                 )));
             }
         };
 
         let mirror = Arc::new(RwLock::new(HashMap::new()));
-        let healthy = Arc::new(AtomicBool::new(true));
+        // Claiming a USB adapter is not proof that the CANopen node exists.
+        let healthy = Arc::new(AtomicBool::new(!config.interface.starts_with("gs_usb:")));
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
 
         let io = IoTask::new(
@@ -272,11 +291,32 @@ impl IoDevice for CanopenDevice {
     }
 
     async fn shutdown(&mut self) -> Result<(), IoError> {
-        if let Some(t) = self.io_task.take() {
-            t.abort();
+        let Some(mut task) = self.io_task.take() else {
+            return Ok(());
+        };
+        let (resp, rx) = oneshot::channel();
+        let shutdown = async {
+            self.cmd_tx
+                .send(Cmd::Shutdown { resp })
+                .await
+                .map_err(|_| IoError::Transport("canopen io task already stopped".into()))?;
+            rx.await
+                .map_err(|_| IoError::Transport("canopen shutdown response lost".into()))?
+        };
+        let result = match tokio::time::timeout(Duration::from_secs(2), shutdown).await {
+            Ok(result) => result,
+            Err(_) => Err(IoError::Transport("canopen shutdown timed out".into())),
+        };
+        if tokio::time::timeout(Duration::from_secs(1), &mut task)
+            .await
+            .is_err()
+        {
+            task.abort();
+            let _ = task.await;
         }
+        self.healthy.store(false, Ordering::Relaxed);
         tracing::info!(device = %self.name, "canopen adapter stopped");
-        Ok(())
+        result
     }
 }
 
@@ -329,6 +369,7 @@ struct IoTask {
     last_heartbeat: Instant,
     hb_ok: bool,
     sdo_health: HealthTracker,
+    peer_seen: bool,
 }
 
 impl IoTask {
@@ -380,6 +421,7 @@ impl IoTask {
             last_heartbeat: Instant::now(),
             hb_ok: true,
             sdo_health: HealthTracker::new(UNHEALTHY_AFTER_FAILURES),
+            peer_seen: !config.interface.starts_with("gs_usb:"),
         }
     }
 
@@ -404,12 +446,17 @@ impl IoTask {
                     Err(e) => {
                         tracing::error!(device = %self.device, %e, "canopen bus receive failed; io task exiting");
                         self.set_healthy(false);
-                        return;
+                        break;
                     }
                 },
                 maybe = self.cmd_rx.recv() => match maybe {
+                    Some(Cmd::Shutdown { resp }) => {
+                        self.set_healthy(false);
+                        let _ = resp.send(self.bus.shutdown().await);
+                        return;
+                    }
                     Some(cmd) => self.on_cmd(cmd).await,
-                    None => return, // device dropped
+                    None => break, // device dropped
                 },
                 _ = poll.tick() => {
                     self.schedule_poll();
@@ -418,6 +465,10 @@ impl IoTask {
                 _ = house.tick() => self.housekeeping().await,
             }
         }
+        self.set_healthy(false);
+        if let Err(e) = self.bus.shutdown().await {
+            tracing::error!(device = %self.device, %e, "canopen bus shutdown failed");
+        }
     }
 
     fn set_healthy(&self, up: bool) {
@@ -425,13 +476,31 @@ impl IoTask {
     }
     fn recompute_health(&self) {
         let hb = self.heartbeat_timeout.is_none() || self.hb_ok;
-        self.set_healthy(hb && self.sdo_health.is_healthy());
+        self.set_healthy(self.peer_seen && hb && self.sdo_health.is_healthy());
+    }
+
+    fn record_peer(&mut self) {
+        if !self.peer_seen {
+            self.peer_seen = true;
+            self.recompute_health();
+        }
     }
 
     async fn on_frame(&mut self, f: CanFrame) {
         // Heartbeat → watchdog + health.
         if f.id == frame::cob::heartbeat(self.node) {
-            if frame::parse_heartbeat(&f).is_some() {
+            if f.len == 1
+                && matches!(
+                    frame::parse_heartbeat(&f),
+                    Some(
+                        frame::NmtState::BootUp
+                            | frame::NmtState::Stopped
+                            | frame::NmtState::Operational
+                            | frame::NmtState::PreOperational
+                    )
+                )
+            {
+                self.record_peer();
                 self.last_heartbeat = Instant::now();
                 if !self.hb_ok {
                     self.hb_ok = true;
@@ -444,14 +513,20 @@ impl IoTask {
         // TPDO → mirror.
         if let Some(entries) = self.tpdo_map.get(&f.id) {
             let mut m = self.mirror.write().expect("mirror poisoned");
+            let mut decoded = false;
             for (offset, ty, name) in entries {
                 let start = *offset as usize;
                 let end = start + frame::type_len(*ty);
                 if end <= f.len as usize {
                     if let Some(v) = frame::bytes_to_value(&f.data[start..end], *ty) {
                         m.insert(name.clone(), v);
+                        decoded = true;
                     }
                 }
+            }
+            drop(m);
+            if decoded {
+                self.record_peer();
             }
             return;
         }
@@ -481,6 +556,7 @@ impl IoTask {
             self.in_flight = Some(pending);
             return;
         }
+        self.record_peer();
         match (resp, pending.kind) {
             (SdoResponse::UploadOk { data, len, .. }, PendingKind::Read { channel, ty }) => {
                 if let Some(v) = frame::bytes_to_value(&data[..len], ty) {
@@ -542,6 +618,7 @@ impl IoTask {
 
     async fn on_cmd(&mut self, cmd: Cmd) {
         match cmd {
+            Cmd::Shutdown { .. } => unreachable!("shutdown handled by the io loop"),
             Cmd::SdoWrite {
                 index,
                 sub,
@@ -687,6 +764,202 @@ impl IoTask {
                 }
                 self.record_sdo(false);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod transport_lifecycle_tests {
+    use super::*;
+
+    struct ControlledBus {
+        incoming: mpsc::Receiver<Result<CanFrame, IoError>>,
+        stopped: Arc<AtomicBool>,
+        stop_fails: bool,
+    }
+
+    #[async_trait]
+    impl CanBus for ControlledBus {
+        async fn send(&mut self, _: CanFrame) -> Result<(), IoError> {
+            Ok(())
+        }
+
+        async fn recv(&mut self) -> Result<CanFrame, IoError> {
+            self.incoming
+                .recv()
+                .await
+                .unwrap_or_else(|| Err(IoError::Transport("test transport disconnected".into())))
+        }
+
+        async fn shutdown(&mut self) -> Result<(), IoError> {
+            self.stopped.store(true, Ordering::SeqCst);
+            if self.stop_fails {
+                Err(IoError::Transport("controller reset failed".into()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn device(
+        stop_fails: bool,
+    ) -> (
+        CanopenDevice,
+        mpsc::Sender<Result<CanFrame, IoError>>,
+        Arc<AtomicBool>,
+    ) {
+        let config = CanopenConfig {
+            interface: "_sim".into(),
+            node_id: 1,
+            bitrate: None,
+            poll_interval_ms: 100,
+            heartbeat_timeout_ms: 0,
+            start_on_connect: false,
+            channels: vec![],
+        };
+        let (tx, incoming) = mpsc::channel(4);
+        let stopped = Arc::new(AtomicBool::new(false));
+        let bus = Box::new(ControlledBus {
+            incoming,
+            stopped: stopped.clone(),
+            stop_fails,
+        });
+        let mirror = Arc::new(RwLock::new(HashMap::new()));
+        let healthy = Arc::new(AtomicBool::new(true));
+        let (cmd_tx, cmd_rx) = mpsc::channel(4);
+        let io = IoTask::new(
+            "test".into(),
+            &config,
+            bus,
+            mirror.clone(),
+            healthy.clone(),
+            cmd_rx,
+        );
+        let dev = CanopenDevice {
+            name: "test".into(),
+            channels: HashMap::new(),
+            mirror,
+            healthy,
+            cmd_tx,
+            io_task: Some(tokio::spawn(io.run())),
+        };
+        (dev, tx, stopped)
+    }
+
+    #[tokio::test]
+    async fn explicit_shutdown_waits_for_controller_reset_and_reports_failure() {
+        for fails in [false, true] {
+            let (mut dev, _tx, stopped) = device(fails);
+            let result = dev.shutdown().await;
+            assert_eq!(result.is_err(), fails);
+            if let Err(e) = result {
+                assert!(e.to_string().contains("controller reset failed"));
+            }
+            assert!(stopped.load(Ordering::SeqCst));
+            assert!(!dev.is_healthy());
+            // Closing the same device again never starts another reset.
+            dev.shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn receive_fault_marks_unhealthy_and_closes_transport() {
+        for error in ["USB disconnected", "CAN bus-off", "CAN receive overflow"] {
+            let (mut dev, tx, stopped) = device(false);
+            tx.send(Err(IoError::Transport(error.into())))
+                .await
+                .unwrap();
+            let task = dev.io_task.take().unwrap();
+            tokio::time::timeout(Duration::from_secs(1), task)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!dev.is_healthy());
+            assert!(stopped.load(Ordering::SeqCst));
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_device_closes_transport_without_an_explicit_shutdown() {
+        let (mut dev, _tx, stopped) = device(false);
+        let task = dev.io_task.take().unwrap();
+        drop(dev);
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stopped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn usb_open_needs_valid_peer_evidence_before_becoming_healthy() {
+        for proof in ["heartbeat", "tpdo", "sdo"] {
+            let config = CanopenConfig {
+                interface: "gs_usb:1d50:606f:test:0".into(),
+                node_id: 1,
+                bitrate: Some(500_000),
+                poll_interval_ms: 100,
+                heartbeat_timeout_ms: 0,
+                start_on_connect: false,
+                channels: vec![],
+            };
+            let (_, incoming) = mpsc::channel(1);
+            let bus = Box::new(ControlledBus {
+                incoming,
+                stopped: Arc::new(AtomicBool::new(false)),
+                stop_fails: false,
+            });
+            let healthy = Arc::new(AtomicBool::new(false));
+            let (_, commands) = mpsc::channel(1);
+            let mut io = IoTask::new(
+                "test".into(),
+                &config,
+                bus,
+                Arc::new(RwLock::new(HashMap::new())),
+                healthy.clone(),
+                commands,
+            );
+            io.recompute_health();
+            assert!(!healthy.load(Ordering::Relaxed));
+            for f in [
+                CanFrame::new(0x702, &[5]),                            // another node
+                CanFrame::new(0x701, &[]),                             // malformed heartbeat
+                CanFrame::new(0x701, &[99]),                           // undefined NMT state
+                CanFrame::new(0x581, &[0x43, 0, 0x20, 0, 1, 0, 0, 0]), // no matching request
+            ] {
+                io.on_frame(f).await;
+                assert!(!healthy.load(Ordering::Relaxed));
+            }
+            match proof {
+                "heartbeat" => io.on_frame(CanFrame::new(0x701, &[5])).await,
+                "tpdo" => {
+                    io.tpdo_map.insert(
+                        0x181,
+                        vec![(0, project::CanopenDataType::U16, "input".into())],
+                    );
+                    io.on_frame(CanFrame::new(0x181, &[1])).await;
+                    assert!(!healthy.load(Ordering::Relaxed));
+                    io.on_frame(CanFrame::new(0x181, &[1, 0])).await;
+                }
+                "sdo" => {
+                    io.in_flight = Some(PendingSdo {
+                        index: 0x2000,
+                        sub: 0,
+                        kind: PendingKind::Read {
+                            channel: "input".into(),
+                            ty: project::CanopenDataType::U16,
+                        },
+                        deadline: Instant::now() + SDO_TIMEOUT,
+                    });
+                    io.on_frame(CanFrame::new(0x581, &[0x4b, 1, 0x20, 0, 1, 0, 0, 0]))
+                        .await;
+                    assert!(!healthy.load(Ordering::Relaxed));
+                    io.on_frame(CanFrame::new(0x581, &[0x4b, 0, 0x20, 0, 1, 0, 0, 0]))
+                        .await;
+                }
+                _ => unreachable!(),
+            }
+            assert!(healthy.load(Ordering::Relaxed), "{proof}");
         }
     }
 }
