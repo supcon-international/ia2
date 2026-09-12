@@ -6,13 +6,22 @@
 # HARNESS_TIMEOUT_SECS set; combined output becomes the transcript.
 # Exit 3 means "blocked" (tool missing), not a task failure.
 #
-# TODO: verify the exact non-interactive invocation against current
-# Codex CLI docs before first use — the sandbox/approval flag names have
-# changed between releases; the flags below match the last-known surface
-# (`codex exec`, `--skip-git-repo-check` because the workdir is not a
-# git repo, and the sandbox bypass as the analog of Claude Code's
-# skip-permissions — acceptable only because the workdir is an isolated
-# throwaway and `cs` on PATH is pinned to the harness's loopback server).
+# Invocation verified against codex-cli 0.153.4 (2026-09-08): `codex
+# exec` takes the prompt positionally, `--skip-git-repo-check` is
+# required because the workdir is a bare mktemp dir, and the run is
+# confined by Codex's OWN sandbox rather than bypassing it.
+#
+# WHY `-s workspace-write` and not the sandbox bypass: Codex's
+# workspace-write policy already grants exactly what a task needs —
+# writes under the workdir plus /tmp and $TMPDIR, which is where run.sh
+# puts the rundir — so the bypass buys nothing and gives up the
+# containment. Network access is off by default under that policy and
+# must be re-enabled, or the PATH-shimmed `cs` cannot reach the
+# harness's loopback server and every task fails for the wrong reason.
+#
+# stdin is closed: with a positional prompt, `codex exec` still appends
+# piped stdin as a `<stdin>` block, so an inherited pipe would silently
+# corrupt the task prompt.
 
 set -u
 
@@ -33,7 +42,14 @@ TIMEOUT_SECS="${HARNESS_TIMEOUT_SECS:-1200}"
 # ships no GNU `timeout`) so the behavior is deterministic across
 # machines. Exit: child status propagated; signal deaths map to 128+N
 # (timeout => 143).
-exec perl -e '
+#
+# The output is teed to a scratch copy so the exit status can be
+# classified afterwards (see the blocked check below); run.sh still sees
+# the identical stream on stdout and records it as the transcript.
+SCRATCH=$(mktemp "${TMPDIR:-/tmp}/codex-adapter.XXXXXX")
+trap 'rm -f "$SCRATCH"' EXIT
+
+perl -e '
   my $secs = shift @ARGV;
   my $pid  = fork;
   die "fork failed: $!\n" unless defined $pid;
@@ -56,5 +72,28 @@ exec perl -e '
   exit(128 + ($st & 127)) if $st & 127;
   exit($st >> 8);
 ' "$TIMEOUT_SECS" \
-  codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox \
-  "$(cat "$HARNESS_PROMPT")"
+  codex exec --json --skip-git-repo-check \
+  -s workspace-write -c sandbox_workspace_write.network_access=true \
+  "$(cat "$HARNESS_PROMPT")" </dev/null 2>&1 | tee "$SCRATCH"
+STATUS=${PIPESTATUS[0]}
+
+# A CLI that refused to run is BLOCKED, not a failed task. Codex exits 1
+# with a usage/rate-limit banner and an empty session when the account
+# has no credits left; without this check the grader sees a workdir with
+# no RESULT.md and records "the model failed the task", which is a lie
+# about a run that never happened. Keyed on a non-zero exit AND the
+# structured error event, never a keyword in model text or command output.
+if [ "$STATUS" -ne 0 ] \
+   && jq -Rse '
+     [split("\n")[] | fromjson?
+      | select(.type == "error" or .type == "turn.failed")
+      | (.message // .error.message // "")
+      | select(type == "string")
+      | test("hit your usage limit|usage limit reached|rate limit|quota exceeded|429 too many requests"; "i")]
+     | any
+   ' "$SCRATCH" >/dev/null 2>&1; then
+  echo "codex refused to run: account usage/rate limit reached — blocked, not a task failure" >&2
+  exit 3
+fi
+
+exit "$STATUS"
