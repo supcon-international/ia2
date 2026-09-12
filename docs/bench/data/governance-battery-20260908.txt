@@ -1,0 +1,97 @@
+=== T1 unlisted variable jog → expect 403 ===
+write to 'jog (write_mode = allowlist, no rule allows it)' rejected by project governance
+HTTP 403
+=== T2 unlisted variable enable → expect 403 (motion var protected) ===
+write to 'enable (write_mode = allowlist, no rule allows it)' rejected by project governance
+HTTP 403
+=== T3 max_rev = 5.0 (bits 1084227584) → expect clamp to 2.0 (bits 1073741824) ===
+{"name":"max_rev","ok":true,"value":1073741824}
+HTTP 200
+=== T4 max_rev = 1.5 in-range (bits 1069547520) → expect unchanged echo ===
+{"name":"max_rev","ok":true,"value":1069547520}
+HTTP 200
+=== T5 max_rev = NaN (bits 2143289344) → expect 403 deny ===
+write to 'max_rev (value NaN cannot be checked against the rule's min/max)' rejected by project governance
+HTTP 403
+=== T6 restore max_rev = 0.0 (safe motion-latch state) ===
+{"name":"max_rev","ok":true,"value":0}
+HTTP 200
+=== T7 audit ring ===
+[
+  {
+    "ts_unix_secs": 1788833057,
+    "origin": "anonymous",
+    "op": "force",
+    "name": "reset",
+    "requested": 1,
+    "applied": 1,
+    "result": "ok"
+  },
+  {
+    "ts_unix_secs": 1788833057,
+    "origin": "anonymous",
+    "op": "force",
+    "name": "reset",
+    "requested": 0,
+    "applied": 0,
+    "result": "ok"
+  },
+  {
+    "ts_unix_secs": 1788833058,
+    "origin": "anonymous",
+    "op": "unforce",
+    "name": "reset",
+    "result": "ok"
+  },
+  {
+    "ts_unix_secs": 1788833083,
+    "origin": "anonymous",
+    "op": "write",
+    "name": "jog",
+    "requested": 0,
+    "result": "write to 'jog (write_mode = allowlist, no rule allows it)' rejected by project governance"
+  },
+  {
+    "ts_unix_secs": 1788833083,
+    "origin": "anonymous",
+    "op": "write",
+    "name": "enable",
+    "requested": 1,
+    "result": "write to 'enable (write_mode = allowlist, no rule allows it)' rejected by project governance"
+  },
+  {
+    "ts_unix_secs": 1788833083,
+    "origin": "bench-verify",
+    "op": "write",
+    "name": "max_rev",
+    "requested": 1084227584,
+    "applied": 1073741824,
+    "result": "clamped"
+  },
+  {
+    "ts_unix_secs": 1788833083,
+    "origin": "bench-verify",
+    "op": "write",
+    "name": "max_rev",
+    "requested": 1069547520,
+    "applied": 1069547520,
+    "result": "ok"
+  },
+  {
+    "ts_unix_secs": 1788833083,
+    "origin": "anonymous",
+    "op": "write",
+    "name": "max_rev",
+    "requested": 2143289344,
+    "result": "write to 'max_rev (value NaN cannot be checked against the rule's min/max)' rejected by project governance"
+  },
+  {
+    "ts_unix_secs": 1788833083,
+    "origin": "bench-verify",
+    "op": "write",
+    "name": "max_rev",
+    "requested": 0,
+    "applied": 0,
+    "result": "ok"
+  }
+]

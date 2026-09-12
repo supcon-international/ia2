@@ -19,10 +19,17 @@ parameters (ratio / engage / …) through named channels that the device routes
 into a lock-free struct instead of PDI bytes, and reads engaged/trip back.
 Equivalent to the TwinCAT NC / SoftMotion split.
 
-Field measurement on a dual-SV660N bench: at 13 rpm, 2:1, the in-cycle path
-cut mean inter-axis sync error from 1.02° to 0.73° (−29%), matching the
-predicted scan-plane jitter term; at low speed the two are equal (error is
-dominated by the drives' own following lag).
+A dual-SV660N A/B run (13 rpm, 2:1) was originally reported here as a
+−29% mean sync-error improvement. That figure did not survive
+re-analysis of its raw data: the analysis script was not retained, the
+recomputed improvement is smaller than its own sensitivity to the
+analysis window (it even changes sign), and the 100 ms snapshot poll
+used to measure it is ~50× coarser than the 2 ms scan-plane effect
+being claimed. The theoretical motivation stands (SYNC0-aligned
+in-cycle gearing removes scan-plane phase jitter by construction), but
+no measured improvement is claimed until an A/B is re-run with
+in-runtime logging. At low speed the two paths measure equal — error is
+dominated by the drives' own following lag either way.
 
 ## What this project shows
 

@@ -1,0 +1,8 @@
+Sep 08 08:53:05.720529 edge runtime[3993248]: 2026-09-08T08:53:05.720469Z  WARN ironplc_bridge::runtime: failsafe call failed device=coupler e=transport: modbus exception: Illegal data address
+Sep 08 08:53:05.720529 edge runtime[3993248]: 2026-09-08T08:53:05.720499Z  INFO iomap_ethercat::real: ethercat output PDI zeroed for failsafe device=servo
+Sep 08 08:53:05.950484 edge runtime[3993248]: 2026-09-08T08:53:05.950463Z  INFO iomap_ethercat::real: ethercat cyclic loop exiting (shutdown signalled)
+Sep 08 08:53:05.952326 edge runtime[3993248]: 2026-09-08T08:53:05.952312Z  INFO iomap_ethercat::real: ethercat cyclic worker joined (final failsafe frame flushed) device=servo
+Sep 08 08:53:05.952326 edge runtime[3993248]: 2026-09-08T08:53:05.952321Z  INFO ironplc_bridge::runtime: scan loop exited cleanly; failsafe applied devices=2
+Sep 08 08:53:05.952601 edge runtime[3993248]: 2026-09-08T08:53:05.952577Z  INFO ia2_runtime: bridge drained; outputs in failsafe
+Sep 08 08:53:05.952632 edge runtime[3993248]: 2026-09-08T08:53:05.952610Z  INFO ia2_runtime: ia2-runtime exiting
+Sep 08 08:53:05.973773 edge systemd[1]: Stopped ia2.service - IA2 PLC runtime.

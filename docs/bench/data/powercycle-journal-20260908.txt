@@ -1,0 +1,96 @@
+Sep 08 08:39:07.600491 edge runtime[3678123]: 2026-09-08T08:39:07.600416Z ERROR iomap_ethercat::real: ethercat bus shape CHANGED mid-run (AL demotion/promotion or WKC step) prev_states=[Op, Op, Op] new_states=[Op, None, None] prev_wkc=9 new_wkc=3 edge=1
+Sep 08 08:39:07.600951 edge runtime[3678123]: 2026-09-08T08:39:07.600504Z  WARN iomap_ethercat::real: AL status code read failed slave=1 e=WorkingCounter { expected: 1, received: 0 }
+Sep 08 08:39:07.600951 edge runtime[3678123]: 2026-09-08T08:39:07.600562Z  WARN iomap_ethercat::real: AL status code read failed slave=2 e=WorkingCounter { expected: 1, received: 0 }
+Sep 08 08:39:07.600951 edge runtime[3678123]: 2026-09-08T08:39:07.600568Z ERROR iomap_ethercat::real: subdevice(s) out of OP mid-run — re-walking the bus (previously this wedged until a process restart)
+Sep 08 08:39:07.600951 edge runtime[3678123]: 2026-09-08T08:39:07.600584Z ERROR ethercrab::pdu_loop::frame_element: Failed to claim receiving frame 19: expected state Sent, but got None
+Sep 08 08:39:07.600951 edge runtime[3678123]: 2026-09-08T08:39:07.600606Z ERROR ethercrab::std::unix: Failed to receive frame: pdu: invalid PDU index 19
+Sep 08 08:39:07.607331 edge runtime[3678123]: 2026-09-08T08:39:07.607317Z ERROR iomap_ethercat::real: ethercat tx_rx task exited e=ReceiveFrame
+Sep 08 08:39:07.607331 edge runtime[3678123]: 2026-09-08T08:39:07.607325Z ERROR iomap_ethercat::real: ethercat tx_rx socket pump EXITED (return or panic) — the supervise loop will rebuild the transport
+Sep 08 08:39:07.630616 edge runtime[3678123]: 2026-09-08T08:39:07.630601Z  WARN iomap_ethercat::real: ethercat bus re-walk step failed; backing off before retry attempt=1 error=init_single_group: Timeout(Pdu)
+Sep 08 08:39:07.630616 edge runtime[3678123]: 2026-09-08T08:39:07.630611Z  INFO iomap_ethercat::real: ethercat re-walk backoff attempt=1 delay_ms=1000
+Sep 08 08:39:08.631399 edge runtime[3678123]: 2026-09-08T08:39:08.631277Z ERROR iomap_ethercat::real: rebuilding ethercat transport after pump death (fresh PduStorage + MainDevice + pump)
+Sep 08 08:39:08.671605 edge runtime[3678123]: 2026-09-08T08:39:08.671560Z  WARN iomap_ethercat::real: ethercat bus re-walk step failed; backing off before retry attempt=2 error=init_single_group: Timeout(Pdu)
+Sep 08 08:39:08.671605 edge runtime[3678123]: 2026-09-08T08:39:08.671586Z  INFO iomap_ethercat::real: ethercat re-walk backoff attempt=2 delay_ms=2000
+Sep 08 08:39:08.679342 edge runtime[3678123]: 2026-09-08T08:39:08.679262Z  WARN iomap_ethercat::real: ethercat cyclic exchange paused: bus re-walk in progress device=stepper cycles=11198202 reinits=3
+Sep 08 08:39:10.703670 edge runtime[3678123]: 2026-09-08T08:39:10.703602Z  WARN iomap_ethercat::real: ethercat bus re-walk step failed; backing off before retry attempt=3 error=init_single_group: Timeout(Pdu)
+Sep 08 08:39:10.703670 edge runtime[3678123]: 2026-09-08T08:39:10.703655Z  INFO iomap_ethercat::real: ethercat re-walk backoff attempt=3 delay_ms=4000
+Sep 08 08:39:14.735515 edge runtime[3678123]: 2026-09-08T08:39:14.735434Z  WARN iomap_ethercat::real: ethercat bus re-walk step failed; backing off before retry attempt=4 error=init_single_group: Timeout(Pdu)
+Sep 08 08:39:14.735515 edge runtime[3678123]: 2026-09-08T08:39:14.735495Z  INFO iomap_ethercat::real: ethercat re-walk backoff attempt=4 delay_ms=5000
+Sep 08 08:39:19.769706 edge runtime[3678123]: 2026-09-08T08:39:19.769610Z  WARN iomap_ethercat::real: ethercat bus re-walk step failed; backing off before retry attempt=5 error=init_single_group: Timeout(Pdu)
+Sep 08 08:39:19.769706 edge runtime[3678123]: 2026-09-08T08:39:19.769645Z  INFO iomap_ethercat::real: ethercat re-walk backoff attempt=5 delay_ms=5000
+Sep 08 08:39:24.803731 edge runtime[3678123]: 2026-09-08T08:39:24.803615Z  WARN iomap_ethercat::real: ethercat bus re-walk step failed; backing off before retry attempt=6 error=init_single_group: Timeout(Pdu)
+Sep 08 08:39:24.803731 edge runtime[3678123]: 2026-09-08T08:39:24.803679Z  INFO iomap_ethercat::real: ethercat re-walk backoff attempt=6 delay_ms=5000
+Sep 08 08:39:29.843040 edge runtime[3678123]: 2026-09-08T08:39:29.842936Z  WARN iomap_ethercat::real: ethercat bus re-walk step failed; backing off before retry attempt=7 error=init_single_group: Timeout(Pdu)
+Sep 08 08:39:29.843040 edge runtime[3678123]: 2026-09-08T08:39:29.842991Z  INFO iomap_ethercat::real: ethercat re-walk backoff attempt=7 delay_ms=5000
+Sep 08 08:39:34.879058 edge runtime[3678123]: 2026-09-08T08:39:34.878990Z  WARN iomap_ethercat::real: ethercat bus re-walk step failed; backing off before retry attempt=8 error=init_single_group: Timeout(Pdu)
+Sep 08 08:39:34.879058 edge runtime[3678123]: 2026-09-08T08:39:34.879016Z  INFO iomap_ethercat::real: ethercat re-walk backoff attempt=8 delay_ms=5000
+Sep 08 08:39:39.917260 edge runtime[3678123]: 2026-09-08T08:39:39.917147Z  WARN iomap_ethercat::real: ethercat bus re-walk step failed; backing off before retry attempt=9 error=init_single_group: Timeout(Pdu)
+Sep 08 08:39:39.917260 edge runtime[3678123]: 2026-09-08T08:39:39.917208Z  INFO iomap_ethercat::real: ethercat re-walk backoff attempt=9 delay_ms=5000
+Sep 08 08:39:44.953323 edge runtime[3678123]: 2026-09-08T08:39:44.953235Z  WARN iomap_ethercat::real: ethercat bus re-walk step failed; backing off before retry attempt=10 error=init_single_group: Timeout(Pdu)
+Sep 08 08:39:44.953323 edge runtime[3678123]: 2026-09-08T08:39:44.953292Z  INFO iomap_ethercat::real: ethercat re-walk backoff attempt=10 delay_ms=5000
+Sep 08 08:39:49.989843 edge runtime[3678123]: 2026-09-08T08:39:49.989765Z  WARN iomap_ethercat::real: ethercat bus re-walk step failed; backing off before retry attempt=11 error=init_single_group: Timeout(Pdu)
+Sep 08 08:39:49.989843 edge runtime[3678123]: 2026-09-08T08:39:49.989811Z  INFO iomap_ethercat::real: ethercat re-walk backoff attempt=11 delay_ms=5000
+Sep 08 08:39:52.686555 edge runtime[3678123]: 2026-09-08T08:39:52.686432Z  INFO iomap_ethercat::real: ethercat cyclic heartbeat device=stepper cycles=11198202 input_changes=10346871 healthy=false reinits=12
+Sep 08 08:39:55.193066 edge runtime[3678123]: 2026-09-08T08:39:55.192992Z  INFO iomap_ethercat::real: bus census (PRE-OP) slave=0 sd_name=InoSV660N vendor="0x00100000" product="0x000c010d" revision="0x00010000" serial="0x00000000"
+Sep 08 08:39:55.193066 edge runtime[3678123]: 2026-09-08T08:39:55.193019Z  INFO iomap_ethercat::real: bus census (PRE-OP) slave=1 sd_name=InoSV660N vendor="0x00100000" product="0x000c010d" revision="0x00010000" serial="0x00000000"
+Sep 08 08:39:55.193066 edge runtime[3678123]: 2026-09-08T08:39:55.193027Z  INFO iomap_ethercat::real: bus census (PRE-OP) slave=2 sd_name=CL3C-EC507 vendor="0x00004321" product="0x00000500" revision="0x00000001" serial="0x00000000"
+Sep 08 08:39:55.195408 edge runtime[3678123]: 2026-09-08T08:39:55.195389Z  INFO iomap_ethercat::real: init sdo write slave=2 obj="0x6060:00" value=8 bits=8
+Sep 08 08:39:55.197745 edge runtime[3678123]: 2026-09-08T08:39:55.197734Z  INFO iomap_ethercat::real: init sdo write slave=2 obj="0x1c13:00" value=0 bits=8
+Sep 08 08:39:55.200116 edge runtime[3678123]: 2026-09-08T08:39:55.200103Z  INFO iomap_ethercat::real: init sdo write slave=2 obj="0x1a00:00" value=0 bits=8
+Sep 08 08:39:55.202691 edge runtime[3678123]: 2026-09-08T08:39:55.202659Z  INFO iomap_ethercat::real: init sdo write slave=2 obj="0x1a00:08" value=1614807056 bits=32
+Sep 08 08:39:55.205169 edge runtime[3678123]: 2026-09-08T08:39:55.205153Z  INFO iomap_ethercat::real: init sdo write slave=2 obj="0x1a00:00" value=8 bits=8
+Sep 08 08:39:55.207602 edge runtime[3678123]: 2026-09-08T08:39:55.207590Z  INFO iomap_ethercat::real: init sdo write slave=2 obj="0x1a01:00" value=0 bits=8
+Sep 08 08:39:55.209954 edge runtime[3678123]: 2026-09-08T08:39:55.209941Z  INFO iomap_ethercat::real: init sdo write slave=2 obj="0x1a01:01" value=1343422480 bits=32
+Sep 08 08:39:55.212299 edge runtime[3678123]: 2026-09-08T08:39:55.212287Z  INFO iomap_ethercat::real: init sdo write slave=2 obj="0x1a01:02" value=1342177808 bits=32
+Sep 08 08:39:55.214654 edge runtime[3678123]: 2026-09-08T08:39:55.214642Z  INFO iomap_ethercat::real: init sdo write slave=2 obj="0x1a01:03" value=1342178064 bits=32
+Sep 08 08:39:55.216998 edge runtime[3678123]: 2026-09-08T08:39:55.216985Z  INFO iomap_ethercat::real: init sdo write slave=2 obj="0x1a01:00" value=3 bits=8
+Sep 08 08:39:55.219331 edge runtime[3678123]: 2026-09-08T08:39:55.219320Z  INFO iomap_ethercat::real: init sdo write slave=2 obj="0x1c13:01" value=6656 bits=16
+Sep 08 08:39:55.221665 edge runtime[3678123]: 2026-09-08T08:39:55.221650Z  INFO iomap_ethercat::real: init sdo write slave=2 obj="0x1c13:02" value=6657 bits=16
+Sep 08 08:39:55.223992 edge runtime[3678123]: 2026-09-08T08:39:55.223981Z  INFO iomap_ethercat::real: init sdo write slave=2 obj="0x1c13:00" value=2 bits=8
+Sep 08 08:39:55.233407 edge runtime[3678123]: 2026-09-08T08:39:55.233395Z  INFO iomap_ethercat::real: pdo entry dir="out/rxpdo" pdo="0x1701" obj="0x6040:00" bits=16 byte=0
+Sep 08 08:39:55.235764 edge runtime[3678123]: 2026-09-08T08:39:55.235747Z  INFO iomap_ethercat::real: pdo entry dir="out/rxpdo" pdo="0x1701" obj="0x607a:00" bits=32 byte=2
+Sep 08 08:39:55.238153 edge runtime[3678123]: 2026-09-08T08:39:55.238136Z  INFO iomap_ethercat::real: pdo entry dir="out/rxpdo" pdo="0x1701" obj="0x60b8:00" bits=16 byte=6
+Sep 08 08:39:55.240537 edge runtime[3678123]: 2026-09-08T08:39:55.240525Z  INFO iomap_ethercat::real: pdo entry dir="out/rxpdo" pdo="0x1701" obj="0x60fe:01" bits=32 byte=8
+Sep 08 08:39:55.250370 edge runtime[3678123]: 2026-09-08T08:39:55.250346Z  INFO iomap_ethercat::real: pdo entry dir="in/txpdo" pdo="0x1b01" obj="0x603f:00" bits=16 byte=0
+Sep 08 08:39:55.252740 edge runtime[3678123]: 2026-09-08T08:39:55.252730Z  INFO iomap_ethercat::real: pdo entry dir="in/txpdo" pdo="0x1b01" obj="0x6041:00" bits=16 byte=2
+Sep 08 08:39:55.255125 edge runtime[3678123]: 2026-09-08T08:39:55.255110Z  INFO iomap_ethercat::real: pdo entry dir="in/txpdo" pdo="0x1b01" obj="0x6064:00" bits=32 byte=4
+Sep 08 08:39:55.257658 edge runtime[3678123]: 2026-09-08T08:39:55.257646Z  INFO iomap_ethercat::real: pdo entry dir="in/txpdo" pdo="0x1b01" obj="0x6077:00" bits=16 byte=8
+Sep 08 08:39:55.260106 edge runtime[3678123]: 2026-09-08T08:39:55.260091Z  INFO iomap_ethercat::real: pdo entry dir="in/txpdo" pdo="0x1b01" obj="0x60f4:00" bits=32 byte=10
+Sep 08 08:39:55.262583 edge runtime[3678123]: 2026-09-08T08:39:55.262570Z  INFO iomap_ethercat::real: pdo entry dir="in/txpdo" pdo="0x1b01" obj="0x60b9:00" bits=16 byte=14
+Sep 08 08:39:55.264930 edge runtime[3678123]: 2026-09-08T08:39:55.264915Z  INFO iomap_ethercat::real: pdo entry dir="in/txpdo" pdo="0x1b01" obj="0x60ba:00" bits=32 byte=16
+Sep 08 08:39:55.267291 edge runtime[3678123]: 2026-09-08T08:39:55.267279Z  INFO iomap_ethercat::real: pdo entry dir="in/txpdo" pdo="0x1b01" obj="0x60bc:00" bits=32 byte=20
+Sep 08 08:39:55.269652 edge runtime[3678123]: 2026-09-08T08:39:55.269637Z  INFO iomap_ethercat::real: pdo entry dir="in/txpdo" pdo="0x1b01" obj="0x60fd:00" bits=32 byte=24
+Sep 08 08:39:55.279058 edge runtime[3678123]: 2026-09-08T08:39:55.279043Z  INFO iomap_ethercat::real: pdo entry dir="out/rxpdo" pdo="0x1701" obj="0x6040:00" bits=16 byte=0
+Sep 08 08:39:55.281405 edge runtime[3678123]: 2026-09-08T08:39:55.281392Z  INFO iomap_ethercat::real: pdo entry dir="out/rxpdo" pdo="0x1701" obj="0x607a:00" bits=32 byte=2
+Sep 08 08:39:55.283748 edge runtime[3678123]: 2026-09-08T08:39:55.283734Z  INFO iomap_ethercat::real: pdo entry dir="out/rxpdo" pdo="0x1701" obj="0x60b8:00" bits=16 byte=6
+Sep 08 08:39:55.286096 edge runtime[3678123]: 2026-09-08T08:39:55.286083Z  INFO iomap_ethercat::real: pdo entry dir="out/rxpdo" pdo="0x1701" obj="0x60fe:01" bits=32 byte=8
+Sep 08 08:39:55.295524 edge runtime[3678123]: 2026-09-08T08:39:55.295508Z  INFO iomap_ethercat::real: pdo entry dir="in/txpdo" pdo="0x1b01" obj="0x603f:00" bits=16 byte=0
+Sep 08 08:39:55.297887 edge runtime[3678123]: 2026-09-08T08:39:55.297868Z  INFO iomap_ethercat::real: pdo entry dir="in/txpdo" pdo="0x1b01" obj="0x6041:00" bits=16 byte=2
+Sep 08 08:39:55.300256 edge runtime[3678123]: 2026-09-08T08:39:55.300243Z  INFO iomap_ethercat::real: pdo entry dir="in/txpdo" pdo="0x1b01" obj="0x6064:00" bits=32 byte=4
+Sep 08 08:39:55.302631 edge runtime[3678123]: 2026-09-08T08:39:55.302619Z  INFO iomap_ethercat::real: pdo entry dir="in/txpdo" pdo="0x1b01" obj="0x6077:00" bits=16 byte=8
+Sep 08 08:39:55.305009 edge runtime[3678123]: 2026-09-08T08:39:55.304993Z  INFO iomap_ethercat::real: pdo entry dir="in/txpdo" pdo="0x1b01" obj="0x60f4:00" bits=32 byte=10
+Sep 08 08:39:55.307357 edge runtime[3678123]: 2026-09-08T08:39:55.307344Z  INFO iomap_ethercat::real: pdo entry dir="in/txpdo" pdo="0x1b01" obj="0x60b9:00" bits=16 byte=14
+Sep 08 08:39:55.309726 edge runtime[3678123]: 2026-09-08T08:39:55.309713Z  INFO iomap_ethercat::real: pdo entry dir="in/txpdo" pdo="0x1b01" obj="0x60ba:00" bits=32 byte=16
+Sep 08 08:39:55.312092 edge runtime[3678123]: 2026-09-08T08:39:55.312079Z  INFO iomap_ethercat::real: pdo entry dir="in/txpdo" pdo="0x1b01" obj="0x60bc:00" bits=32 byte=20
+Sep 08 08:39:55.314550 edge runtime[3678123]: 2026-09-08T08:39:55.314537Z  INFO iomap_ethercat::real: pdo entry dir="in/txpdo" pdo="0x1b01" obj="0x60fd:00" bits=32 byte=24
+Sep 08 08:39:55.323812 edge runtime[3678123]: 2026-09-08T08:39:55.323797Z  INFO iomap_ethercat::real: pdo entry dir="out/rxpdo" pdo="0x1600" obj="0x6040:00" bits=16 byte=0
+Sep 08 08:39:55.326136 edge runtime[3678123]: 2026-09-08T08:39:55.326124Z  INFO iomap_ethercat::real: pdo entry dir="out/rxpdo" pdo="0x1600" obj="0x607a:00" bits=32 byte=2
+Sep 08 08:39:55.328517 edge runtime[3678123]: 2026-09-08T08:39:55.328503Z  INFO iomap_ethercat::real: pdo entry dir="out/rxpdo" pdo="0x1600" obj="0x60b8:00" bits=16 byte=6
+Sep 08 08:39:55.337846 edge runtime[3678123]: 2026-09-08T08:39:55.337833Z  INFO iomap_ethercat::real: pdo entry dir="in/txpdo" pdo="0x1a00" obj="0x603f:00" bits=16 byte=0
+Sep 08 08:39:55.340187 edge runtime[3678123]: 2026-09-08T08:39:55.340178Z  INFO iomap_ethercat::real: pdo entry dir="in/txpdo" pdo="0x1a00" obj="0x6041:00" bits=16 byte=2
+Sep 08 08:39:55.342513 edge runtime[3678123]: 2026-09-08T08:39:55.342500Z  INFO iomap_ethercat::real: pdo entry dir="in/txpdo" pdo="0x1a00" obj="0x6061:00" bits=8 byte=4
+Sep 08 08:39:55.344872 edge runtime[3678123]: 2026-09-08T08:39:55.344859Z  INFO iomap_ethercat::real: pdo entry dir="in/txpdo" pdo="0x1a00" obj="0x6064:00" bits=32 byte=5
+Sep 08 08:39:55.347227 edge runtime[3678123]: 2026-09-08T08:39:55.347214Z  INFO iomap_ethercat::real: pdo entry dir="in/txpdo" pdo="0x1a00" obj="0x60b9:00" bits=16 byte=9
+Sep 08 08:39:55.349583 edge runtime[3678123]: 2026-09-08T08:39:55.349569Z  INFO iomap_ethercat::real: pdo entry dir="in/txpdo" pdo="0x1a00" obj="0x60ba:00" bits=32 byte=11
+Sep 08 08:39:55.349903 edge runtime[3678123]: 2026-09-08T08:39:55.349887Z  INFO iomap_ethercat::real: pdo entry dir="in/txpdo" pdo="0x1a00" obj="0x60fd:00" bits=32 byte=15
+Sep 08 08:39:55.352283 edge runtime[3678123]: 2026-09-08T08:39:55.352267Z  INFO iomap_ethercat::real: pdo entry dir="in/txpdo" pdo="0x1a00" obj="0x6040:00" bits=16 byte=19
+Sep 08 08:39:55.381125 edge runtime[3678123]: 2026-09-08T08:39:55.359252Z  INFO iomap_ethercat::real: pdo entry dir="in/txpdo" pdo="0x1a01" obj="0x5013:00" bits=16 byte=21
+Sep 08 08:39:55.381125 edge runtime[3678123]: 2026-09-08T08:39:55.361620Z  INFO iomap_ethercat::real: pdo entry dir="in/txpdo" pdo="0x1a01" obj="0x5000:02" bits=16 byte=23
+Sep 08 08:39:55.381125 edge runtime[3678123]: 2026-09-08T08:39:55.363966Z  INFO iomap_ethercat::real: pdo entry dir="in/txpdo" pdo="0x1a01" obj="0x5000:03" bits=16 byte=25
+Sep 08 08:39:55.668258 edge runtime[3678123]: 2026-09-08T08:39:55.668103Z  INFO iomap_ethercat::real: discovered subdevice slave=0 sd_name=InoSV660N vendor="0x00100000" product="0x000c010d" in_bytes=28 out_bytes=12
+Sep 08 08:39:55.668258 edge runtime[3678123]: 2026-09-08T08:39:55.668126Z  INFO iomap_ethercat::real: discovered subdevice slave=1 sd_name=InoSV660N vendor="0x00100000" product="0x000c010d" in_bytes=28 out_bytes=12
+Sep 08 08:39:55.668258 edge runtime[3678123]: 2026-09-08T08:39:55.668133Z  INFO iomap_ethercat::real: discovered subdevice slave=2 sd_name=CL3C-EC507 vendor="0x00004321" product="0x00000500" in_bytes=27 out_bytes=8
+Sep 08 08:39:55.946331 edge runtime[3678123]: 2026-09-08T08:39:55.946251Z  INFO iomap_ethercat::real: all subdevices reached OP (dc=sync0)
+Sep 08 08:39:55.946331 edge runtime[3678123]: 2026-09-08T08:39:55.946263Z  INFO iomap_ethercat::real: ethercat bus re-walked to OP; cyclic exchange resuming attempt=11 reinits=12
+Sep 08 08:39:55.946555 edge runtime[3678123]: 2026-09-08T08:39:55.946351Z  INFO iomap_ethercat::real: ethercat bus shape baseline (per-slave AL state + WKC) states=[Op, Op, Op] wkc=9
+Sep 08 08:39:55.946555 edge runtime[3678123]: 2026-09-08T08:39:55.946359Z  INFO iomap_ethercat::real: ethercat recovered; cyclic exchange running again

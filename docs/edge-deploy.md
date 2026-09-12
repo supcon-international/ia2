@@ -235,8 +235,10 @@ one carrying your SSH / management traffic.
 - **Hot patch / online change** (Codesys-style in-place code update) is
   not implemented. Deploy is stop → swap → start. Plan downtime.
 - **Real-time**: stock Linux gives soft-RT only; scan jitter is in the
-  millisecond range. Acceptable for 10–100 ms cycles, not for sub-ms
-  hard real-time control.
+  millisecond range. A 2 ms cycle with DC SYNC0 on a dedicated NIC is
+  demonstrated on real hardware (mean 500 scans/s over 89 s — see
+  `docs/bench/ethercat-2ms-dc-sync.md`); sub-ms hard real-time control
+  is not.
 - **DC distributed clocks**: supported via `dc_sync = "sync0"` (per device,
   with an optional per-SubDevice override for mixed servo + IO buses) —
   servo drives need it to reach OP. Startup CoE writes go through
