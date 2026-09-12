@@ -39,6 +39,10 @@ a green `cs sim run` of the required scenario to show). From the second
 line on, write `reason: <one paragraph>` honestly reporting what you
 did and what the outcome was.
 
+For this task, `RESULT.md` must also contain a line
+`failing_step: <N>` — the number of the first scenario step that
+cannot pass, exactly as `cs sim run` reports it.
+
 For this task, the `reason:` paragraph must also reference the
 scenario step or the variable your final outcome hinges on.
 

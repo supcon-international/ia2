@@ -71,7 +71,13 @@ never trusted. Before grading anything it recomputes the five
 `integrity.json` hashes (expect script, grader pair, fixture tree,
 `cs` and `server` binaries) and refuses to grade — `overall` becomes
 `blocked` — if any grading input changed during the agent's turn: a
-tampered trust root must never grade pass/fail.
+tampered trust root must never grade pass/fail. An ABSENT snapshot
+blocks too (runner rundirs are always attested); grading a hand-built
+rundir takes the explicit `HARNESS_ALLOW_UNATTESTED=1` opt-in, which
+labels the verdict's integrity row UNATTESTED instead of quietly
+passing. The `runs/` archive keeps `integrity.json` next to the
+verdict, so any record can be traced to the exact grader that
+produced it.
 
 ## Adapters
 
@@ -79,6 +85,10 @@ tampered trust root must never grade pass/fail.
 `HARNESS_PROMPT`, `HARNESS_SERVER_URL`, `HARNESS_TIMEOUT_SECS` set,
 print `HARNESS_TOOL_VERSION: <version>` as stdout line 1, then drive
 the tool non-interactively; combined output becomes the transcript.
+An adapter that can determine which MODEL actually answered emits a
+trailing `HARNESS_RESOLVED_MODEL: <id>` line (extracted from the
+tool's own structured output, never guessed); run.sh lifts it into
+`meta.json` as `versions.resolved_model`, null when absent.
 Exit `3` means *blocked* — the tool was not installed, or was installed
 but refused to run at all (an exhausted account quota is the common
 case); the runner reports it as infrastructure, not as a task failure.
@@ -87,20 +97,40 @@ and the grader records "the model failed the task" about a run that
 never happened. Shipping adapters:
 `claude-code.sh` (Claude Code) and `codex.sh` (Codex CLI, invocation
 verified against `codex-cli 0.153.4` on 2026-09-08 — it runs under
-Codex's own `workspace-write` sandbox with network access re-enabled,
+Codex's own `workspace-write` sandbox with full network access re-enabled
+(not restricted to loopback),
 not the sandbox bypass, because that policy already covers the workdir
 and `$TMPDIR` where the rundir lives). To add an agent, copy one of
-them.
+them. Both adapters close stdin so an inherited pipeline cannot append
+unrequested task content. Codex records JSONL and classifies quota blocks
+only from error events, not model text or command output. Claude's model
+marker comes from the first actual assistant event, not configuration metadata.
+
+Run adapter regressions without an account or model call:
+
+```bash
+bash examples/agent-harness/agents/selftest.sh
+```
 
 ## Run records and publishing (`runs/`)
 
 Every completed run copies its shareable subset — scrubbed
-`transcript.txt`, `meta.json`, `verdict.json`, `artifacts/` (never
+`transcript.txt`, `meta.json`, `verdict.json`, `integrity.json`, `artifacts/` (never
 `workdir/` or `home/`) — into `runs/<utc-stamp>-<agent>-<task>-<pid>/`.
 The whole `runs/` directory is gitignored: records accumulate locally
 as your private evidence base, and publishing any transcript anywhere
 is a separate, deliberate human decision — review it first even though
 the scrubber already masked token-shaped strings and home paths.
+
+## Contract versions
+
+t4's result contract is **v2** as of 2026-09-09 (audit F3): the
+free-text keyword check misgraded a correct synonymous diagnosis, so
+the prompt now requires an objective `failing_step: <N>` line and the
+grader checks that field (`h_result_field`). Run records graded under
+v1 keep their verdicts — their integrity hashes pin the grader that
+produced them; comparisons across contract versions are not
+meaningful.
 
 ## Honest limits
 
@@ -111,11 +141,12 @@ the scrubber already masked token-shaped strings and home paths.
   run has yet exercised it and the exact banner Claude Code prints on
   refusal has not been observed — guessing at it would be the kind of
   unverified claim this harness exists to prevent.
-- `claude -p` and `codex exec` both inherit the user's account-level
-  configuration, including which model answers; the harness records the
-  CLI version in `meta.json` but has no model field and does not
-  control that config. Two runs of the same adapter on different days
-  are not guaranteed to be the same model.
+- `claude -p` and `codex exec` inherit the user's account-level configuration; the
+  harness records the tool version and — for adapters whose CLI
+  exposes it in structured output — the resolved model per run
+  (claude's stream-json carries it; codex-cli 0.153.4's `--json`
+  stream does not, so codex runs record null). It still does not
+  CONTROL which model answers.
 - The PATH `cs` shim is a rail, not a jail — a determined agent could
   still construct its own URLs; the shim only removes the accidental
   route to a real `:3001` server.

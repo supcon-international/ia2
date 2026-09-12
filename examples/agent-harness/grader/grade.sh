@@ -12,7 +12,9 @@
 # empty if absent so a null run grades honestly) and, optionally,
 # artifacts/ (runner snapshots, e.g. forces.json) and integrity.json
 # (the runner's pre-run trust-root snapshot; see the integrity check
-# below — a mismatch blocks the run, an absent snapshot is a warning).
+# below — a mismatch blocks the run; an ABSENT snapshot also blocks
+# unless HARNESS_ALLOW_UNATTESTED=1 explicitly marks a hand-built
+# rundir, which then grades with an UNATTESTED integrity row).
 #
 # Output: <rundir>/verdict.json
 #   {task, overall: "pass"|"fail"|"blocked",
@@ -107,11 +109,10 @@ fi
 #                  listing; empty string when the task ships no fixture/
 # ANY mismatch means expect.sh, the grader, the fixture, or the
 # binaries changed while the agent had the machine — a tampered trust
-# root must never grade pass/fail, so the run is BLOCKED. A rundir
-# WITHOUT integrity.json (hand-built, selftest, pre-snapshot archives)
-# is graded on its merits with a warning row: the snapshot is an
-# attestation the runner adds, not a precondition hand-graded runs can
-# meet.
+# root must never grade pass/fail, so the run is BLOCKED. Absence is
+# handled below: blocked by default (the runner always attests), or an
+# explicit UNATTESTED pass row under HARNESS_ALLOW_UNATTESTED=1 for
+# hand-built rundirs (selftest, archaeology).
 grader_sha256_file() {
     shasum -a 256 "$1" | awk '{print $1}'
 }
@@ -122,8 +123,21 @@ grader_tree_sha256() {
 }
 INTEGRITY_JSON="$RUNDIR/integrity.json"
 if [ ! -f "$INTEGRITY_JSON" ]; then
-    grader_record "integrity" pass \
-        "WARNING: no integrity snapshot (integrity.json absent) — pre-run hashes not attested; rundir graded on its merits"
+    # Audit F4: an absent snapshot must not silently look attested.
+    # run.sh ALWAYS writes one, so a normal runner rundir without it is
+    # suspect — blocked. Hand-built / legacy / selftest rundirs opt in
+    # EXPLICITLY and are labelled unattested, never plain "pass".
+    if [ "${HARNESS_ALLOW_UNATTESTED:-0}" = "1" ]; then
+        grader_record "integrity" pass \
+            "UNATTESTED (explicit HARNESS_ALLOW_UNATTESTED=1): no integrity snapshot — pre-run hashes not attested; rundir graded on its merits"
+    else
+        grader_record "integrity" blocked \
+            "no integrity snapshot (integrity.json absent) — runner rundirs are always attested; for a hand-built rundir set HARNESS_ALLOW_UNATTESTED=1"
+        write_verdict blocked
+        rm -f "$HARNESS_CHECKS_FILE"
+        echo "grade: BLOCKED — no integrity snapshot and no HARNESS_ALLOW_UNATTESTED=1 opt-in" >&2
+        exit 3
+    fi
 else
     NOW_EXPECT=$(grader_sha256_file "$EXPECT_SH")
     NOW_GRADER=$(cat "$SCRIPT_DIR/grade.sh" "$SCRIPT_DIR/common.sh" | shasum -a 256 | awk '{print $1}')

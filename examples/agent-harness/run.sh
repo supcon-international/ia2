@@ -168,7 +168,7 @@ archive_run() {
   stamp=$(date -u +%Y%m%dT%H%M%SZ)
   archive_dir="$HARNESS_DIR/runs/$stamp-$AGENT-$TASK-$$"
   mkdir -p "$archive_dir"
-  for f in transcript.txt meta.json verdict.json; do
+  for f in transcript.txt meta.json verdict.json integrity.json; do
     [ -f "$RUNDIR/$f" ] && cp "$RUNDIR/$f" "$archive_dir/"
   done
   [ -d "$RUNDIR/artifacts" ] && cp -R "$RUNDIR/artifacts" "$archive_dir/artifacts"
@@ -323,6 +323,13 @@ case "$first_line" in
   "HARNESS_TOOL_VERSION: "*) TOOL_VERSION="${first_line#HARNESS_TOOL_VERSION: }" ;;
 esac
 
+# Resolved model (audit F7): adapters that can determine which model
+# actually answered emit a trailing HARNESS_RESOLVED_MODEL line (the
+# claude adapter lifts it from its stream-json events; codex-cli
+# 0.153.4's --json stream exposes no model field, so that adapter
+# emits nothing). Absent = null in meta.json — recorded, never guessed.
+RESOLVED_MODEL=$(grep '^HARNESS_RESOLVED_MODEL: ' "$RUNDIR/transcript.txt" 2>/dev/null   | tail -n 1 | sed 's/^HARNESS_RESOLVED_MODEL: //')
+
 # --------------------------------- 7. snapshots, teardown, meta.json
 curl -s -m 5 "$SERVER_URL/api/runtime/status" \
   > "$RUNDIR/artifacts/runtime-status.json" 2>/dev/null || true
@@ -338,6 +345,7 @@ END_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   --arg started_utc "$START_UTC" \
   --arg finished_utc "$END_UTC" \
   --arg tool_version "$TOOL_VERSION" \
+  --arg resolved_model "$RESOLVED_MODEL" \
   --arg server_sha256 "$SERVER_SHA" \
   --arg cs_sha256 "$CS_SHA" \
   --arg skill_tree_sha256 "$SKILL_SHA" \
@@ -350,7 +358,10 @@ END_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)
      task: $task,
      started_utc: $started_utc,
      finished_utc: $finished_utc,
-     versions: { tool: $tool_version },
+     versions: {
+       tool: $tool_version,
+       resolved_model: (if $resolved_model == "" then null else $resolved_model end)
+     },
      hashes: {
        server_sha256: $server_sha256,
        cs_sha256: $cs_sha256,
