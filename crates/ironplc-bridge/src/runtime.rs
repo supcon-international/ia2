@@ -2181,7 +2181,18 @@ async fn run_loop_async(
             .expect("at least one unit");
         let now = Instant::now();
         if earliest > now {
-            tokio::time::sleep((earliest - now).min(SNAPSHOT_PERIOD)).await;
+            let wait = (earliest - now).min(SNAPSHOT_PERIOD);
+            // This is a dedicated scan thread; adapter background work
+            // runs on the separate ia2-io runtime. On Windows, Tokio's
+            // timer resolution can exceed a short PLC interval. Rust's
+            // thread sleep uses a high-resolution waitable timer instead,
+            // without changing the process-wide timer resolution. Keep
+            // the deadline/watchdog accounting above unchanged: a late
+            // OS wake-up must still count as a real missed deadline.
+            #[cfg(windows)]
+            std::thread::sleep(wait);
+            #[cfg(not(windows))]
+            tokio::time::sleep(wait).await;
         }
     }
 
@@ -2884,7 +2895,11 @@ mod tests {
         ) -> Result<(), IoError> {
             // Stalling here is what makes the scan overrun its interval; it
             // also puts the counter on the exact path the guard protects.
-            tokio::time::sleep(self.stall).await;
+            // A zero-duration Tokio timer can still wait for a timer
+            // tick. The zero-stall negative control must do no waiting.
+            if !self.stall.is_zero() {
+                tokio::time::sleep(self.stall).await;
+            }
             if self.failsafe_engaged.load(Ordering::Relaxed) {
                 self.writes_after_failsafe.fetch_add(1, Ordering::Relaxed);
             }

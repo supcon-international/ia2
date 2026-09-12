@@ -9,7 +9,7 @@ mod runtime_routes;
 mod state;
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use axum::{
     http::{header, StatusCode},
@@ -118,18 +118,23 @@ async fn main() -> anyhow::Result<()> {
             dev_default.is_dir().then_some(dev_default)
         })
         .or_else(|| {
+            // Windows packages keep bin/ and library/ beside each other.
+            // Resolve from the executable so launching outside the repo works.
+            library_beside_executable(&std::env::current_exe().ok()?)
+        })
+        .or_else(|| {
             // Installed layout: `install-skill.sh` copies the repo's
             // library/ to ~/.local/share/ia2/library so a server
             // started from any CWD still has the registry. Without
             // this, `cs library import` 404s after a standard install.
-            let home = std::env::var_os("HOME").map(PathBuf::from)?;
+            let home = project::home_dir()?;
             let installed = home.join(".local/share/ia2/library");
             installed.is_dir().then_some(installed)
         });
     match &library_dir {
         Some(dir) => tracing::info!(library_dir = %dir.display(), "FB-library registry enabled"),
         None => tracing::warn!(
-            "FB-library registry DISABLED — no ./library, ~/.local/share/ia2/library, \
+            "FB-library registry DISABLED — no ./library, installed library, \
              --library-dir or IA2_LIBRARY_DIR (`cs library import` will 404)"
         ),
     }
@@ -583,5 +588,28 @@ fn try_open_last_project(state: &AppState) {
             state.projects.lock().insert_and_activate(store);
         }
         Err(e) => tracing::warn!(?path, %e, "failed to reopen last project"),
+    }
+}
+
+fn library_beside_executable(executable: &Path) -> Option<PathBuf> {
+    let library = executable.parent()?.parent()?.join("library");
+    library.is_dir().then_some(library)
+}
+
+#[cfg(test)]
+mod installed_layout_tests {
+    use super::*;
+
+    #[test]
+    fn discovers_packaged_library_with_unicode_and_spaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let install = dir.path().join("IA2 测试 安装");
+        let executable = install.join("bin/server.exe");
+        assert!(library_beside_executable(&executable).is_none());
+        std::fs::create_dir_all(install.join("library")).unwrap();
+        assert_eq!(
+            library_beside_executable(&executable),
+            Some(install.join("library"))
+        );
     }
 }

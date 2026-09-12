@@ -1151,8 +1151,46 @@ fn validate_path(name: &str) -> Result<(), StoreError> {
         {
             return Err(StoreError::InvalidName(name.into()));
         }
+        #[cfg(windows)]
+        if !valid_windows_segment(segment) {
+            return Err(StoreError::InvalidName(name.into()));
+        }
     }
     Ok(())
+}
+
+/// Reject Win32 device aliases and names that Win32 normalizes or cannot
+/// create. Check before joining a slug onto a project directory so a bad
+/// name is a validation error, rather than an I/O failure or an alias.
+#[cfg(any(windows, test))]
+fn valid_windows_segment(segment: &str) -> bool {
+    if segment.ends_with(['.', ' '])
+        || segment.chars().any(|c| {
+            c <= '\u{1f}' || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+        })
+    {
+        return false;
+    }
+    let stem = segment
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(' ')
+        .to_ascii_uppercase();
+    if matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) {
+        return false;
+    }
+    !["COM", "LPT"].iter().any(|prefix| {
+        stem.strip_prefix(prefix).is_some_and(|suffix| {
+            matches!(
+                suffix,
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
+        })
+    })
 }
 
 /// Last segment of a slash-separated path; the IEC POU identifier name.
@@ -1516,6 +1554,60 @@ fn default_config_for(protocol: Protocol) -> ProtocolConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_segments_reject_device_aliases_and_normalized_names() {
+        for name in [
+            "CON",
+            "nul.st",
+            "Aux.screen.json",
+            "cOm1",
+            "LPT9.log",
+            "COM²",
+            "LPT¹.st",
+            "CON .st",
+            "CONIN$",
+            "CONOUT$",
+            "trailing.",
+            "trailing ",
+            "x?y",
+            "x*y",
+            "x<y",
+            "x>y",
+            "x|y",
+            "x\"y",
+            "x\u{0}y",
+            "x\u{1f}y",
+        ] {
+            assert!(!valid_windows_segment(name), "accepted {name:?}");
+        }
+        for name in [
+            "main",
+            "控制 回路",
+            "COM10",
+            "console",
+            "auxiliary",
+            "foo.bar",
+        ] {
+            assert!(valid_windows_segment(name), "rejected {name:?}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_invalid_project_name_fails_before_creating_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("should-not-exist");
+        assert!(matches!(
+            ProjectStore::create(root.clone(), "NUL"),
+            Err(StoreError::InvalidName(_))
+        ));
+        assert!(!root.exists());
+        assert!(matches!(
+            validate_path("folder/COM1"),
+            Err(StoreError::InvalidName(_))
+        ));
+    }
 
     #[test]
     fn read_hmi_distinguishes_absent_from_corrupt() {

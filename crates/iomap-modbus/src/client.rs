@@ -294,6 +294,15 @@ async fn establish(
             }
         }
         ModbusTransport::Rtu(p) => {
+            // Reject before opening the port: silently ignoring RTS/DE
+            // direction control can leave the bus unable to transmit.
+            #[cfg(not(target_os = "linux"))]
+            if p.rs485.is_some() {
+                return Err(IoError::Connect(format!(
+                    "transport.rs485 requires Linux TIOCSRS485 and is not supported on {}; use a serial adapter with automatic RS485 direction control and omit transport.rs485, or run the RTU device on Linux",
+                    std::env::consts::OS
+                )));
+            }
             let builder = tokio_serial::new(&p.serial_device, p.baud_rate)
                 .data_bits(match p.data_bits {
                     ModbusDataBits::Five => SerialDataBits::Five,
@@ -317,22 +326,14 @@ async fn establish(
                     device = p.serial_device
                 ))
             })?;
+            #[cfg(target_os = "linux")]
             if let Some(rs485) = &p.rs485 {
-                #[cfg(target_os = "linux")]
                 apply_rs485_linux(&stream, rs485).map_err(|e| {
                     IoError::Connect(format!(
                         "enabling RS485 mode on {device}: {e}",
                         device = p.serial_device
                     ))
                 })?;
-                #[cfg(not(target_os = "linux"))]
-                {
-                    let _ = rs485;
-                    tracing::warn!(
-                        device = %p.serial_device,
-                        "rs485 config ignored: TIOCSRS485 is Linux-only"
-                    );
-                }
             }
             Ok(rtu::attach_slave(stream, Slave(slave_id)))
         }
@@ -464,10 +465,15 @@ fn annotate_rtu_connect_failure(transport: &ModbusTransport, err: IoError) -> Io
         || msg.contains("CRC")
         || msg.contains("Broken pipe");
     if rtu_without_rs485 && symptom {
+        let direction_hint = if cfg!(target_os = "linux") {
+            "set `transport.rs485` (Linux TIOCSRS485)"
+        } else {
+            "use an adapter with automatic direction control or move the RTU device to Linux; `transport.rs485` is not supported on this platform"
+        };
         return IoError::Transport(format!(
             "{msg} — the RTU port opened but no valid response came back. If your USB-485 \
              adapter is RTS-gated (its transmitter is driven by RTS/DE), the master never \
-             drives the bus in plain serial mode: set `transport.rs485` (Linux TIOCSRS485). \
+             drives the bus in plain serial mode: {direction_hint}. \
              Otherwise verify baud / parity / slave id / A-B polarity / common ground."
         ));
     }
@@ -1046,6 +1052,28 @@ mod tests {
         };
         assert!(m.contains("RTS-gated"), "hint missing: {m}");
         assert!(m.contains("transport.rs485"), "config pointer missing: {m}");
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[tokio::test]
+    async fn unsupported_rs485_is_rejected_before_opening_the_serial_port() {
+        let transport = rtu(Some(ModbusRs485 {
+            rts_on_send: true,
+            rx_during_tx: false,
+            delay_rts_before_send_ms: 0,
+            delay_rts_after_send_ms: 0,
+        }));
+        let error = establish(&transport, 1, Duration::from_secs(1))
+            .await
+            .err()
+            .expect("Linux RS485 settings must not be silently ignored");
+        let message = error.to_string();
+        assert!(
+            message.contains("transport.rs485 requires Linux"),
+            "{message}"
+        );
+        assert!(message.contains(std::env::consts::OS), "{message}");
+        assert!(!message.contains("opening serial port"), "{message}");
     }
 
     #[test]

@@ -18,8 +18,11 @@ The full "how to drive IA2" playbook is an
 **`.claude/skills/industrial-automation-skill/`** (canonical copy),
 mirrored for standard discovery at
 **`.agents/skills/industrial-automation-skill`** (symlink; needs a
-symlink-capable checkout — Windows: `core.symlinks=true` — otherwise
-fall back to the canonical `.claude/skills/` path). When doing
+symlink-capable checkout — on Windows, `core.symlinks=true` also needs
+Developer Mode or permission to create symlinks. Otherwise the Git
+placeholder is not discoverable: use the canonical `.claude/skills/`
+path, or `scripts/install-skill.ps1 -SkillOnly` to install real copies
+at both user discovery paths without elevation). When doing
 IEC 61131-3 / `cs` CLI / device-wiring / sim / deploy work, read that
 `SKILL.md` first and open its `references/*.md` on demand — do not
 preload them. If your harness auto-loaded the skill already, follow it;
@@ -81,9 +84,20 @@ directories.
 cargo fmt --all
 cargo clippy --workspace        # zero warnings expected
 cargo test  --workspace         # includes the sim e2e + deploy-script tests
-cargo build --release -p server -p ia2-cli -p ia2-runtime
+cargo build --release -p server -p ia2-cli -p ia2-runtime -p lsp-launcher
 pnpm --filter @cs/web build && pnpm --filter @cs/web test
 ```
+
+On native Windows, use `scripts/check-windows.ps1` (PowerShell 5.1):
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-windows.ps1`.
+It checks adaptation, formatting, Clippy (workspace warnings denied),
+workspace tests, four release binaries, and web build/tests. It builds
+`server.exe` before CLI simulation tests; a missing server is a failure,
+not a skipped test. `scripts/build-windows.ps1` builds explicit x64 MSVC
+release artifacts with a static CRT, without changing global Cargo config.
+`-AdaptationOnly` runs only the offline skill installation checks.
+Linux remote Bash execution tests still require Unix coverage. See
+`docs/windows.md` for platform scope and installed-artifact acceptance.
 
 `cargo test -p server` also regenerates `apps/web/src/types/generated/`
 (ts-rs, via the `TS_RS_EXPORT_DIR` in `.cargo/config.toml`). The
@@ -98,9 +112,15 @@ your local copies stay current; there is nothing to commit.
   several POUs (file ≠ declaration).
 - ironplc's debug section names only the FIRST PROGRAM instance;
   multi-program runs show later instances nameless in the Monitor.
-- The FB-library registry resolves `./library`, `--library-dir`,
-  `IA2_LIBRARY_DIR`, then `~/.local/share/ia2/library` (installed
-  layout via `scripts/install-skill.sh`).
+- The FB-library registry resolves `--library-dir`, `IA2_LIBRARY_DIR`,
+  `./library`, the executable's adjacent `../library`, then the legacy
+  `~/.local/share/ia2/library`. Windows installs at
+  `%LOCALAPPDATA%\IA2\library`; its launcher passes both library and web
+  paths explicitly. Keep projects outside the replaceable install tree.
+- Real EtherCAT/CANopen remain Linux-only; Windows engineering/simulation
+  is a separate claim. Windows RTU uses COM ports and rejects Linux
+  `rs485` direction-control settings. A Windows `.exe` is never a Linux
+  deployment payload: use a matching Linux ELF or the provisioned runtime.
 - Snapshot `bits` is the raw VM slot (REAL = IEEE-754 bits); decode
   with `ironplc_bridge::monitor::typed_value` — never re-parse display
   strings.
@@ -120,4 +140,4 @@ your local copies stay current; there is nothing to commit.
 | deploy/edge behaviour | `docs/edge-deploy.md` |
 | HMI schema/nodes | `docs/hmi-design.md` + skill `references/08-hmi.md` |
 | sim / alarms / history | skill `references/09-sim-alarms.md` |
-| agent onboarding (this file, skill discovery paths, skill metadata, installer) | README "Install it for your coding agent" + `scripts/install-skill.sh` header + `scripts/check-agent-adaptation.sh` |
+| agent onboarding (this file, skill discovery paths, skill metadata, installer) | README "Install it for your coding agent" + both installer headers + `scripts/check-agent-adaptation.sh` + `scripts/check-windows.ps1` |

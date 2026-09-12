@@ -33,6 +33,10 @@ rumqttc = "0.24"
 ironplc-bridge = { path = "../ironplc-bridge" }
 project = { path = "../project" }
 
+[target.'cfg(windows)'.dependencies]
+tokio-serial.workspace = true
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis"] }
+
 [dev-dependencies]
 rumqttd = "0.20.0"
 tempfile = "3"

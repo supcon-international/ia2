@@ -36,6 +36,28 @@ Contracts you can rely on (and must preserve when reporting):
 
 ## The one-paragraph version
 
+On native Windows, install from a checkout or extracted package with
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-skill.ps1`.
+Open **IA2 Terminal** for process-local PATH, or invoke
+`& "$env:LOCALAPPDATA\IA2\bin\cs.exe"` in PowerShell. Open **IA2 IDE** or
+run `& "$env:LOCALAPPDATA\IA2\IA2.ps1"` in a separate visible console;
+Ctrl+C stops that server. Do not use Bash `&` background syntax in
+PowerShell 5.1. Wrap workflows with
+`cs agent run --label "Build line" -- powershell.exe -NoProfile -File .\workflow.ps1`
+and check `$LASTEXITCODE` after each native command. Use UTF-8 files with
+`--from` instead of Bash heredocs. `-SkillOnly` installs real skill copies
+in both user discovery paths without requiring symlink privileges.
+
+Windows boundary: real EtherCAT/CANopen stay on Linux edges; Windows uses
+simulation for those buses. COM-based RTU rejects Linux-only
+`transport.rs485` direction control; use an automatic-direction adapter
+without that setting. Windows network/COM enumeration is inventory, not
+hardware connection proof. A Windows `.exe` is never a Linux edge runtime;
+deploy a matching Linux ELF or reuse the already provisioned runtime.
+Windows runtime is a foreground process, without Windows service or hard
+real-time support claims. Repository `docs/windows.md` defines the build,
+installation and native acceptance procedures.
+
 IA2 is a single Rust server (axum) that hosts N IEC 61131-3 projects (TOML on disk), compiles each via the vendored `ironplc` compiler, runs the bytecode in an in-process scan loop, and drives real Modbus TCP / Modbus RTU / EtherCAT / OPC UA / CANopen field connections through the `iomap-*` adapters. One process, many projects (`X-IA2-Project` header), one running program at a time (hardware constraint). The shared monitor layer gives BOTH the IDE server and the deployed edge runtime the same debug surface (pause/step/force/write), a 1 Hz historian, and an alarm engine over `alarms.toml`. The web UI runs in the browser; the `cs` CLI is a thin HTTP client — every command is one or two calls, and `cs api` reaches anything the GUI can.
 
 ## Core anti-patterns to call out immediately

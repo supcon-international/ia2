@@ -17,6 +17,9 @@
 #
 # This is the DEV-MACHINE installer. (For provisioning a Linux edge box, see
 # infra/install.sh — different thing.)
+# Native Windows: scripts/install-skill.ps1 installs the four .exe files,
+# built web UI, library and copied user skills without admin or symlinks.
+# See docs/windows.md; scripts/check-windows.ps1 is the native quality gate.
 #
 # Usage — run from a clone of the IA2 repo:
 #     git clone --recursive https://github.com/supcon-international/ia2

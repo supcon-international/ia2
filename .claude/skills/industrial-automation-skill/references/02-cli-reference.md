@@ -1,5 +1,16 @@
 # `cs` CLI reference
 
+Native Windows uses the same resource paths, flags, error bodies and exit
+codes. Open **IA2 Terminal** or invoke
+`& "$env:LOCALAPPDATA\IA2\bin\cs.exe"` in PowerShell. Project open accepts
+Windows drive paths, UNC paths and `~\Documents\...`; use quotes for
+spaces. On Windows, project filenames reject reserved device names
+and invalid trailing dots/spaces. Use UTF-8 files with `--from` rather than
+Bash heredocs. Session wrapper:
+`cs agent run --label "Build line" -- powershell.exe -NoProfile -File .\workflow.ps1`.
+Windows server startup, packages and hardware limits are documented in
+repository `docs/windows.md`; do not deploy a Windows runtime to Linux.
+
 The surface is bash-sized on purpose: **five meta-primitives** cover
 every resource (present and future), and a short list of **domain
 verbs** carries the semantics a generic verb shouldn't blur. If you
@@ -10,7 +21,12 @@ Global flags (valid on every command):
 
 - `--server URL` — default `http://127.0.0.1:3001`.
 - `--project NAME` — target one open project on a multi-project server
-  (adds `X-IA2-Project` to every request, no exceptions).
+  (adds UTF-8 percent-encoded `X-IA2-Project` and
+  `X-IA2-Project-Encoding: percent` to every request, no exceptions;
+  Chinese names work without manual encoding). Raw HTTP callers that omit
+  the encoding header retain literal legacy values (`a%20b` stays that
+  exact name). Invalid encoding or malformed values return 400 instead
+  of falling back to the active project.
 - `--json` — machine output. Commands whose output is inherently JSON
   (`get`, `api`, `runtime snapshot`, …) emit JSON regardless.
 
@@ -20,6 +36,11 @@ expectation failed) · `2` bad request — usage errors AND HTTP 4xx, with
 the server's reason printed verbatim on stderr · `≥3` infrastructure
 (server down, 5xx). A 422 like ``missing field `application` `` reaches
 you word-for-word — read stderr before retrying anything.
+
+Compiler diagnostics returned by `/api/check` and project validation
+always include `context` and `related` arrays; no entries means `[]`,
+not an omitted field. Clients can render an ordinary syntax error without
+guessing whether diagnostic details are present.
 
 Heartbeat rule: MUTATING commands announce to the IDE overlay
 (`set`, `rm`, `api` non-GET, `run`, `stop`, `deploy`, `runtime`

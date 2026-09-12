@@ -8,7 +8,9 @@
 //! the *connect* with a precise message instead of dribbling per-cycle
 //! `Transport` errors out of the PDI accessors later.
 
-use project::{EthercatChannel, EthercatGear, EthercatPdoDirection, EthercatSlave, GearMaster};
+use project::{EthercatChannel, EthercatPdoDirection, EthercatSlave};
+#[cfg(any(unix, test))]
+use project::{EthercatGear, GearMaster};
 
 use crate::SlaveDiscovery;
 
@@ -46,6 +48,7 @@ pub(crate) fn validate_channel_refs(
 /// Returns every mismatch joined into one message — wrong module *and*
 /// wrong position usually show up together, and seeing all of it beats
 /// fixing one line per restart.
+#[cfg(any(unix, test))]
 pub(crate) fn validate_identities(
     configured: &[EthercatSlave],
     discovered: &[SlaveDiscovery],
@@ -144,6 +147,7 @@ pub(crate) fn validate_pdi_ranges(
 /// them into the same post-discovery batch as the identity and PDI-range
 /// checks. Real mode only — sim stores gear parameters by name and has no
 /// cyclic gear PDI to overflow.
+#[cfg(any(unix, test))]
 pub(crate) fn validate_gear_offsets(
     gear: &[EthercatGear],
     discovered: &[SlaveDiscovery],
@@ -198,6 +202,7 @@ pub(crate) fn validate_gear_offsets(
 /// sub-byte offsets only for single-bit channels). Real mode only — sim
 /// mode stores values per name and never touches the bit packers, so
 /// legacy sim configs with odd shapes keep connecting.
+#[cfg(any(unix, test))]
 pub(crate) fn validate_channel_shapes(channels: &[EthercatChannel]) -> Result<(), String> {
     let mut problems: Vec<String> = Vec::new();
     for ch in channels {
@@ -228,6 +233,7 @@ pub(crate) fn validate_channel_shapes(channels: &[EthercatChannel]) -> Result<()
 /// Reject malformed `init_sdo` entries at connect, before the bus thread
 /// spawns: width must be one of the expedited-transfer sizes, and the
 /// value must fit that width (as either a signed or unsigned quantity).
+#[cfg(any(unix, test))]
 pub(crate) fn validate_init_sdo(slaves: &[EthercatSlave]) -> Result<(), String> {
     let mut problems: Vec<String> = Vec::new();
     for slave in slaves {

@@ -500,37 +500,13 @@ pub async fn deploy_to_edge(
     // otherwise embeds pax records the edge's GNU tar warns about once
     // per entry, drowning the deploy log.
     tar.args(host_tar_metadata_flags());
-    tar.arg("-C")
-        .arg(project_dir.parent().unwrap_or(project_dir))
-        .arg(
-            project_dir
-                .file_name()
-                .map(|n| n.to_owned())
-                .ok_or_else(|| DeployError::Pack("project dir has no name".into()))?,
-        );
-    if let Some(bin) = runtime_binary {
-        let bin = bin
-            .canonicalize()
-            .map_err(|e| DeployError::Pack(e.to_string()))?;
-        tar.arg("-C")
-            .arg(bin.parent().unwrap())
-            .arg(bin.file_name().unwrap());
-    }
-    let web_basename = match web_dist {
-        Some(dir) => {
-            let dir = dir
-                .canonicalize()
-                .map_err(|e| DeployError::Pack(e.to_string()))?;
-            let name = dir
-                .file_name()
-                .and_then(|s| s.to_str())
-                .map(str::to_string)
-                .ok_or_else(|| DeployError::Pack("web dist dir has no utf-8 name".into()))?;
-            tar.arg("-C").arg(dir.parent().unwrap()).arg(&name);
-            Some(name)
-        }
-        None => None,
-    };
+    let project_basename = append_tar_entry(&mut tar, project_dir)?;
+    let binary_basename = runtime_binary
+        .map(|path| append_tar_entry(&mut tar, path))
+        .transpose()?;
+    let web_basename = web_dist
+        .map(|path| append_tar_entry(&mut tar, path))
+        .transpose()?;
     tar.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut tar_child = tar.spawn().map_err(|e| DeployError::Pack(e.to_string()))?;
     let mut tar_stdout = tar_child
@@ -539,17 +515,9 @@ pub async fn deploy_to_edge(
         .ok_or_else(|| DeployError::Pack("tar stdout missing".into()))?;
 
     // ---- ssh remote script ----
-    let project_basename = project_dir
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| DeployError::Pack("project dir name not utf-8".into()))?;
-    let binary_basename = runtime_binary
-        .and_then(|p| p.file_name())
-        .and_then(|s| s.to_str())
-        .map(str::to_string);
     let script = remote_deploy_script(
         &edge.install_dir,
-        project_basename,
+        &project_basename,
         binary_basename.as_deref(),
         web_basename.as_deref(),
     );
@@ -631,7 +599,9 @@ pub async fn deploy_to_edge(
     else {
         return Err(DeployError::Remote(
             0,
-            format!("remote script succeeded but printed no VERSION= line — deploy state unknown\n{combined}"),
+            format!(
+                "remote script succeeded but printed no VERSION= line — deploy state unknown\n{combined}"
+            ),
         ));
     };
 
@@ -666,6 +636,49 @@ pub async fn deploy_to_edge(
         log: combined,
         warning,
     })
+}
+
+/// Each `-C` is absolute because tar retains the preceding entry's working
+/// directory. Convert Rust's Windows verbatim paths before giving them to
+/// the host tar; Windows' bundled bsdtar expects ordinary drive/UNC paths.
+fn append_tar_entry(cmd: &mut Command, path: &std::path::Path) -> Result<String, DeployError> {
+    let path = path
+        .canonicalize()
+        .map_err(|e| DeployError::Pack(format!("{}: {e}", path.display())))?;
+    let path = host_tool_path(&path);
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| DeployError::Pack(format!("{} has no UTF-8 name", path.display())))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| DeployError::Pack(format!("{} has no parent directory", path.display())))?;
+    cmd.arg("-C").arg(parent).arg(format!("./{name}"));
+    Ok(name.to_string())
+}
+
+fn host_tool_path(path: &std::path::Path) -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        use std::path::{Component, PathBuf, Prefix};
+        let mut components = path.components();
+        if let Some(Component::Prefix(prefix)) = components.next() {
+            let mut ordinary = match prefix.kind() {
+                Prefix::VerbatimDisk(drive) => PathBuf::from(format!("{}:", char::from(drive))),
+                Prefix::VerbatimUNC(server, share) => {
+                    let mut unc = std::ffi::OsString::from(r"\\");
+                    unc.push(server);
+                    unc.push(r"\");
+                    unc.push(share);
+                    PathBuf::from(unc)
+                }
+                _ => return path.to_path_buf(),
+            };
+            ordinary.push(components.as_path());
+            return ordinary;
+        }
+    }
+    path.to_path_buf()
 }
 
 /// Metadata-suppression flags for the host `tar`, probed once per
@@ -931,11 +944,93 @@ fn first_line(s: &str) -> &str {
 mod tests {
     use super::*;
 
+    /// Exercises the actual host tar, including Windows' bundled bsdtar,
+    /// with canonical paths, Unicode, spaces, and several `-C` switches.
+    #[tokio::test]
+    async fn host_tar_packs_project_binary_and_assets_from_distinct_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("工程 workspace").join("demo project");
+        let binary = tmp.path().join("Linux binary").join("ia2-runtime");
+        let web = tmp.path().join("web assets").join("dist");
+        std::fs::create_dir_all(project.join("pous")).unwrap();
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&web).unwrap();
+        std::fs::write(project.join("project.toml"), "name = \"demo\"\n").unwrap();
+        std::fs::write(project.join("pous/main.st"), "PROGRAM Main END_PROGRAM").unwrap();
+        std::fs::write(&binary, b"\x7fELFtest").unwrap();
+        std::fs::write(web.join("index.html"), "<html>IA2</html>").unwrap();
+
+        let mut tar = Command::new("tar");
+        tar.args(["-cf", "-"]).args(host_tar_metadata_flags());
+        assert_eq!(
+            append_tar_entry(&mut tar, &project).unwrap(),
+            "demo project"
+        );
+        assert_eq!(append_tar_entry(&mut tar, &binary).unwrap(), "ia2-runtime");
+        assert_eq!(append_tar_entry(&mut tar, &web).unwrap(), "dist");
+        let archive = tar.output().await.unwrap();
+        assert!(
+            archive.status.success(),
+            "host tar failed: {}",
+            String::from_utf8_lossy(&archive.stderr)
+        );
+
+        let extracted = tmp.path().join("extracted");
+        std::fs::create_dir(&extracted).unwrap();
+        let mut unpack = Command::new("tar")
+            .args(["-xf", "-", "-C"])
+            .arg(host_tool_path(&extracted))
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = unpack.stdin.take().unwrap();
+        stdin.write_all(&archive.stdout).await.unwrap();
+        drop(stdin);
+        let output = unpack.wait_with_output().await.unwrap();
+        assert!(
+            output.status.success(),
+            "host tar extraction failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(extracted.join("demo project/pous/main.st")).unwrap(),
+            "PROGRAM Main END_PROGRAM"
+        );
+        assert_eq!(
+            std::fs::read(extracted.join("ia2-runtime")).unwrap(),
+            b"\x7fELFtest"
+        );
+        assert_eq!(
+            std::fs::read_to_string(extracted.join("dist/index.html")).unwrap(),
+            "<html>IA2</html>"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn host_tool_path_converts_verbatim_drive_and_unc_paths() {
+        use std::path::{Path, PathBuf};
+        assert_eq!(
+            host_tool_path(Path::new(r"\\?\C:\工程 workspace\demo")),
+            PathBuf::from(r"C:\工程 workspace\demo")
+        );
+        assert_eq!(
+            host_tool_path(Path::new(r"\\?\UNC\server\share\工程 workspace\demo")),
+            PathBuf::from(r"\\server\share\工程 workspace\demo")
+        );
+        assert_eq!(
+            host_tool_path(Path::new(r"D:\work\demo")),
+            PathBuf::from(r"D:\work\demo")
+        );
+    }
+
     /// Hermetic end-to-end run of `remote_deploy_script` — the exact
     /// bytes we ssh to edges — under a local bash with a tar stream on
     /// stdin, against a tmpdir INSTALL_DIR. macOS `mv` lacks GNU's
     /// `-Tf`, so the test PATH carries a tiny shim that emulates the
     /// one invocation shape the script uses (replace a symlink).
+    #[cfg(unix)]
     fn run_deploy_script(
         install_dir: &std::path::Path,
         script: &str,
@@ -995,6 +1090,7 @@ mod tests {
         child.wait_with_output().unwrap()
     }
 
+    #[cfg(unix)]
     #[test]
     fn deploy_script_extracts_swaps_symlink_and_prints_version() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1047,6 +1143,7 @@ mod tests {
         assert_eq!(current, vdir, "current symlink points at the new version");
     }
 
+    #[cfg(unix)]
     #[test]
     fn deploy_script_fails_loudly_without_runtime_binary() {
         let tmp = tempfile::tempdir().unwrap();

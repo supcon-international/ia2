@@ -7,8 +7,6 @@ publish.workspace = true
 
 [dependencies]
 tokio.workspace = true
-ethercrab.workspace = true
-smol.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
@@ -17,3 +15,9 @@ async-trait.workspace = true
 iocore = { path = "../iocore" }
 project = { path = "../project" }
 esi = { path = "../esi" }
+
+# The real driver uses Unix raw sockets. Windows engineering stations
+# retain the simulator without pulling in EtherCrab's pcap dependency.
+[target.'cfg(unix)'.dependencies]
+ethercrab.workspace = true
+smol.workspace = true

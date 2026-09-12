@@ -3,6 +3,16 @@
 How to ship an IA2 project to a Linux edge box and use the IDE
 for online debugging against it.
 
+The engineering host may run native Windows: see [Windows setup](windows.md).
+The deployment target described here remains Linux (SSH + Bash + systemd).
+On Windows, ensure OpenSSH Client and `tar.exe` are on the server's PATH,
+and put SSH aliases in `%USERPROFILE%\.ssh\config`. A Windows
+`ia2-runtime.exe` is not deployable to Linux and is excluded from automatic
+payload discovery. Set `IA2_RUNTIME_BIN` to a Linux ELF matching the edge
+architecture, or reuse the runtime already provisioned on the edge.
+Running `ia2-runtime.exe` locally is a foreground development process;
+this flow does not install or manage a Windows service.
+
 ## What this is
 
 The IDE has three top-level concepts:

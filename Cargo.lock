@@ -2056,6 +2056,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "ironplc-bridge",
+ "percent-encoding",
  "predicates",
  "project",
  "serde",
@@ -2081,10 +2082,12 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-serial",
  "tokio-stream",
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4288,6 +4291,7 @@ dependencies = [
  "iomap-opcua",
  "ironplc-bridge",
  "parking_lot",
+ "percent-encoding",
  "project",
  "serde",
  "serde_json",

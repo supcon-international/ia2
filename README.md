@@ -44,12 +44,20 @@ Already have a clone and only want local agent discovery, with no build or netwo
 
 For repository work in Codex, open the **IA2 Git root** as the workspace, or launch with `codex --cd /path/to/ia2`. Codex discovers `AGENTS.md` and repository skills by walking from its current directory up to the Git root; launching from a parent folder that merely contains the nested `ia2` checkout will not load IA2's repository contract.
 
+**Native Windows 11 x64:** use `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-skill.ps1` from the clone. It installs `cs.exe`, `ia2-server.exe`, `lsp-launcher.exe`, `ia2-runtime.exe`, the built web IDE, the FB library and both user skill copies. No administrator privileges, symlinks or persistent PATH edits are needed. Open **IA2 IDE** or **IA2 Terminal** from the Start menu; the IDE runs in a visible console and stops with Ctrl+C. Add `-SkillOnly` for agent discovery alone. Prebuilt ZIPs use the same installer without a Rust/Node toolchain. See [Windows setup, native checks and packaging](docs/windows.md).
+
+The Windows entry point is [`scripts/install-skill.ps1`](scripts/install-skill.ps1).
+
+On macOS/Linux:
+
 1. **Start the server:** `ia2-server --bind 127.0.0.1:3001 &`
 2. **Restart your agent session** so it discovers the skill.
 
 Now just ask your agent to build a PLC program — it will author ST / LD / FBD / SFC, compile, wire Modbus / EtherCAT / OPC UA / CANopen I/O, run and debug the scan loop, and deploy to edge boxes, all through `cs`. Start with `cs --help` and the skill under `.claude/skills/industrial-automation-skill/`.
 
 ## What's in the box
+
+On Windows, engineering, simulation and TCP protocols run natively; real EtherCAT and CANopen remain on Linux edges. Windows RTU uses COM ports and an adapter that controls RS485 direction itself. Windows runtime runs as a foreground process; there is no Windows service installer or hard real-time scan-timing claim.
 
 | Component | Tech | Purpose |
 |---|---|---|
@@ -109,6 +117,8 @@ status/snapshot`) don't trigger the overlay — querying state isn't
 ## Quickstart
 
 ### Run the IDE
+
+On installed Windows, run `& "$env:LOCALAPPDATA\IA2\IA2.ps1"` in PowerShell. For source development, use the commands below in separate terminals; omit the Unix-only `. "$HOME/.cargo/env"` line and run `pnpm install --frozen-lockfile` once. Native acceptance is `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-windows.ps1`.
 
 ```bash
 # one-time
@@ -176,6 +186,8 @@ are global flags. Every command's `--help` explains when to call it and
 what to call next — written for agent readers.
 
 ## Project on disk
+
+On Windows, open **IA2 Terminal** for `cs` on the current process PATH, or call `& "$env:LOCALAPPDATA\IA2\bin\cs.exe"`. Replace Bash wrappers with `cs agent run --label "Build my line" -- powershell.exe -NoProfile -File .\workflow.ps1`; check `$LASTEXITCODE` after native commands in that script. Use UTF-8 input files with `--from` instead of Bash heredocs.
 
 ```
 ~/Documents/IA2/

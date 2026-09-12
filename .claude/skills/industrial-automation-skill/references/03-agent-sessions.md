@@ -42,6 +42,24 @@ Because `IA2_AGENT_SESSION` is in the child's env, every `cs` call inside the wr
 
 ## Practical shape for heredocs inside `cs agent run`
 
+On native Windows, use a PowerShell script file instead of a Bash heredoc:
+
+```powershell
+# workflow.ps1; cs is on PATH in IA2 Terminal.
+cs --project foo set pous/main.st --from .\main.st
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+cs --project foo run
+exit $LASTEXITCODE
+# From the calling terminal:
+cs agent run --label "Build foo" -- powershell.exe -NoProfile -File .\workflow.ps1
+```
+
+`$ErrorActionPreference = 'Stop'` alone does not check native exit codes
+in Windows PowerShell 5.1. Explicitly propagate `$LASTEXITCODE` so the
+session reports the workflow result honestly. If the wrapped executable
+cannot start, `cs agent run` closes its session and exits with
+infrastructure code 3; do not retry by leaving a manually entered session.
+
 Quoting gets fiddly when you nest a heredoc inside `bash -c '...'`. Two reliable patterns:
 
 **Pattern A — write a script file, run it (clearest for big workflows):**

@@ -13,6 +13,13 @@ serves a smaller subset on its own port — see `docs/edge-deploy.md`.
   `%2F`-encoded form decodes back to `/` inside the path param. E.g.,
   `GET /api/pous/pid_loops%2Ftemperature`.
 - All bodies are JSON unless noted. POU sources are `text/plain`.
+- Select an open project with `X-IA2-Project`. Clients send the UTF-8
+  project name as percent-encoded bytes plus `X-IA2-Project-Encoding: percent`
+  (for example, `demo%20line` selects `demo line`). Without the encoding
+  header, legacy values remain literal: `a%20b` selects the name `a%20b`.
+  An unsupported encoding or malformed encoded value returns HTTP 400;
+  it never silently falls back to the active project. The IDE and CLI
+  apply this encoding automatically, including Chinese project names.
 - Errors are HTTP status + a human-readable body. 4xx for client errors,
   5xx for server bugs.
 - Generated TypeScript types live under `apps/web/src/types/generated/` and
@@ -147,7 +154,7 @@ or cached governance. Absent optional iomap/alarms files still mean none.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/api/check` | Compile-check ONE source string (no project required). Body: `text/plain`. Returns `CheckDiagnostic[]`. | Fast feedback for editor squiggles
+| `POST` | `/api/check` | Compile-check ONE source string (no project required). Body: `text/plain`. Returns `CheckDiagnostic[]` for editor squiggles. `context` and `related` are always arrays, including `[]` when empty. |
 | `POST` | `/api/symbols?language=st\|ld\|fbd\|sfc` | Extract declared variables from one source string (any language; default `st`). Body: `text/plain`. Returns `VariableInfo[]`. | Backs the editor's binding picker
 | `POST` | `/api/run` | Compile the whole project + spawn the bridge. Body: `{}` or `RunRequest`. | Reads `tasks.toml` to decide what runs
 | `POST` | `/api/stop` | Stop the running program (cooperative; scan loop drains). |

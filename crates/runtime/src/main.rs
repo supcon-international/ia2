@@ -42,6 +42,9 @@ use tower_http::cors::CorsLayer;
 use tracing_subscriber::EnvFilter;
 
 mod northbound;
+mod system_info;
+
+use system_info::{collect_system_info, SystemInfo};
 
 const DEFAULT_BIND: &str = "127.0.0.1:13001";
 
@@ -941,69 +944,6 @@ async fn logs_stream(
 /// `cs get edges/<n>/scan` — the IDE authors PDO maps against the real bus.
 async fn discover(State(state): State<AppState>) -> Json<Vec<DeviceReport>> {
     Json(state.handle.device_reports())
-}
-
-#[derive(Serialize)]
-struct Nic {
-    name: String,
-    mac: String,
-    /// `up` / `down` / `unknown` from the kernel.
-    operstate: String,
-    /// Whether a link partner is detected (cable in + powered).
-    carrier: bool,
-}
-
-#[derive(Serialize)]
-struct SystemInfo {
-    arch: String,
-    os: String,
-    /// Network interfaces — pick one for an EtherCAT device's `nic`.
-    nics: Vec<Nic>,
-    /// Serial device paths — pick one for a Modbus RTU device.
-    serial_ports: Vec<String>,
-}
-
-/// Enumerate the edge's interfaces / serial ports / arch so the IDE can
-/// author device configs against real facts (which NIC has carrier for
-/// EtherCAT, which /dev/tty* exists for Modbus RTU) instead of guessing.
-/// Non-privileged: reads /sys/class/net and lists /dev.
-fn collect_system_info() -> SystemInfo {
-    let mut nics = Vec::new();
-    if let Ok(entries) = std::fs::read_dir("/sys/class/net") {
-        for e in entries.flatten() {
-            let name = e.file_name().to_string_lossy().to_string();
-            let p = e.path();
-            let read = |f: &str| std::fs::read_to_string(p.join(f)).unwrap_or_default();
-            nics.push(Nic {
-                mac: read("address").trim().to_string(),
-                operstate: read("operstate").trim().to_string(),
-                carrier: read("carrier").trim() == "1",
-                name,
-            });
-        }
-    }
-    nics.sort_by(|a, b| a.name.cmp(&b.name));
-
-    let mut serial_ports = Vec::new();
-    if let Ok(entries) = std::fs::read_dir("/dev") {
-        for e in entries.flatten() {
-            let n = e.file_name().to_string_lossy().to_string();
-            // USB-serial adapters (the common Modbus RTU case) + macOS
-            // callout devices. `ttyS*` (builtin UARTs) are skipped — they
-            // exist as nodes even with no hardware and just add noise.
-            if n.starts_with("ttyUSB") || n.starts_with("ttyACM") || n.starts_with("cu.") {
-                serial_ports.push(format!("/dev/{n}"));
-            }
-        }
-    }
-    serial_ports.sort();
-
-    SystemInfo {
-        arch: std::env::consts::ARCH.to_string(),
-        os: std::env::consts::OS.to_string(),
-        nics,
-        serial_ports,
-    }
 }
 
 /// Edge interfaces / serial ports / arch — powers `cs get edges/<n>/system`.
