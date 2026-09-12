@@ -2624,6 +2624,7 @@ mod tests {
                     address: 0,
                     data_type: ModbusDataType::U16,
                     word_order: ModbusWordOrder::HiLo,
+                    access: Default::default(),
                 }],
             }),
         };

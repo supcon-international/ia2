@@ -11,7 +11,9 @@ use std::time::Duration;
 
 use iocore::{ChannelValue, IoDevice};
 use iomap_modbus::{run_demo_slave, DemoSlave, ModbusDevice};
-use project::{ModbusChannel, ModbusChannelKind, ModbusConfig, ModbusTcpParams, ModbusTransport};
+use project::{
+    ModbusAccess, ModbusChannel, ModbusChannelKind, ModbusConfig, ModbusTcpParams, ModbusTransport,
+};
 use tokio::net::TcpListener;
 
 /// Bind the demo slave to `127.0.0.1:0` (kernel-assigned port), spawn the
@@ -57,6 +59,7 @@ fn config_with_mixed_channels(port: u16) -> ModbusConfig {
                 address: 0,
                 data_type: Default::default(),
                 word_order: Default::default(),
+                access: Default::default(),
             },
             ModbusChannel {
                 name: "valve".into(),
@@ -64,6 +67,7 @@ fn config_with_mixed_channels(port: u16) -> ModbusConfig {
                 address: 1,
                 data_type: Default::default(),
                 word_order: Default::default(),
+                access: Default::default(),
             },
             ModbusChannel {
                 name: "speed_setpoint".into(),
@@ -71,6 +75,7 @@ fn config_with_mixed_channels(port: u16) -> ModbusConfig {
                 address: 10,
                 data_type: Default::default(),
                 word_order: Default::default(),
+                access: Default::default(),
             },
             ModbusChannel {
                 name: "estop_in".into(),
@@ -78,6 +83,7 @@ fn config_with_mixed_channels(port: u16) -> ModbusConfig {
                 address: 0,
                 data_type: Default::default(),
                 word_order: Default::default(),
+                access: Default::default(),
             },
             ModbusChannel {
                 name: "temp_in".into(),
@@ -85,6 +91,18 @@ fn config_with_mixed_channels(port: u16) -> ModbusConfig {
                 address: 0,
                 data_type: Default::default(),
                 word_order: Default::default(),
+                access: Default::default(),
+            },
+            // The NX6 shape: a MEASUREMENT the coupler maps into a
+            // holding register. Writable kind, read-only truth — the
+            // access field is what keeps failsafe (and writes) off it.
+            ModbusChannel {
+                name: "level_meas".into(),
+                kind: ModbusChannelKind::HoldingRegister,
+                address: 20,
+                data_type: Default::default(),
+                word_order: Default::default(),
+                access: ModbusAccess::Read,
             },
         ],
     }
@@ -128,6 +146,13 @@ async fn enter_failsafe_zeroes_coils_and_holding_registers_on_the_wire() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 
+    // Preload the read-only measurement register on the slave side, as
+    // if the coupler were publishing a live value there.
+    {
+        let regs = slave.holding_registers();
+        regs.lock().unwrap()[20] = 4321;
+    }
+
     // Trip failsafe — this is the path the scan loop will take when the
     // watchdog fires or on graceful shutdown.
     dev.enter_failsafe().await.unwrap();
@@ -143,5 +168,34 @@ async fn enter_failsafe_zeroes_coils_and_holding_registers_on_the_wire() {
         let regs = slave.holding_registers();
         let guard = regs.lock().unwrap();
         assert_eq!(guard[10], 0, "register 10 must be zeroed by failsafe");
+        assert_eq!(
+            guard[20], 4321,
+            "access=read holding register must NOT be written by failsafe \
+             (no write command may reach it at all)"
+        );
     }
+}
+
+/// Write permission is enforced on the NORMAL write path too, not just
+/// failsafe: a read-marked holding register rejects writes up front.
+#[tokio::test]
+async fn write_to_access_read_channel_is_rejected() {
+    let (port, slave) = spawn_slave().await;
+    let cfg = config_with_mixed_channels(port);
+    let mut dev = ModbusDevice::connect("test".into(), &cfg).await.unwrap();
+
+    {
+        let regs = slave.holding_registers();
+        regs.lock().unwrap()[20] = 777;
+    }
+    // Queued write path is fire-and-forget; the rejection surfaces as
+    // the value never reaching the wire.
+    let _ = dev.write_channel("level_meas", ChannelValue::U16(1)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let regs = slave.holding_registers();
+    assert_eq!(
+        regs.lock().unwrap()[20],
+        777,
+        "write to an access=read channel must never reach the wire"
+    );
 }

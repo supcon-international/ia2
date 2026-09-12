@@ -560,6 +560,29 @@ pub struct ModbusChannel {
     /// `lo_hi` = swapped ("CDAB", common on Chinese instruments).
     #[serde(default)]
     pub word_order: ModbusWordOrder,
+    /// Whether this register may be WRITTEN. Couplers routinely map
+    /// read-only measurements into HOLDING registers (the NX6 maps DI
+    /// and AI there); writing those draws an Illegal-data-address
+    /// exception. `read` excludes the channel from output bindings AND
+    /// from the shutdown/trip failsafe sweep.
+    #[serde(default)]
+    pub access: ModbusAccess,
+}
+
+/// Modbus write permission. The default is `write` — the OPPOSITE of
+/// the OPC UA/CANopen default — for two deliberate reasons: on a field
+/// bus IA2 owns the outputs, so the failsafe sweep zeroing every
+/// writable channel is the safe default (a valve must close on stop);
+/// and existing device files predate this field, so the default must
+/// preserve their failsafe coverage. Mark measurement registers
+/// `access = "read"` — `validate_iomap` nudges you where it can tell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum ModbusAccess {
+    #[default]
+    Write,
+    Read,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, TS)]
@@ -601,6 +624,29 @@ pub enum ModbusChannelKind {
     DiscreteInput,
     HoldingRegister,
     InputRegister,
+}
+
+#[cfg(test)]
+mod modbus_access_compat_tests {
+    use super::*;
+
+    /// Device files predate the access field: absent must mean `write`
+    /// so their failsafe coverage is unchanged.
+    #[test]
+    fn legacy_channel_without_access_defaults_to_write() {
+        let ch: ModbusChannel =
+            toml::from_str("name = \"ao1\"\nkind = \"holding_register\"\naddress = 193\n").unwrap();
+        assert_eq!(ch.access, ModbusAccess::Write);
+    }
+
+    #[test]
+    fn access_read_parses() {
+        let ch: ModbusChannel = toml::from_str(
+            "name = \"ai1\"\nkind = \"holding_register\"\naddress = 64\naccess = \"read\"\n",
+        )
+        .unwrap();
+        assert_eq!(ch.access, ModbusAccess::Read);
+    }
 }
 
 #[cfg(test)]

@@ -38,8 +38,8 @@ use iocore::{ChannelValue, HealthTracker, HealthTransition, IoDevice, IoError};
 #[cfg(target_os = "linux")]
 use project::ModbusRs485;
 use project::{
-    ModbusChannel, ModbusChannelKind, ModbusConfig, ModbusDataBits, ModbusDataType, ModbusParity,
-    ModbusStopBits, ModbusTransport, ModbusWordOrder,
+    ModbusAccess, ModbusChannel, ModbusChannelKind, ModbusConfig, ModbusDataBits, ModbusDataType,
+    ModbusParity, ModbusStopBits, ModbusTransport, ModbusWordOrder,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio_modbus::client::{rtu, tcp, Context, Reader, Writer};
@@ -651,6 +651,15 @@ async fn do_write(
     value: ChannelValue,
     timeout: Duration,
 ) -> Result<(), XferError> {
+    if ch.access == ModbusAccess::Read {
+        // A holding register can carry a read-only measurement (the NX6
+        // maps DI/AI there); the register kind alone does not grant
+        // write permission.
+        return Err(XferError::Protocol(format!(
+            "channel '{}' is configured access=read",
+            ch.name
+        )));
+    }
     match ch.kind {
         ModbusChannelKind::Coil => {
             let b = value.to_i32() != 0;
@@ -683,10 +692,11 @@ async fn do_failsafe(
 ) -> Result<(), XferError> {
     let mut first_err: Option<XferError> = None;
     for ch in channels.iter().filter(|c| {
-        matches!(
-            c.kind,
-            ModbusChannelKind::Coil | ModbusChannelKind::HoldingRegister
-        )
+        c.access == ModbusAccess::Write
+            && matches!(
+                c.kind,
+                ModbusChannelKind::Coil | ModbusChannelKind::HoldingRegister
+            )
     }) {
         let zero = match ch.data_type {
             ModbusDataType::F32 => ChannelValue::Real(0.0),
@@ -1090,6 +1100,7 @@ mod tests {
             address: addr,
             data_type: dt,
             word_order: wo,
+            access: Default::default(),
         }
     }
 
@@ -1225,6 +1236,7 @@ mod tests {
                 address: 64,
                 data_type: ModbusDataType::U16,
                 word_order: ModbusWordOrder::HiLo,
+                access: Default::default(),
             },
         );
         (

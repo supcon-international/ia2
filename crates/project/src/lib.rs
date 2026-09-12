@@ -46,7 +46,7 @@ pub use types::{
     AlarmCondition, AlarmConfig, AlarmDef, AlarmSeverity, CanopenAccess, CanopenChannel,
     CanopenConfig, CanopenDataType, CanopenTransport, Device, Direction, Edge, EthercatBringup,
     EthercatChannel, EthercatConfig, EthercatDataType, EthercatDcSync, EthercatGear,
-    EthercatPdoDirection, EthercatSdoInit, EthercatSlave, GearMaster, IoMap, Mapping,
+    EthercatPdoDirection, EthercatSdoInit, EthercatSlave, GearMaster, IoMap, Mapping, ModbusAccess,
     ModbusChannel, ModbusChannelKind, ModbusConfig, ModbusDataBits, ModbusDataType, ModbusParity,
     ModbusRs485, ModbusRtuParams, ModbusStopBits, ModbusTcpParams, ModbusTransport,
     ModbusWordOrder, MqttNorthbound, NorthboundConfig, OpcuaAccess, OpcuaAuth, OpcuaChannel,

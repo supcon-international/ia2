@@ -73,6 +73,7 @@ Register channels take two optional fields (default `u16` / `hi_lo`):
 ```
 - `data_type`: `u16` (def) | `i16` | `u32` | `i32` | `f32`. 32-bit types span **two consecutive registers** from `address`.
 - `word_order` (32-bit only): `hi_lo` = ABCD (spec default) | `lo_hi` = CDAB (common on Chinese instruments). Float reads as garbage (1.18e-38) → flip this first. Coils/discretes ignore both.
+- `access`: `write` (default) | `read`. The register KIND alone does not grant write permission — couplers routinely map read-only measurements into HOLDING registers (the NX6 maps its DI word and AIs there; see `examples/nx6_modbus`). Mark those `"read"`: writes to them are rejected up front, and the shutdown/trip **failsafe sweep** (which zeroes every writable coil + holding register — deliberate on a field bus, unlike OPC UA's opt-in) skips them instead of drawing an Illegal-data-address exception. `validate_iomap` errors on an Output binding to an `access="read"` channel and warns when an input-only writable register is still marked writable.
 
 The adapter merges channels into contiguous **read spans** per function code and bulk-refreshes a mirror every `poll_interval_ms` — a few reads, not one per channel (scales to hundreds). Writes queue so the single RTU connection is never concurrent; a failed poll holds last-known and retries.
 

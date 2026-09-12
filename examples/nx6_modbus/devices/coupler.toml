@@ -42,6 +42,7 @@ name = "di_word"
 kind = "holding_register"
 address = 0                      # 40001 [verified]
 data_type = "u16"
+access = "read"                  # measurement in a holding register — keeps failsafe/writes off it
 
 # ---- AD4V-D: 4 analog voltage inputs (0-10V ↔ 0-32000) ----
 [[channels]]
@@ -49,21 +50,25 @@ name = "ai1"
 kind = "holding_register"
 address = 64                     # 40065 = terminal A [verified: valve 0-10V feedback]
 data_type = "i16"
+access = "read"
 [[channels]]
 name = "ai2"
 kind = "holding_register"
 address = 65
 data_type = "i16"
+access = "read"
 [[channels]]
 name = "ai3"
 kind = "holding_register"
 address = 66
 data_type = "i16"
+access = "read"
 [[channels]]
 name = "ai4"
 kind = "holding_register"
 address = 67
 data_type = "i16"
+access = "read"
 
 # ---- OD16N: 16 digital outputs (one 16-bit word) ----
 # ⚠️ Measured at addr 192 (40193) — not 40033 as the manual's table claims!

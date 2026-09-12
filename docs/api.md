@@ -78,6 +78,12 @@ read-only device-template catalog used to pre-fill devices from a bus scan.
 
 ## Devices
 
+Modbus channel `access` is `read` or `write` (default `write` for existing
+configs). `read` blocks both normal writes and failsafe zeroing, including
+holding registers used for measurements. `input_register` and
+`discrete_input` are always read-only regardless of `access`. Mark input-only
+holding registers/coils explicitly `read`; register kind alone is not permission.
+
 | Method | Path | Purpose |
 |---|---|---|
 | `POST` | `/api/devices` | Create a device. Body: `CreateDeviceRequest { name, protocol }`. |

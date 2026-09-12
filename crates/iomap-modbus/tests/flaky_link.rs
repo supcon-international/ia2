@@ -114,6 +114,7 @@ async fn link_loss_flips_unhealthy_and_reconnect_recovers() {
                 address: 0,
                 data_type: ModbusDataType::U16,
                 word_order: ModbusWordOrder::HiLo,
+                access: Default::default(),
             },
             ModbusChannel {
                 name: "sp".into(),
@@ -121,6 +122,7 @@ async fn link_loss_flips_unhealthy_and_reconnect_recovers() {
                 address: 5,
                 data_type: ModbusDataType::U16,
                 word_order: ModbusWordOrder::HiLo,
+                access: Default::default(),
             },
         ],
     };

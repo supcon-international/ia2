@@ -15,6 +15,7 @@ import type { ModbusParity } from "@/types/generated/ModbusParity"
 import type { ModbusStopBits } from "@/types/generated/ModbusStopBits"
 import type { ModbusTransport } from "@/types/generated/ModbusTransport"
 import type { ModbusWordOrder } from "@/types/generated/ModbusWordOrder"
+import type { ModbusAccess } from "@/types/generated/ModbusAccess"
 
 import {
   DeviceSaveBar,
@@ -48,6 +49,7 @@ export function ModbusDeviceEditor({ device, onSave, link }: DeviceEditorProps) 
           address: 0,
           data_type: "u16",
           word_order: "hi_lo",
+          access: "write",
         },
       ],
     })
@@ -123,6 +125,7 @@ export function ModbusDeviceEditor({ device, onSave, link }: DeviceEditorProps) 
                   >
                     Words
                   </th>
+                  <th className="px-2 py-1.5 text-left">Access</th>
                   <th className="px-2 py-1.5 text-left">Linked to</th>
                   <th className="px-2 py-1.5"></th>
                 </tr>
@@ -191,6 +194,25 @@ export function ModbusDeviceEditor({ device, onSave, link }: DeviceEditorProps) 
                         options={[
                           { value: "hi_lo", label: "hi-lo (ABCD)" },
                           { value: "lo_hi", label: "lo-hi (CDAB)" },
+                        ]}
+                        className="h-8 w-24"
+                      />
+                    </td>
+                    <td className="px-2 py-1.5">
+                      <EnumSelect<ModbusAccess>
+                        value={
+                          ch.kind === "discrete_input" || ch.kind === "input_register"
+                            ? "read"
+                            : ch.access ?? "write"
+                        }
+                        onValueChange={(v) => setChannel(i, { access: v })}
+                        disabled={
+                          ch.kind === "discrete_input" ||
+                          ch.kind === "input_register"
+                        }
+                        options={[
+                          { value: "write", label: "write" },
+                          { value: "read", label: "read-only" },
                         ]}
                         className="h-8 w-24"
                       />

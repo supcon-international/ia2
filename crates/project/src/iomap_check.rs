@@ -21,8 +21,8 @@ use ts_rs::TS;
 
 use crate::types::{
     CanopenAccess, CanopenDataType, CanopenTransport, Device, Direction, EthercatDataType,
-    EthercatPdoDirection, IoMap, Mapping, ModbusChannelKind, OpcuaAccess, OpcuaDataType,
-    ProtocolConfig,
+    EthercatPdoDirection, IoMap, Mapping, ModbusAccess, ModbusChannelKind, OpcuaAccess,
+    OpcuaDataType, ProtocolConfig,
 };
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
@@ -113,6 +113,7 @@ pub fn validate_iomap(iomap: &IoMap, devices: &[Device]) -> Vec<IomapIssue> {
 
     check_duplicate_writers(&iomap.mappings, &mut issues);
     check_output_fanout(&iomap.mappings, &mut issues);
+    check_input_only_writable_modbus(&iomap.mappings, devices, &mut issues);
 
     // Cross-mapping checks append out of row order; normalize so callers
     // (and snapshots in tests) see a deterministic, row-ordered report.
@@ -222,6 +223,23 @@ fn check_channel(index: usize, mapping: &Mapping, device: &Device, issues: &mut 
                         ch = mapping.channel,
                         dev = mapping.device,
                         kind = ch.kind
+                    ),
+                ));
+            }
+            // The register kind alone does not grant write permission:
+            // access=read marks a measurement living in a writable kind
+            // (mirrors the OPC UA output-needs-access=write rule).
+            if mapping.direction == Direction::Output && writable && ch.access == ModbusAccess::Read
+            {
+                issues.push(error(
+                    index,
+                    format!(
+                        "mapping '{app}.{var}': channel '{ch}' on Modbus device '{dev}' has \
+                         access=read; Output mappings need access=write",
+                        app = mapping.application,
+                        var = mapping.variable,
+                        ch = mapping.channel,
+                        dev = mapping.device
                     ),
                 ));
             }
@@ -340,6 +358,58 @@ fn check_channel(index: usize, mapping: &Mapping, device: &Device, issues: &mut 
 /// scan loop would apply them in mapping order every cycle, so the last
 /// writer silently wins. Every involved row gets the error so the UI can
 /// highlight the whole conflict set.
+/// Rule 7 (Modbus migration nudge): a writable-kind channel
+/// (Coil/HoldingRegister) that is bound ONLY as Input and still carries
+/// the default `access = write` is almost certainly a measurement the
+/// coupler mapped into a holding register — the failsafe sweep will try
+/// to zero it (Illegal-data-address on real couplers). Warn, don't
+/// error: an output readback bound as Input is legitimate, but then an
+/// Output binding for the same channel exists and suppresses this rule.
+fn check_input_only_writable_modbus(
+    mappings: &[Mapping],
+    devices: &[Device],
+    issues: &mut Vec<IomapIssue>,
+) {
+    let mut has_output: HashMap<(&str, &str), bool> = HashMap::new();
+    for m in mappings {
+        let e = has_output
+            .entry((m.device.as_str(), m.channel.as_str()))
+            .or_insert(false);
+        *e |= m.direction == Direction::Output;
+    }
+    for (index, m) in mappings.iter().enumerate() {
+        if m.direction != Direction::Input || has_output[&(m.device.as_str(), m.channel.as_str())] {
+            continue;
+        }
+        let Some(device) = devices.iter().find(|d| d.name == m.device) else {
+            continue;
+        };
+        let ProtocolConfig::Modbus(cfg) = &device.config else {
+            continue;
+        };
+        let Some(ch) = cfg.channels.iter().find(|c| c.name == m.channel) else {
+            continue;
+        };
+        if ch.access == ModbusAccess::Write
+            && matches!(
+                ch.kind,
+                ModbusChannelKind::Coil | ModbusChannelKind::HoldingRegister
+            )
+        {
+            issues.push(warning(
+                index,
+                format!(
+                    "channel '{ch}' on Modbus device '{dev}' is only read (Input) but still \
+                     marked access=write — the shutdown failsafe will write zeros to it; if it \
+                     is a measurement register, set access = \"read\"",
+                    ch = m.channel,
+                    dev = m.device
+                ),
+            ));
+        }
+    }
+}
+
 fn check_duplicate_writers(mappings: &[Mapping], issues: &mut Vec<IomapIssue>) {
     let mut writers: HashMap<(&str, &str), Vec<usize>> = HashMap::new();
     for (index, m) in mappings.iter().enumerate() {
@@ -426,6 +496,13 @@ mod tests {
             address,
             data_type: ModbusDataType::U16,
             word_order: ModbusWordOrder::HiLo,
+            access: Default::default(),
+        };
+        // A measurement the coupler maps into a HOLDING register — the
+        // shape behind the access field (writable kind, read-only truth).
+        let hr_meas = ModbusChannel {
+            access: ModbusAccess::Read,
+            ..ch("hr_meas", ModbusChannelKind::HoldingRegister, 20)
         };
         Device {
             name: name.into(),
@@ -443,6 +520,7 @@ mod tests {
                     ch("di_estop", ModbusChannelKind::DiscreteInput, 0),
                     ch("hr_setpoint", ModbusChannelKind::HoldingRegister, 10),
                     ch("ir_temp", ModbusChannelKind::InputRegister, 0),
+                    hr_meas,
                 ],
             }),
         }
@@ -725,7 +803,11 @@ mod tests {
             mapping("c", Direction::Input, "plc", "hr_setpoint"),
             mapping("d", Direction::Input, "plc", "ir_temp"),
         ]);
-        assert!(validate_iomap(&map, &devices).is_empty());
+        let issues = validate_iomap(&map, &devices);
+        // Readable on every kind: no errors. But the two writable-kind
+        // channels bound ONLY as Input get the rule-7 failsafe nudge.
+        assert!(errors(&issues).is_empty(), "{issues:?}");
+        assert_eq!(warnings(&issues).len(), 2, "{issues:?}");
     }
 
     #[test]
@@ -966,6 +1048,51 @@ mod tests {
     }
 
     // ---- aggregation ------------------------------------------------------
+
+    // ---- access field (writable kind ≠ write permission) -----------------
+
+    #[test]
+    fn output_on_access_read_holding_is_an_error() {
+        let devices = vec![modbus_device("plc")];
+        let map = iomap(vec![mapping("sp", Direction::Output, "plc", "hr_meas")]);
+        let issues = validate_iomap(&map, &devices);
+        assert_eq!(errors(&issues).len(), 1, "{issues:?}");
+        assert!(issues[0].message.contains("access=read"), "{issues:?}");
+    }
+
+    #[test]
+    fn input_only_writable_holding_warns_about_failsafe() {
+        let devices = vec![modbus_device("plc")];
+        let map = iomap(vec![mapping(
+            "temp",
+            Direction::Input,
+            "plc",
+            "hr_setpoint",
+        )]);
+        let issues = validate_iomap(&map, &devices);
+        let w = warnings(&issues);
+        assert_eq!(w.len(), 1, "{issues:?}");
+        assert!(w[0].message.contains("failsafe"), "{issues:?}");
+    }
+
+    #[test]
+    fn input_on_access_read_holding_is_clean() {
+        let devices = vec![modbus_device("plc")];
+        let map = iomap(vec![mapping("temp", Direction::Input, "plc", "hr_meas")]);
+        assert!(validate_iomap(&map, &devices).is_empty());
+    }
+
+    #[test]
+    fn output_readback_pair_does_not_warn() {
+        let devices = vec![modbus_device("plc")];
+        let map = iomap(vec![
+            mapping("sp", Direction::Output, "plc", "hr_setpoint"),
+            mapping("sp_fb", Direction::Input, "plc", "hr_setpoint"),
+        ]);
+        let issues = validate_iomap(&map, &devices);
+        assert!(warnings(&issues).is_empty(), "{issues:?}");
+        assert!(errors(&issues).is_empty(), "{issues:?}");
+    }
 
     #[test]
     fn issues_come_back_sorted_by_mapping_index() {
