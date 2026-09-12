@@ -222,7 +222,7 @@ export function TrendChart({ series, height = 110, windowS }: Props) {
           <svg
             viewBox={`0 0 ${W} ${plotH}`}
             preserveAspectRatio="none"
-            className="absolute inset-x-0 block"
+            className="absolute inset-x-0 block w-full"
             style={{ top: PAD_TOP, height: plotH }}
           >
             {/* Baseline + Y gridlines */}
